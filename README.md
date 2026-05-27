@@ -4,6 +4,10 @@
 
 形状上是 [target-running](https://gitlab.com/genemedi/target-running) 的孪生项目，但内容生成是从 PDF 素材出发、输出端是公众号草稿。
 
+> **想接手开发的看这两份文档**：
+> - 📖 [`docs/PROJECT.md`](docs/PROJECT.md) — 项目背景、架构、约定、gotchas（**先读这个**）
+> - ✅ [`docs/TODO.md`](docs/TODO.md) — Phase 1-4 待办，每项带文件位置 + 验收标准
+
 ## 项目阶段
 
 | Phase | 范围 | 状态 |
