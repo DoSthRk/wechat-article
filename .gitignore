@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# 环境 & 密钥
+.env
+.env.local
+runtime/
+*.db
+*.db-journal
+
+# 用户素材（PDF / 图片库；schema 文件保留为 *.example.yaml）
+inputs/pdfs/*
+!inputs/pdfs/.gitkeep
+inputs/image_pools/*
+!inputs/image_pools/.gitkeep
+inputs/jobs.yaml          # 实际任务清单不入库，只入库 jobs.example.yaml
+inputs/style_templates/*.yaml
+!inputs/style_templates/*.example.yaml
+inputs/products/*.yaml
+!inputs/products/*.example.yaml
+
+# 产物
+outputs/
+logs/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

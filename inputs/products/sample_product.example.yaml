@@ -1,0 +1,40 @@
+# 示范产品 YAML
+# 用法：复制为 sample_product.yaml（去掉 .example），在 jobs.yaml 里写 product: sample_product
+
+name: TarMart 重组蛋白定制服务
+one_liner: 为药物发现团队提供从靶点到验证-grade 重组蛋白的一站式定制
+
+selling_points:
+  - 序列验证：所有蛋白经 Sanger 测序确认无突变
+  - 内毒素 < 1 EU/ug，适合细胞实验
+  - HEK293 真核表达，保留天然糖基化修饰
+  - 6-8 周交付，比传统重组蛋白服务快 30%
+
+specs:
+  纯度: "> 95% (SDS-PAGE)"
+  内毒素: "< 1 EU/ug"
+  表达系统: "HEK293 / CHO / E. coli 可选"
+  起订量: "100 ug"
+  交付周期: "6-8 weeks"
+
+use_cases:
+  - 抗体筛选实验对照品
+  - 细胞水平活性验证
+  - 结构生物学晶体筛选
+  - Pharmacological assay 标准品
+
+target_users:
+  - 创新药企靶点验证团队
+  - 高校 / 研究所课题组
+  - CRO 早期发现部门
+
+forbidden_claims:
+  - 不要宣称"已通过临床试验验证"
+  - 不要宣称"国家药监局批准"
+  - 不要给出未实测的活性数据
+  - 不要承诺"100% 成功表达"
+  - 不要与具体竞品对比说"优于 XX 公司"
+
+extra:
+  category: 生命科学试剂
+  contact_hint: "文末可一句话提到 tarmart.net 可询价"

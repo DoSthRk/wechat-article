@@ -1,0 +1,45 @@
+# 示范风格模板：学术综述型
+# 用法：复制为 academic_review.yaml（去掉 .example），在 jobs.yaml 里写 template: academic_review
+
+name: 学术综述型
+description: 学术中立、数据驱动、克制叙述的行业综述风格
+
+target_length:
+  min: 1500
+  max: 2500
+
+section_count:
+  min: 4
+  max: 6
+
+tone_keywords:
+  - 学术中立
+  - 数据驱动
+  - 克制
+  - 严谨
+  - 长期视角
+
+forbidden_phrases:
+  - 业界领先
+  - 首选品牌
+  - 市场第一
+  - 最佳选择
+  - 行业标杆
+  - 立刻购买
+  - 限时优惠
+  - 重磅推出
+  - 震撼发布
+  - 颠覆性
+  - 划时代
+
+opening_guidance: |
+  用一个反常识的事实、一组关键数据、或一个尚未解决的关键问题起手。
+  避免"近年来 XX 领域蓬勃发展"这种万能开头。
+
+closing_guidance: |
+  结尾给出 1-2 条对从业者的具体启示（不是"让我们拭目以待"那种空话）。
+  可以指出下一阶段还需要解决的 1-2 个具体问题。
+
+extra:
+  paragraph_max_chars: 80   # 每段建议字数上限
+  banned_punctuation: "！？！？"   # 全文最多 2 个感叹号 / 问号

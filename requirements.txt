@@ -1,0 +1,23 @@
+# wechat-article Phase 0 依赖
+# 装：python3.11 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# LLM 调用
+openai>=1.40.0
+
+# 环境 / 配置
+python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# PDF 抽取
+pdfplumber>=0.11.0
+
+# Markdown 转 HTML
+markdown>=3.6
+
+# DB（继承自 target-running 的栈，方便后续 dashboard 复用）
+SQLAlchemy>=2.0.0
+PyMySQL>=1.1.0          # 若用 MySQL；用 SQLite 可不装但留着方便
+
+# Phase 4 Dashboard 再启用
+# Flask>=3.0.0
+# flask-sock>=0.7.0

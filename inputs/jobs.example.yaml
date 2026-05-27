@@ -1,0 +1,17 @@
+# 任务清单 —— 复制为 jobs.yaml（去掉 .example）后实际跑
+#
+# 每个 job 是一个 (pdf, template, product, image_pool) 组合。
+# Phase 0 image_pool 字段可省（无图）。
+
+jobs:
+  - job_id: "demo-2026-05-27-001"
+    pdf: "inputs/pdfs/sample.pdf"
+    template: "academic_review"        # 对应 inputs/style_templates/academic_review.yaml
+    product: "sample_product"          # 对应 inputs/products/sample_product.yaml
+    title_hint: "讨论基因治疗递送系统的工程化挑战（可改）"   # 可选
+
+  # 可以继续加更多 job：
+  # - job_id: "demo-2026-05-27-002"
+  #   pdf: "inputs/pdfs/paper2.pdf"
+  #   template: "case_study"
+  #   product: "sample_product"
