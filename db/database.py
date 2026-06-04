@@ -1,13 +1,11 @@
-"""wechat-article Phase 0 最小 DB。
+"""wechat-article DB（状态跟踪 + 落盘路径，绝不存大文本）。
 
-只 4 张表，够 Phase 0 跟踪状态用：
 - tasks：一次 batch_processor 运行 = 一个 task
 - jobs：jobs.yaml 里每个条目，对应一个 task 下的一个 job
-- articles：每个 job 最多对应 1 篇文章（生成产物文件路径 + 元数据）
-- article_drafts：发布到公众号草稿后的 media_id / url / publish_status
-
-Phase 1 加 candidate_articles；Phase 2 加 tonal_qa 字段；Phase 4 dashboard
-直接用现有表，无需再加。
+- articles：每个 job 一篇基准文章（平台无关；生成产物文件路径 + 元数据）
+- article_drafts：早期 1:1 公众号草稿（被 distributions 取代，过渡期保留）
+- distributions：Phase 2 —— 一篇基准文章扇出到 N 个平台的落地实例
+  （platform × account × lang 唯一；承载组装产物路径 + 平台发布状态）
 """
 from __future__ import annotations
 
@@ -89,6 +87,7 @@ class Job(Base):
     task = relationship("Task", back_populates="jobs")
     article = relationship("Article", back_populates="job", uselist=False, cascade="all, delete-orphan")
     draft = relationship("ArticleDraft", back_populates="job", uselist=False, cascade="all, delete-orphan")
+    distributions = relationship("Distribution", back_populates="job", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("task_id", "job_id", name="uq_task_job"),
@@ -176,11 +175,61 @@ class ArticleDraft(Base):
         }
 
 
+class Distribution(Base):
+    """一篇基准文章扇出到某平台的落地实例（1 article : N distribution）。
+
+    ``platform × account × lang`` 唯一。承载组装后产物路径 + 平台发布状态 + 平台标识。
+    取代早期 1:1 的 ``article_drafts``（公众号是其中 platform=wechat 的特例）。
+    """
+    __tablename__ = "distributions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_pk = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    platform = Column(String(32), nullable=False, comment="wechat / blog / linkedin")
+    account = Column(String(64), default="", nullable=False, comment="平台内账户：aav / immune / ...")
+    lang = Column(String(16), default="zh", nullable=False, comment="语言：zh / en / ...")
+    assembled_dir = Column(String(512), comment="组装成品（正文 + 产品模块）落盘目录")
+    publish_status = Column(
+        String(16), default="pending", nullable=False,
+        comment="pending/publishing/published/blocked/failed",
+    )
+    wechat_media_id = Column(String(128), comment="公众号草稿 media_id（重发 PATCH 用）")
+    wechat_url = Column(String(512), comment="公众号草稿预览 URL")
+    external_url = Column(String(512), comment="blog / 外链投放 URL")
+    publish_error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    job = relationship("Job", back_populates="distributions")
+
+    __table_args__ = (
+        UniqueConstraint("job_pk", "platform", "account", "lang", name="uq_distribution_target"),
+        Index("ix_distributions_status", "publish_status"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "job_pk": self.job_pk,
+            "platform": self.platform,
+            "account": self.account,
+            "lang": self.lang,
+            "assembled_dir": self.assembled_dir,
+            "publish_status": self.publish_status,
+            "wechat_media_id": self.wechat_media_id,
+            "wechat_url": self.wechat_url,
+            "external_url": self.external_url,
+            "publish_error": self.publish_error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # ----------------- Manager -----------------
 
 class DatabaseManager:
-    def __init__(self) -> None:
-        self.engine = create_engine(DATABASE_URL, echo=False, future=True)
+    def __init__(self, database_url: Optional[str] = None) -> None:
+        url = database_url or DATABASE_URL
+        self.engine = create_engine(url, echo=False, future=True)
         self.SessionLocal = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
         Path(DEFAULT_SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=self.engine)
@@ -296,6 +345,68 @@ class DatabaseManager:
         session = self.get_session()
         try:
             return session.query(ArticleDraft).filter(ArticleDraft.job_pk == job_pk).first()
+        finally:
+            session.close()
+
+    # ---- distribution（1 article : N 平台投放）----
+
+    def upsert_distribution(
+        self, job_pk: int, platform: str,
+        account: str = "", lang: str = "zh", **fields: Any,
+    ) -> Distribution:
+        """按 (job_pk, platform, account, lang) upsert 一个投放实例。"""
+        session = self.get_session()
+        try:
+            d = (
+                session.query(Distribution)
+                .filter(
+                    Distribution.job_pk == job_pk,
+                    Distribution.platform == platform,
+                    Distribution.account == account,
+                    Distribution.lang == lang,
+                )
+                .first()
+            )
+            if not d:
+                d = Distribution(job_pk=job_pk, platform=platform, account=account, lang=lang, **fields)
+                session.add(d)
+            else:
+                for k, v in fields.items():
+                    if hasattr(d, k):
+                        setattr(d, k, v)
+            session.commit()
+            session.refresh(d)
+            return d
+        finally:
+            session.close()
+
+    def get_distribution(
+        self, job_pk: int, platform: str, account: str = "", lang: str = "zh",
+    ) -> Optional[Distribution]:
+        session = self.get_session()
+        try:
+            return (
+                session.query(Distribution)
+                .filter(
+                    Distribution.job_pk == job_pk,
+                    Distribution.platform == platform,
+                    Distribution.account == account,
+                    Distribution.lang == lang,
+                )
+                .first()
+            )
+        finally:
+            session.close()
+
+    def list_distributions(self, job_pk: int) -> List[Distribution]:
+        session = self.get_session()
+        try:
+            return (
+                session.query(Distribution)
+                .filter(Distribution.job_pk == job_pk)
+                .order_by(Distribution.id)
+                .all()
+            )
         finally:
             session.close()
 
