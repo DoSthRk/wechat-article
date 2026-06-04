@@ -40,5 +40,22 @@ class TestLineLoader(unittest.TestCase):
                 load_line_by_id(d, "nope")
 
 
+class TestCommittedLineConfigs(unittest.TestCase):
+    """加载真实提交进仓库的 line 配置，确保不坏。"""
+    LINES_DIR = str(Path(__file__).resolve().parent.parent / "inputs" / "lines")
+
+    def test_aav(self):
+        line = load_line_by_id(self.LINES_DIR, "aav")
+        self.assertEqual(line.template, "aav_academic_soft_intro")
+        self.assertEqual(line.product, "purprox_aaveasy_spin_columns")
+        self.assertEqual(line.prompt_overlay, "aav")
+
+    def test_solidex(self):
+        line = load_line_by_id(self.LINES_DIR, "solidex")
+        self.assertEqual(line.template, "oncology_wechat_pop_sci")
+        self.assertEqual(line.product, "solidex_pan_t_cell_iso_kit")
+        self.assertEqual(line.prompt_overlay, "solidex")
+
+
 if __name__ == "__main__":
     unittest.main()

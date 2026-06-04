@@ -16,9 +16,10 @@ jobs:
     image_pool: "aav_sample"                   # 配图来自 PDF（Phase 1 用）
     title_hint: "从论文的机制发现切入，解读 AAV 工艺启示（可改）"
 
-  # Solidex 线示例（待 P1' 推进到 solidex 时启用，需先建 prompts/lines/solidex.md + inputs/lines/solidex.yaml）：
-  # - job_id: "solidex-demo-001"
-  #   line: "solidex"
-  #   pdf: "inputs/pdfs/solidex-sample.pdf"
-  #   template: "oncology_wechat_pop_sci"
-  #   product: "solidex_pan_t_cell_iso_kit"
+  - job_id: "solidex-demo-001"
+    line: "solidex"
+    pdf: "inputs/pdfs/solidex-sample.pdf"
+    template: "oncology_wechat_pop_sci"        # inputs/style_templates/oncology_wechat_pop_sci.yaml
+    product: "solidex_pan_t_cell_iso_kit"      # inputs/products/solidex_pan_t_cell_iso_kit.yaml
+    image_pool: "solidex_sample"
+    title_hint: "从复发/难治淋巴瘤的治疗困境切入，解读双抗机制（可改）"

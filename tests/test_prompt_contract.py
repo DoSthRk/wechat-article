@@ -72,6 +72,11 @@ class TestBasePromptFiles(unittest.TestCase):
         overlay = (_PROMPTS / "lines" / "aav.md").read_text(encoding="utf-8")
         self.assertIn("AAV", overlay)
 
+    def test_solidex_overlay_exists(self):
+        overlay = (_PROMPTS / "lines" / "solidex.md").read_text(encoding="utf-8")
+        self.assertIn("Solidex", overlay)
+        self.assertIn("T 细胞", overlay)
+
 
 if __name__ == "__main__":
     unittest.main()

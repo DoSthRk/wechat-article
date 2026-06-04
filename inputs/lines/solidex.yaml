@@ -1,0 +1,15 @@
+# Solidex 内容线配置（字段说明见 inputs/lines/aav.yaml）
+#
+# 方案 B：正文纯科普，结尾一句自然点名下面 product 指定的固定产品（人工选品，AI 只措辞）。
+
+line_id: solidex
+name: Solidex 肿瘤免疫研究线
+description: 肿瘤免疫 / T 细胞 / 双特异性抗体科普；正文纯科普、结尾点名 SOLIDEX Pan-T 分选试剂盒。
+template: oncology_wechat_pop_sci           # inputs/style_templates/oncology_wechat_pop_sci.yaml
+product: solidex_pan_t_cell_iso_kit         # inputs/products/solidex_pan_t_cell_iso_kit.yaml
+prompt_overlay: solidex                      # prompts/lines/solidex.md
+audience: 医学生、科研人员、血液肿瘤与肿瘤免疫方向从业者
+status: active
+extra:
+  product_line: SOLIDEX
+  wechat_account: immune                     # 投放层（P4）：免疫客公众号
