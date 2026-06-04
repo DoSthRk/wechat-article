@@ -1,7 +1,11 @@
-"""产品信息加载器 —— wechat-article Phase 0。
+"""产品信息加载器 —— wechat-article。
 
-每篇文章软广一个产品。产品 YAML 描述：名称 / 卖点 / 规格 / 适用场景 / 忌讳描述。
-prompt 时被渲染成一个"产品信息块"喂给 LLM，让它在文中自然融入而不是硬塞。
+每条内容线绑定一个固定产品（人工选品）。产品 YAML 描述：名称 / 卖点 / 规格 /
+适用场景 / 合规红线 / 结尾融入角度（closing_hint）。
+
+方案 B 下，生成正文时**只用** ``name`` + ``closing_hint`` + ``forbidden_claims``
+（结尾一段点名），不再把整块产品信息喂进正文。完整产品信息（卖点 / 规格）留给
+投放层的产品模块（P3）复用；``to_prompt_block()`` 因此保留。
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ class Product:
     use_cases: List[str]        # 典型应用场景
     target_users: List[str]     # 目标用户画像
     forbidden_claims: List[str] # 不能说的话（夸张/虚假/合规风险）
+    closing_hint: str = ""      # 方案 B：结尾点名该产品时的融入角度（喂给 AI 措辞）
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_prompt_block(self) -> str:
@@ -103,6 +108,7 @@ def load_product(product_path: str) -> Product:
             use_cases=list(raw.get("use_cases") or []),
             target_users=list(raw.get("target_users") or []),
             forbidden_claims=list(raw.get("forbidden_claims") or []),
+            closing_hint=str(raw.get("closing_hint") or ""),
             extra=dict(raw.get("extra") or {}),
         )
     except (TypeError, ValueError) as exc:

@@ -11,6 +11,7 @@ jobs:
     pdf: inputs/pdfs/foo.pdf      # 必填，PDF 路径（相对项目根或绝对）
     template: academic_review     # 必填，对应 inputs/style_templates/{id}.yaml
     product: product_a            # 必填，对应 inputs/products/{id}.yaml
+    line: aav                     # 可选，内容线 id（aav / solidex）；决定 prompts/lines/{line}.md 写作侧重
     image_pool: gene_therapy      # Phase 1 用；Phase 0 可省
     title_hint: "可选的标题提示"   # 可省，给 LLM 一个起标题的方向
 ```
@@ -39,6 +40,7 @@ class Job:
     pdf: str
     template: str
     product: str
+    line: Optional[str] = None      # 内容线 id（aav / solidex）；决定写作侧重 overlay
     image_pool: Optional[str] = None
     title_hint: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -100,6 +102,7 @@ def load_jobs(jobs_yaml_path: str, project_root: Optional[str] = None) -> List[J
                 pdf=pdf_abs,
                 template=template,
                 product=product,
+                line=(str(item.get("line")).strip() if item.get("line") else None),
                 image_pool=(item.get("image_pool") or None),
                 title_hint=(item.get("title_hint") or None),
                 extra=dict(item.get("extra") or {}),

@@ -1,0 +1,16 @@
+# AAV 内容线配置
+#
+# line 是一等概念：一条内容线 = {写作侧重(prompt overlay) + 默认模板 + 固定产品}。
+# 方案 B：正文纯科普，结尾一句自然点名下面 product 指定的固定产品（人工选品，AI 只措辞）。
+
+line_id: aav
+name: AAV 工艺智库线
+description: AAV / 基因递送 / 病毒载体工艺的高维科普；正文纯科普、结尾点名 PurProX 纯化离心柱。
+template: aav_academic_soft_intro          # inputs/style_templates/aav_academic_soft_intro.yaml
+product: purprox_aaveasy_spin_columns      # inputs/products/purprox_aaveasy_spin_columns.yaml
+prompt_overlay: aav                         # prompts/lines/aav.md
+audience: 病毒载体、基因治疗、工艺开发（CMC / process development）从业者
+status: active
+extra:
+  product_line: AAV
+  wechat_account: aav                       # 投放层（P4）：AAV 公众号

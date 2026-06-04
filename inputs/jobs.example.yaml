@@ -1,17 +1,24 @@
 # 任务清单 —— 复制为 jobs.yaml（去掉 .example）后实际跑
 #
-# 每个 job 是一个 (pdf, template, product, image_pool) 组合。
-# Phase 0 image_pool 字段可省（无图）。
+# 每个 job = 一篇文章：
+#   line     ：内容线 id（aav / solidex），决定写作侧重 prompts/lines/{line}.md
+#   pdf      ：核心素材 PDF（事实地基；图也只从 PDF 抽）
+#   template ：风格模板 inputs/style_templates/{id}.yaml
+#   product  ：固定产品 inputs/products/{id}.yaml —— 方案 B：正文纯科普，结尾一句点名它（人工选品）
+#   title_hint：可选，给个起标题方向（标题里不要出现产品名）
 
 jobs:
-  - job_id: "demo-2026-05-27-001"
-    pdf: "inputs/pdfs/sample.pdf"
-    template: "academic_review"        # 对应 inputs/style_templates/academic_review.yaml
-    product: "sample_product"          # 对应 inputs/products/sample_product.yaml
-    title_hint: "讨论基因治疗递送系统的工程化挑战（可改）"   # 可选
+  - job_id: "aav-demo-001"
+    line: "aav"
+    pdf: "inputs/pdfs/aav-sample.pdf"
+    template: "aav_academic_soft_intro"        # inputs/style_templates/aav_academic_soft_intro.yaml
+    product: "purprox_aaveasy_spin_columns"    # inputs/products/purprox_aaveasy_spin_columns.yaml
+    image_pool: "aav_sample"                   # 配图来自 PDF（Phase 1 用）
+    title_hint: "从论文的机制发现切入，解读 AAV 工艺启示（可改）"
 
-  # 可以继续加更多 job：
-  # - job_id: "demo-2026-05-27-002"
-  #   pdf: "inputs/pdfs/paper2.pdf"
-  #   template: "case_study"
-  #   product: "sample_product"
+  # Solidex 线示例（待 P1' 推进到 solidex 时启用，需先建 prompts/lines/solidex.md + inputs/lines/solidex.yaml）：
+  # - job_id: "solidex-demo-001"
+  #   line: "solidex"
+  #   pdf: "inputs/pdfs/solidex-sample.pdf"
+  #   template: "oncology_wechat_pop_sci"
+  #   product: "solidex_pan_t_cell_iso_kit"
