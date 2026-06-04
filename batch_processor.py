@@ -1,22 +1,20 @@
-"""wechat-article Phase 0 主入口。
+"""wechat-article 主入口 —— generate / distribute 两阶段。
+
+阶段（``--stage``）：
+    generate  ：jobs.yaml → 逐 job 生成基准正文（方案 B）→ 落盘 + 写 articles 表
+    distribute：逐 job 取基准正文 → 投放到平台 distribution（当前只接公众号 wechat；
+                blog / linkedin 是 Phase 4）。account 从 line 配置的 wechat_account 取。
+    all       ：先 generate 再 distribute（默认）
+
+内容与投放解耦：一篇基准文章（article）可扇出到多个 distribution（platform × account × lang）。
+当前 distribute 只实现公众号单平台；产品模块组装（Phase 3）、多平台（Phase 4）后续接入。
 
 用法：
-    python batch_processor.py
-    python batch_processor.py --jobs inputs/jobs.yaml --task my-batch-001
-    python batch_processor.py --only 2026-05-27-001   # 只跑指定 job_id
-
-流程（极简，单线）：
-    load jobs.yaml
-    → 写库（tasks / jobs）
-    → 逐个 job：
-        ArticleAnalyzer.analyze() → markdown
-        落盘 outputs/jobs/{job_id}/article.{md,html}
-        wechat_html.markdown_to_wechat_html() → wechat HTML
-        WeChatClient.create_draft 或 update_draft → media_id
-        更新 articles / article_drafts 表
-    打印汇总
-
-Phase 0 不做：图片占位符替换、tonal QA、多路、dashboard。
+    python batch_processor.py                       # generate + distribute
+    python batch_processor.py --stage generate      # 只生成
+    python batch_processor.py --stage distribute    # 只投放（需先 generate）
+    python batch_processor.py --dry-run             # 生成但不投放
+    python batch_processor.py --only <job_id>
 """
 from __future__ import annotations
 
@@ -24,7 +22,6 @@ import argparse
 import json
 import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -34,33 +31,39 @@ from dotenv import load_dotenv
 # 让 utils / core / db 都能 from-import
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.main import AnalysisResult, ArticleAnalyzer
+from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
 from utils.job_loader import Job, load_jobs
+from utils.line_loader import LineLoadError, load_line_by_id
 from utils.logger import setup_logger
 from utils.wechat_client import WeChatAPIError, WeChatClient
-from utils.wechat_html import (
-    extract_title_and_digest,
-    markdown_to_wechat_html,
-)
+from utils.wechat_html import extract_title_and_digest, markdown_to_wechat_html
 
 load_dotenv()
 logger = setup_logger("batch_processor")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_JOBS_YAML = str(PROJECT_ROOT / "inputs" / "jobs.yaml")
+LINES_DIR = str(PROJECT_ROOT / "inputs" / "lines")
+
+WECHAT_PLATFORM = "wechat"
+DEFAULT_LANG = "zh"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="wechat-article batch processor (Phase 0)")
+    parser = argparse.ArgumentParser(description="wechat-article batch processor")
     parser.add_argument("--jobs", default=DEFAULT_JOBS_YAML, help="jobs.yaml 路径")
     parser.add_argument(
         "--task",
         default=f"wechat-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         help="task 名（DB 里用）",
     )
+    parser.add_argument(
+        "--stage", choices=["generate", "distribute", "all"], default="all",
+        help="generate=只生成 / distribute=只投放 / all=两者（默认）",
+    )
     parser.add_argument("--only", action="append", help="只跑指定 job_id（可多次传）")
-    parser.add_argument("--dry-run", action="store_true", help="跑生成，不发布到公众号")
+    parser.add_argument("--dry-run", action="store_true", help="生成但不投放（distribute 跳过）")
     parser.add_argument(
         "--placeholder-author",
         default=os.getenv("DEFAULT_AUTHOR", "TarMart"),
@@ -71,10 +74,16 @@ def main() -> int:
         default=os.getenv("DEFAULT_THUMB_MEDIA_ID", ""),
         help=(
             "公众号草稿要求 thumb_media_id 非空（封面图素材 id）。"
-            "Phase 0 没图片管线，必须手动准备一张永久素材并填 .env DEFAULT_THUMB_MEDIA_ID 或传 --placeholder-thumb-media。"
+            "图片管线落地前需手动准备一张永久素材并填 .env DEFAULT_THUMB_MEDIA_ID。"
         ),
     )
     args = parser.parse_args()
+
+    do_generate = args.stage in ("generate", "all")
+    do_distribute = args.stage in ("distribute", "all") and not args.dry_run
+    if not do_generate and not do_distribute:
+        logger.warning("nothing to do (stage=%s dry_run=%s)", args.stage, args.dry_run)
+        return 0
 
     # 加载 + 入库 jobs
     try:
@@ -89,30 +98,34 @@ def main() -> int:
         return 2
 
     db = get_db_manager()
-    task = db.get_or_create_task(args.task, description="Phase 0 single-line batch")
-    logger.info("task=%s (id=%d) will run %d/%d jobs", task.task_name, task.id, len(selected), len(all_jobs))
+    task = db.get_or_create_task(args.task, description="two-stage batch")
+    logger.info(
+        "task=%s (id=%d) stage=%s will run %d/%d jobs",
+        task.task_name, task.id, args.stage, len(selected), len(all_jobs),
+    )
 
     for j in selected:
+        # 只 upsert 配置，不强制 status（避免 distribute 阶段把已生成的 job 打回 pending）
         db.upsert_job(
             task.id, j.job_id,
             pdf_path=j.pdf, template_id=j.template, product_id=j.product,
             image_pool=j.image_pool, title_hint=j.title_hint,
-            status=JobStatus.PENDING,
         )
 
-    # 实例化执行体
-    try:
-        analyzer = ArticleAnalyzer()
-    except Exception as exc:
-        logger.error("ArticleAnalyzer init failed: %s", exc)
-        return 3
+    analyzer: Optional[ArticleAnalyzer] = None
+    if do_generate:
+        try:
+            analyzer = ArticleAnalyzer()
+        except Exception as exc:
+            logger.error("ArticleAnalyzer init failed: %s", exc)
+            return 3
 
     wechat_client: Optional[WeChatClient] = None
-    if not args.dry_run:
+    if do_distribute:
         if not args.placeholder_thumb_media:
             logger.error(
                 "no DEFAULT_THUMB_MEDIA_ID / --placeholder-thumb-media; "
-                "Phase 0 needs a manually uploaded cover image. Use --dry-run to skip publish."
+                "公众号草稿需要封面素材。用 --dry-run 或 --stage generate 跳过投放。"
             )
             return 3
         try:
@@ -121,11 +134,10 @@ def main() -> int:
             logger.error("WeChatClient init failed: %s", exc)
             return 3
 
-    # 主循环
     success = 0
     failed = 0
     for j in selected:
-        ok = _run_one_job(db, task.id, j, analyzer, wechat_client, args)
+        ok = _run_one_job(db, task.id, j, analyzer, wechat_client, args, do_generate, do_distribute)
         if ok:
             success += 1
         else:
@@ -144,23 +156,35 @@ def _filter_jobs(jobs: List[Job], only: Optional[List[str]]) -> List[Job]:
 
 def _run_one_job(
     db, task_id: int, job: Job,
-    analyzer: ArticleAnalyzer,
+    analyzer: Optional[ArticleAnalyzer],
     wechat_client: Optional[WeChatClient],
     args: argparse.Namespace,
+    do_generate: bool,
+    do_distribute: bool,
 ) -> bool:
-    job_row = db.upsert_job(task_id, job.job_id)
-    job_pk = job_row.id
+    job_pk = db.upsert_job(task_id, job.job_id).id
 
+    if do_generate:
+        if analyzer is None or not _generate_one(db, job_pk, job, analyzer):
+            return False
+
+    if do_distribute:
+        if wechat_client is None:
+            return True
+        return _distribute_one(db, job_pk, job, wechat_client, args)
+
+    return True
+
+
+def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
+    """生成阶段：方案 B 出基准正文 → 落盘 → 写 articles 表。"""
     db.update_job_status(job_pk, JobStatus.GENERATING)
-
-    # 1. 生成 markdown
     result = analyzer.analyze(job)
     if not result.success:
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=result.error_message)
         logger.error("[%s] generate failed: %s", job.job_id, result.error_message)
         return False
 
-    # 2. 落盘
     out_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "article.md").write_text(result.markdown, encoding="utf-8")
@@ -169,7 +193,7 @@ def _run_one_job(
     (out_dir / "article.html").write_text(html, encoding="utf-8")
     (out_dir / "meta.json").write_text(
         json.dumps({
-            "job_id": job.job_id, "title": title, "digest": digest,
+            "job_id": job.job_id, "line": job.line, "title": title, "digest": digest,
             "model": result.model, "tokens": result.total_tokens,
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
@@ -193,37 +217,71 @@ def _run_one_job(
         "[%s] generated: title=%s len=%d tokens=%d",
         job.job_id, (title or "?")[:40], len(result.markdown), result.total_tokens,
     )
+    return True
 
-    # 3. 发布到草稿（除非 --dry-run）
-    if args.dry_run or wechat_client is None:
-        logger.info("[%s] dry-run, skip publish", job.job_id)
-        return True
+
+def _distribute_one(
+    db, job_pk: int, job: Job,
+    wechat_client: WeChatClient,
+    args: argparse.Namespace,
+) -> bool:
+    """投放阶段：取基准正文 → 公众号草稿（同 distribution 已有 media_id 则走 PATCH）。"""
+    article = db.get_article(job_pk)
+    if not article or not article.content_dir:
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message="distribute: no article, run --stage generate first")
+        logger.error("[%s] distribute: 还没生成基准正文", job.job_id)
+        return False
+    html_path = Path(article.content_dir) / "article.html"
+    if not html_path.exists():
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: missing {html_path}")
+        logger.error("[%s] distribute: 缺 article.html (%s)", job.job_id, html_path)
+        return False
+    html = html_path.read_text(encoding="utf-8")
+    account = _resolve_wechat_account(job)
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
-    existing = db.get_draft(job_pk)
-    article_payload = _build_article_payload(
-        title=title or job.title_hint or job.job_id,
-        digest=digest, content_html=html,
+    existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
+    payload = _build_article_payload(
+        title=article.title or job.title_hint or job.job_id,
+        digest=article.digest or "", content_html=html,
         author=args.placeholder_author,
         thumb_media_id=args.placeholder_thumb_media,
     )
     try:
         if existing and existing.wechat_media_id:
-            wechat_client.update_draft(existing.wechat_media_id, 0, article_payload)
+            wechat_client.update_draft(existing.wechat_media_id, 0, payload)
             media_id = existing.wechat_media_id
-            logger.info("[%s] PATCH draft media_id=%s", job.job_id, media_id)
+            logger.info("[%s] PATCH wechat/%s media_id=%s", job.job_id, account, media_id)
         else:
-            media_id = wechat_client.create_draft([article_payload])
-            logger.info("[%s] POST draft media_id=%s", job.job_id, media_id)
+            media_id = wechat_client.create_draft([payload])
+            logger.info("[%s] POST wechat/%s media_id=%s", job.job_id, account, media_id)
     except WeChatAPIError as exc:
-        db.upsert_draft(job_pk, publish_status="failed", publish_error=str(exc))
+        db.upsert_distribution(
+            job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
+            publish_status="failed", publish_error=str(exc), assembled_dir=article.content_dir,
+        )
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"publish: {exc}")
         logger.error("[%s] publish failed: %s", job.job_id, exc)
         return False
 
-    db.upsert_draft(job_pk, wechat_media_id=media_id, publish_status="published", publish_error=None)
+    db.upsert_distribution(
+        job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
+        wechat_media_id=media_id, publish_status="published", publish_error=None,
+        assembled_dir=article.content_dir,
+    )
     db.update_job_status(job_pk, JobStatus.PUBLISHED)
     return True
+
+
+def _resolve_wechat_account(job: Job) -> str:
+    """从 line 配置取该线对应的公众号账户（extra.wechat_account）；取不到回 default。"""
+    if not job.line:
+        return "default"
+    try:
+        line = load_line_by_id(LINES_DIR, job.line)
+    except LineLoadError:
+        return "default"
+    return str((line.extra or {}).get("wechat_account") or "default")
 
 
 def _build_article_payload(
