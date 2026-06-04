@@ -1,545 +1,392 @@
-# TODO：wechat-article Phase 1-4 待办
+# TODO：wechat-article 路线图（两线 × 三平台 · 内容/投放解耦）
 
-> 配套阅读：`docs/PROJECT.md`（项目背景 + 架构 + 约定）。本文档是可执行任务清单，每项带验收标准。
+> 配套阅读：`docs/PROJECT.md`（项目背景 + 架构 + 约定 + gotchas）。本文档是可执行任务清单。
+>
+> ⚠️ 本路线图已按**目标架构**重排，替换了早期"单线 / 单公众号 / AI 软广"那版。
+> 当前代码 = Phase 0 骨架，正按 Phase 1 起重构。
 
 ## 阶段路线图
 
 ```
-Phase 0 (已完成 ✅) ── 端到端骨架：1 PDF → 1 LLM → 1 markdown → 1 草稿
+Phase 0 (已完成 ✅) ── 端到端骨架：1 PDF → 1 LLM → 1 markdown → 1 公众号草稿
+   │                  （但产品模型是 AI 软广、DB 是 1:1，将在下面被改写）
+   ▼
+Phase 1 (内容层重构) ── 双线 + 去 AI 选品 + 软广方案 B + 提示词基底/差异拆分
    │
-   ├─→ Phase 1 (图片管线) ─────┐
-   │                          │
-   ├─→ Phase 2 (调性自审) ─────┼─→ Phase 4 (Dashboard) ← 最后做
-   │                          │
-   └─→ Phase 3 (多模型 + QA) ──┘
+   ▼
+Phase 2 (数据模型解耦) ── line/article/distribution(1:N) + generate/distribute 两阶段
+   │
+   ├─→ Phase 3 (产品模块组装 line×platform) ──┐
+   ├─→ Phase 4 (多平台投放 adapter) ──────────┤
+   ├─→ Phase 5 (AI 翻译阶段，移植) ───────────┼─→ Phase 7 (Dashboard) ← 最后做
+   │                                          │
+   └─→ Phase 6 (质量安全网) ──────────────────┘
 
-Phase 1/2/3 之间无强依赖，可独立推进；Phase 4 需要前面三阶段的字段已落库。
+依赖：Phase 1 → 2 是硬前置；3/4/5/6 在 2 之后相对独立可并行；7 需要前面字段已落库。
 ```
 
 ## 通用注意事项
 
-- 修改前先读 `docs/PROJECT.md` 的第 6 节（约定）和第 7 节（gotchas）
-- 跨阶段改 DB schema 时**用 ALTER TABLE 平滑迁移**（参考 target-running 的 `_ensure_translation_columns` 模式）
-- 涉及公众号 API 的改动**先在 dev 公众号上测**，别直接打生产订阅号
-- 改完跑 `python -m pytest tests/ -q` 确保现有测试不挂；**新加功能必须配单元测试**
+- 修改前先读 `docs/PROJECT.md` 第 7 节（约定）和第 10 节（gotchas）
+- 跨阶段改 DB schema **用 ALTER TABLE 平滑迁移**（参考 target-running 的 `_ensure_xxx_columns` 模式）
+- 涉及公众号 API 的改动**先在 dev 公众号上测**
+- 改完跑 `python -m pytest tests/ -q`；**新功能必须配单元测试**，网络层全 mock
 
 ---
 
-# Phase 1：图片占位符 → 上传 → 替换（1-2 天）
+# Phase 1：内容层重构（双线 + 去 AI 选品 + 软广 B）
 
 ## 目标
 
-让 AI 在文中标的 `[图片:xxx描述]` 占位符在最终草稿里变成真实的公众号图片。建立**可替换的图片接口**，今天调 WeChat 接口，明天换 OSS 不动业务代码。
+把"单线 + AI 软广"重构成"双线 + 纯科普正文 + 结尾方案 B 软广"。这是后续所有阶段的地基。
 
 ## 任务清单
 
-### 1.1 抽象图片接口
+### 1.1 `line` 升为一等概念 + 线配置
 
-**文件**：新建 `utils/image_provider.py`
+**文件**：新建 `inputs/lines/aav.yaml`、`inputs/lines/solidex.yaml`；新建 `utils/line_loader.py`
+
+**线配置内容**（人工维护）：
+```yaml
+line_id: aav
+name: "AAV 线"
+pdf_source: inputs/pdfs/aav/        # 现人工上传；未来可换抓取器
+prompt_overlay: line_aav            # 指向 prompts/line_aav.md
+fixed_product:                      # 选品 100% 人工锁定（见 PROJECT 4.2）
+  name: "GeneMedi AAV 系列"
+  series: "AAV"
+  closing_hint: "本线结尾自然点名的角度提示（喂给 AI 措辞，AI 不选品）"
+forbidden_phrases: [...]            # 本线禁用词
+```
+
+**实现**：`load_line(line_id) -> Line`（frozen dataclass），校验引用文件存在。
+
+**验收**：能加载两条线配置；缺字段抛 `LineLoadError`；单元测试覆盖。
+
+### 1.2 提示词拆共通基底 + 线差异
+
+**文件**：`prompts/base.system.md`（共通基底）+ `prompts/line_aav.md` / `prompts/line_solidex.md`（差异）；`core/main.py` 加组装逻辑
 
 **实现**：
-```python
-class ImageProvider(Protocol):
-    def find_image(self, pool: str, query: str) -> Optional[str]:
-        """从图库 pool 找一张匹配 query 的图，返回本地路径"""
-    def upload_image(self, local_path: str) -> str:
-        """上传图片，返回前台可用 URL"""
-```
+- `base.system.md`：角色、科普中立原则、输出契约、图片占位符契约（两线共用）
+- 线差异文件：主题侧重、固定产品注入点、禁用词
+- 组装：`system_prompt = base + "\n\n" + line_overlay`
 
-加一个简单实现 `LocalPoolProvider`：
-- `find_image(pool, query)`：在 `inputs/image_pools/{pool}/` 目录下找文件名匹配 `query` 关键词的图（fuzzy match：拆 query 关键词分别在文件名里匹配，命中数最多的赢；平局取最近修改的）
-- `upload_image(local_path)`：调 `WeChatClient.upload_image(local_path)`
+**验收**：两条线生成的 system prompt 都正确包含各自差异段；篇幅/格式约束两线一致。
 
-**验收**：
-- 单元测试覆盖：能找到匹配图、找不到时返回 None、空 pool 时返回 None
-- 不连真实公众号 API（upload_image 用 mock）
+### 1.3 改写写作 prompt 走方案 B
 
-### 1.2 image_pool manifest（避免重复上传）
-
-**文件**：新建 `utils/image_provider.py` 里加 `LocalPoolProvider` 持久化层
-
-公众号 `media/uploadimg` 有 **5000 张/日配额**。同一张图反复上传是浪费配额。
+**文件**：`prompts/base.system.md` + 各线 overlay
 
 **实现**：
-- 每次 `upload_image(local_path)` 成功后，把 `(sha256(local_path), mmbiz_url, uploaded_at)` 记到 `runtime/image_upload_manifest.json`
-- 下次调 `upload_image` 先查 manifest，命中就直接返回缓存的 mmbiz_url
-- mmbiz_url 永久有效，所以缓存无需过期
+- 删掉早期"软广润物细无声融入正文 ≤3 次"那套
+- 新规则：
+  1. **正文纯科普，不出现任何产品名/品牌**
+  2. **仅结尾一句**自然点名本线固定产品（产品名由程序注入，AI 只负责把这句写得自然、贴合本篇主题）
+  3. 选品是程序给定的，**AI 不得改换产品**
+- `_build_user_message` 注入 `line.fixed_product`（name + closing_hint）
 
 **验收**：
-- 同一张图调 5 次 upload_image，实际只调微信 API 1 次
-- 单元测试 mock WeChatClient，验证 call_count
+- 跑两线各 3 个 PDF：正文无产品、结尾恰好自然点名各自固定产品 1 处
+- 故意换 PDF 主题，结尾措辞会变（贴主题），但产品名不变（人工锁定生效）
 
-### 1.3 改 ArticleAnalyzer 让 LLM 输出占位符
+### 1.4 product 语义从"AI 软广素材"改为"固定产品配置"
 
-**文件**：`prompts/article_writer.system.md`（已经包含占位符契约，**可能需要加强**）
+**文件**：`utils/product_loader.py` → 并入 line 配置或改造
 
 **实现**：
-- 复查 prompt 里 `[图片:xxx]` 契约是否够强
-- 加规则：**每篇 2-4 张图**（开头 1 张吸睛、中间 1-2 张帮助理解、结尾 0-1 张总结）
-- 不要在表格行内 / 列表项内插占位符（会破坏 markdown 结构）
+- 早期 `product_loader` 是把卖点/规格喂 AI 软广 —— 这套生成期用法废弃
+- 产品信息现在分两处用：
+  1. 生成期：只用 `fixed_product.name` + `closing_hint`（1.3 已接）
+  2. 投放期：完整产品资产（图/外链/二维码）进 `product_modules`（Phase 3）
+- 清理/迁移 `product_loader`，避免遗留的"软广融入"路径
 
-**验收**：
-- 跑 3 个不同 PDF，每篇 markdown 都有 2-4 个 `[图片:xxx]`
-- 占位符都在段落之间独立成行（不混在 inline 文本里）
+**验收**：grep 确认生成路径不再把产品卖点整段喂 prompt；旧 `product.to_prompt_block()` 软广用法已移除或改道。
 
-### 1.4 batch_processor 集成图片替换
+### 1.5 jobs.yaml 加 `line` 字段
 
-**文件**：`batch_processor.py` 的 `_run_one_job()`
+**文件**：`utils/job_loader.py` + `inputs/jobs.example.yaml`
 
-**当前流程**：
-```
-markdown → html → create_draft
-```
+**实现**：每个 job 增加 `line: aav|solidex`；job_loader 校验 line 存在；PDF 路径默认在 `inputs/pdfs/{line}/` 下找。
 
-**改成**：
-```
-markdown → html
-  → find_image_placeholders(html)
-  → for 每个 placeholder:
-       local_path = image_provider.find_image(job.image_pool, description)
-       if local_path:
-           mmbiz_url = image_provider.upload_image(local_path)
-           html = replace_image_placeholder(html, description, mmbiz_url)
-       else:
-           logger.warning(占位符无匹配图，留原样)
-  → create_draft(html)
-```
-
-**新增配置**：
-- `job.image_pool` 字段（jobs.yaml 已有该字段，Phase 0 没用）
-- 选不到图时的策略：默认留占位符（草稿里 `[图片:xxx]` 字面显示），可加 `--strict-images` flag 让选不到图就标记 publish_blocked
-
-**额外**：用上的图记到 `outputs/jobs/{job_id}/images_used.json`：
-```json
-[
-  {"placeholder": "基因测序仪示意图", "local_path": "...", "mmbiz_url": "...", "uploaded_at": "..."},
-  ...
-]
-```
-
-**验收**：
-- 完整跑一个带 3 个占位符的 PDF 任务，草稿里看到 3 张图正常显示
-- `images_used.json` 有 3 条记录
-- 重复跑同一任务，配额数字（mp.weixin.qq.com 后台看）只涨 1 次（首次上传），第二次走 manifest 缓存
-
-### 1.5 thumb_media_id 自动化（去掉 .env 手动配置）
-
-**文件**：`batch_processor.py` + `image_provider.py`
-
-**实现**：
-- 从匹配到的第一张图（或封面池 `inputs/image_pools/{pool}/cover.jpg`）调 `upload_image` 拿 mmbiz_url
-- 但 thumb 需要的是 `media_id`（永久素材 ID），不是 mmbiz_url！
-- 用 `/cgi-bin/material/add_material?type=image` 上传永久素材拿 media_id（**这是新接口，要加到 wechat_client.py**）
-- 同样要 manifest 缓存避免重复上传
-
-**新增 WeChatClient 方法**：`upload_thumb_material(local_path) -> str`（返回 media_id）
-
-**验收**：
-- 删 `.env` 里 `DEFAULT_THUMB_MEDIA_ID`，跑 batch_processor 仍能正常出草稿
-- 草稿的封面是从 image_pool 选的图
-
-### 1.6 写脚本：批量预上传
-
-**文件**：新建 `scripts/preupload_images.py`
-
-公众号配额是 5000/日，生成时一边算一边传容易撞配额导致整个 batch 失败。
-
-**实现**：
-- 命令行：`python scripts/preupload_images.py --pool inputs/image_pools/gene_therapy`
-- 扫描指定 pool 下所有图，逐个调 `upload_image` 写进 manifest
-- 显示进度条 + 配额剩余预估
-
-**验收**：
-- 跑一遍后，batch_processor 真实跑生成时所有图都命中 manifest，0 次实时上传
+**验收**：jobs.yaml 一条 job 指定 line 后能正确路由到对应线配置 + 提示词。
 
 ---
 
-# Phase 2：调性自审（1 天）
+# Phase 2：数据模型解耦 + 流程分两段
 
 ## 目标
 
-杜绝"硬广文""营销腔"流到草稿箱。所有生成的文章必须经过调性扫描，不合格的标 `publish_blocked = True` 不发布。
+把"生成即发布（1:1）"拆成"生成基准正文（内容层）→ 扇出多平台（投放层）"，DB 从 1:1 扩成 1:N。
 
 ## 任务清单
 
-### 2.1 硬广词黑名单
-
-**文件**：新建 `data/hard_ad_words.txt`
-
-**内容样例**（用户可后续扩展）：
-```
-业界领先
-首选品牌
-市场第一
-最佳选择
-行业标杆
-立刻购买
-限时优惠
-重磅推出
-震撼发布
-颠覆性
-划时代
-独家提供
-全网最低
-仅此一家
-强力推荐
-不可错过
-惊呆了
-刷屏
-轰动
-史诗级
-```
-
-**附加**：
-- 每行一个词
-- `#` 开头是注释
-- 用户能在 jobs.yaml 或 template yaml 里补充临时黑名单
-
-### 2.2 静态扫描器
-
-**文件**：新建 `utils/tonal_qa.py`
-
-**实现**：
-```python
-@dataclass(frozen=True)
-class TonalScanResult:
-    score: int                 # 0-100，越高越合格
-    hard_ad_hits: list[str]    # 命中的硬广词
-    suggestions: list[str]     # 改写建议
-    blocked: bool              # score < THRESHOLD 时 True
-```
-
-**功能**：
-- `scan_static(markdown, hard_ad_words)`：扫描硬广词命中数，每命中 1 个扣 10 分
-- `scan_llm(markdown, template, product)`：调 LLM（用 deepseek-v4-flash，便宜）打 0-100 分 + 给改写建议
-- `merge_scan_results(static, llm)`：综合两者得最终 score
-
-**阈值**：`TONAL_BLOCKED_THRESHOLD` env 配置，默认 60
-
-### 2.3 调性 LLM prompt
-
-**文件**：新建 `prompts/tonal_qa.system.md`
-
-**要求 prompt 干的事**：
-- 输入：完整 markdown + 风格模板 + 产品信息
-- 输出 JSON：
-  ```json
-  {
-    "score": 75,
-    "is_neutral": true,
-    "hard_ad_hits": ["独家秘籍", "立刻..."],
-    "off_template": ["首段是抒情而非数据驱动"],
-    "suggestions": [
-      "把'独家秘籍'改成'公开方法'",
-      "首段加一组关键数据"
-    ]
-  }
-  ```
-- 评分标准：
-  - 90-100：完全符合"学术中立、润物细无声"
-  - 70-89：基本合格，有 1-2 处轻微问题
-  - 50-69：有明显营销腔，需要修
-  - < 50：硬广味重，不能发
-
-### 2.4 markdown 健康度安全网（从 target-running 移植）
-
-**文件**：`core/main.py`（或新建 `utils/health_check.py`）
-
-target-running 已经把这套打磨完了，**直接移植**：
-- `_markdown_health_score(md) -> int`
-- 拒绝条件：以 `<` 开头（HTML 串入）/ 含 `===PART_` / 长度 < 500 / 没 H1 / H2 < 3
-
-**源码位置**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\core\main.py:1258-1306`
-
-### 2.5 集成到 batch_processor
-
-**文件**：`batch_processor.py` 的 `_run_one_job()`
-
-**流程**：
-```
-markdown 出来后
-  → markdown 健康度 < 30 → publish_blocked = True，跳过发布
-  → 调 tonal_qa.scan() → score < threshold → publish_blocked = True，跳过发布
-  → 否则正常发布
-```
-
-**DB 新增字段**（迁移走 `_ensure_xxx_columns` 模式）：
-- `articles.tonal_score INTEGER`
-- `articles.tonal_feedback TEXT`
-- `articles.markdown_health_score INTEGER`
-- `articles.publish_blocked BOOLEAN`
-- `articles.block_reason TEXT`
-
-**验收**：
-- 故意写一段硬广（用 jobs.yaml 指定一篇产品广告型 PDF），看是否被拦
-- 正常文章不被误杀
-- 被拦的稿在 outputs 里仍能找到（方便人工 review + 改），只是没发到草稿箱
-
----
-
-# Phase 3：多模型 + reviewer + merger（1-2 天）
-
-## 目标
-
-从 target-running 移植"3 路并行 + 各路 reviewer + merger 合并"的完整质量机制。**用 env 开关控制**：`MULTI_ROUTE_ENABLED=true` 才启用，默认关。
-
-## 任务清单
-
-### 3.1 路由配置 + 多模型并行
-
-**文件**：`core/main.py` 加 RouteConfig 抽象 + 3 路调度
-
-**参考实现**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\core\main.py`
-
-target-running 的 3 路：
-- `native_kimi`（kimi-k2.6, moonshot 官方）
-- `relay_kimi`（kimi-k2.5, qnaigc 中转）
-- `relay_gemini`（gemini-3.1-pro, wellapi 中转）
-
-**wechat-article 推荐 3 路**（中文文案优化的组合）：
-- `route_a`：`deepseek-v4-flash`（DeepSeek 官方，稳定中文）
-- `route_b`：`qwen3-max`（阿里通义千问，中文表达另一种风格）
-- `route_c`：`kimi-k2.6`（Moonshot，长上下文，复述能力强）
-
-每路有独立的 base_url / api_key / model / max_tokens / timeout。
-
-**改动**：
-- `core/main.py` 加 `ArticleAnalyzer._run_single_route(route, job, prompt)`
-- 三路用 `concurrent.futures.ThreadPoolExecutor` 并发
-- 每路独立重试 + 思考模式切换（参考 target-running 的实现）
-
-### 3.2 路审核（reviewer）
-
-**文件**：新建 `utils/verifier.py`（**简化版**，去掉 target-running 的 fact_finder 整段）
-
-**移植 + 简化**：
-- 类 `CandidateAuditResult`（数据结构）→ 保留
-- 类 `OutputVerifier.audit_candidate(candidate)` → 保留，**但 prompt 全换**
-- 删 `get_facts_for_target` / `_fetch_uniprot_*` / `FactFinderResult` / `_validate_fact_payload`（全是 UniProt）
-
-**新 prompt** `prompts/healer.system.md`：
-- 判断维度：
-  1. 主旨是否偏离 PDF 核心论点（`off_topic`，类似 target-running 的 `target_mismatch`）
-  2. 是否违反 template 约束（字数、章节数、禁用词、调性）
-  3. 是否有事实错误（与 PDF 矛盾、捏造数据）
-  4. 软广是否硬塞（产品名超过 3 次 / 硬广词命中）
-- 输出 JSON：
-  ```json
-  {
-    "is_valid": true,
-    "off_topic": false,
-    "quality_score": 85,
-    "reasons": [...],
-    "changes": [...],
-    "healed_markdown": "..."   // 修过的版本
-  }
-  ```
-
-### 3.3 三稿合并（merger）
-
-**文件**：复用 `utils/verifier.py` 里加 `merge_valid_candidates()`
-
-**移植 + 简化**：
-- target-running 的 `merge_valid_candidates(target_name, fact_result, candidates)` → 改成 `merge_valid_candidates(pdf_summary, template, product, candidates)`
-- 删 `fact_payload` 入参
-- `MergeResult` 数据类去掉 `merged_chinese`（公众号本就中文）
-
-**新 prompt** `prompts/merger.system.md`：
-- 输入：3 个候选 markdown + template + product
-- 输出 JSON：
-  ```json
-  {
-    "merged_markdown": "...",   // 唯一权威
-    "merge_rationale": "...",
-    "dedupe_summary": "..."
-  }
-  ```
-- **markdown 是权威**（沿用 target-running 上周打磨完的契约）
-- merged_markdown 必须 ≥ 500 字符、不以 `<` 开头、有 H1+3 个 H2（否则验证失败回退单稿）
-
-### 3.4 primary 选稿 + 安全网
-
-**文件**：`core/main.py`
-
-**直接移植**：
-- `_pick_primary_candidate(candidates)`：按 `markdown 健康度 > quality_score > token_usage` 排序
-- 合并失败时降级到 primary 单稿
-
-**源码**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\core\main.py:1786-1820`
-
-### 3.5 DB 加候选稿表
+### 2.1 DB 重塑：line / article / distribution
 
 **文件**：`db/database.py`
 
-**新表 `candidate_articles`**：
-```sql
-- id PK
-- job_pk FK -> jobs.id
-- route VARCHAR(32)      -- 'route_a' / 'route_b' / 'route_c'
-- selected BOOLEAN       -- 是否被 merger 采纳
-- is_valid BOOLEAN       -- reviewer 判定
-- off_topic BOOLEAN
-- quality_score INTEGER
-- markdown TEXT          -- 候选稿全文（注意：可能比较大，要考虑这里塞 DB 还是落盘）
-- changes JSON
-- reasons JSON
-- prompt_tokens / completion_tokens / total_tokens / latency_ms
-- model VARCHAR(64)
-- created_at / updated_at
+**新结构**：
+```
+lines(line_id, name, ...)                       -- 线登记（也可只走配置文件，DB 存引用）
+articles(id, line_id, job_id, pdf_path,         -- 基准正文（平台无关）
+         title, digest, content_dir, model,
+         tokens..., status, created_at)
+translations(id, article_id, lang, content_dir, -- Phase 5 用，先建表预留
+             status)
+distributions(id, article_id, platform,         -- 1:N：每个落地实例
+              account, lang, module_id,
+              assembled_dir,                     -- 组装成品落盘路径
+              publish_status, wechat_media_id,
+              wechat_url, external_url,
+              publish_error, created_at)
 ```
 
-**注意**：参考 target-running 的教训，**candidate markdown 也落盘到 `outputs/jobs/{job_id}/candidates/{route}.md`**，DB 只存路径，避免单行几十 KB 撑爆。
+**注意**：沿用落盘/库分离 —— `content_dir` / `assembled_dir` 存路径，DB 不塞大文本。
 
-### 3.6 集成到 batch_processor
+**验收**：迁移脚本能在已有 Phase 0 库上平滑升级（ALTER + 新表）；1 篇 article 能挂多条 distribution。
 
-**改动**：
-- `ArticleAnalyzer.analyze(job)` 内部根据 `MULTI_ROUTE_ENABLED` 走单路 or 3 路
-- 多路结果：每个候选 → reviewer → 若 ≥2 个 valid → merger；否则取 primary 单稿
-- 候选结果都落盘 + 写 DB
-- 最终 markdown 跟单路一样回到主流程（继续 tonal_qa → 发布）
+### 2.2 batch_processor 拆 generate 阶段
 
-**验收**：
-- env 切到 true，单篇文章耗时 5-8 倍，但 reviewer score 显著高于单路
-- 候选 `outputs/jobs/{job_id}/candidates/*.md` 全部落盘
-- merger 失败时优雅降级到 primary
-- 关掉开关，行为跟 Phase 0 完全一致（向后兼容）
+**文件**：`batch_processor.py`
+
+**实现**：`generate` 子命令：load jobs → 逐 job 出基准正文 → 落盘 `outputs/articles/{article_id}/` + 写 `articles` 表（status=generated）。**不碰任何平台**。
+
+**验收**：`python batch_processor.py generate` 跑完，DB 有 article 行、outputs 有产物，零网络发布。
+
+### 2.3 distribute 阶段骨架（先只接公众号）
+
+**文件**：`batch_processor.py` + 复用现有 `wechat_client`
+
+**实现**：`distribute` 子命令：读 generated article → 为指定平台建 distribution 行 → （Phase 3 接组装）→ 发草稿。先把单公众号链路在新结构上跑通（沿用 Phase 0 的 create/update_draft + PATCH 逻辑，但写到 distributions 表）。
+
+**验收**：`generate` 后 `distribute --platform wechat` 能把一篇 article 发到公众号草稿；重跑走 PATCH 不新建。
+
+### 2.4 向后兼容验证
+
+**验收**：新两阶段流程跑出来的草稿，跟 Phase 0 单线单公众号结果一致（不回归）。
 
 ---
 
-# Phase 4：Dashboard + 人工抽检 + 重生成（2-3 天）
+# Phase 3：产品模块组装（line × platform）
 
 ## 目标
 
-复刻 target-running 的完整 dashboard 体验：浏览器看流水线、单篇/批量操作、人工抽检闸、重生成走 PATCH。
+把"基准正文"在投放前拼上"该 line × 该 platform 的固定产品视觉模块"。
+
+> 模块**具体字段 / 资产格式**用户已说"后面设计"。本阶段先定**粒度（line×platform）+ 注入时机（组装阶段）+ 可配置化**，schema 边做边定。
 
 ## 任务清单
 
-### 4.1 Flask app 骨架
+### 3.1 产品模块配置系统
 
-**文件**：复制 `D:\dev-project\target-running\.claude\worktrees\epic-sanderson\app.py` 改造
+**文件**：新建 `inputs/product_modules/{line}-{platform}.yaml` + `utils/product_module_loader.py`
 
-**改造点**：
-- 删所有 `/api/feishu/*` 端点
-- 删所有 `xlsx_targets` 引用
-- `target_name` → `job_id` 全文件 sed
-- 启动入口、路径、port 等保持
-
-### 4.2 流水线表格
-
-**端点**：`/api/workflow/articles?page=N&page_size=M`
-
-**返回**：
-```json
-{
-  "articles": [
-    {
-      "job_id": "...",
-      "task_name": "...",
-      "pdf_path": "...",
-      "template_id": "...",
-      "product_id": "...",
-      "generation_status": "completed",
-      "tonal_score": 85,
-      "publish_status": "published",
-      "wechat_url": "...",
-      "wechat_media_id": "..."
-    }
-  ],
-  "page": 1,
-  "page_size": 50,
-  "total": 123
-}
+**配置（初版，可扩）**：
+```yaml
+module_id: aav-wechat
+line: aav
+platform: wechat
+series_image: assets/aav_series.png    # 系列图（本地路径，组装时上传）
+qrcode: assets/aav_qr.png              # 二维码（公众号用）
+external_url: ""                       # 外链（blog 用；公众号会被吞）
+cta_text: ""                           # 可选补充文案（注意软广文字主体已在正文，见 PROJECT 5.1）
 ```
 
-**前端**：`templates/dashboard.html` + `static/dashboard.js` 复用 target-running 的 pipeline 表格组件
+**验收**：能按 (line, platform) 取到模块；缺模块时明确报错或留占位。
 
-### 4.3 单文章预览
+### 3.2 组装器
 
-**新端点**：`/preview/{job_id}` 在浏览器里渲染 markdown
+**文件**：新建 `utils/assembler.py`
 
-**来源**：参考 `D:\dev-project\target-running\.claude\worktrees\epic-sanderson\templates\markdown_preview.html`
+**实现**：`assemble(article_html, module, platform) -> str`：基准正文尾部拼接平台模块（图/链/码），输出平台成品 HTML/blob，落盘 `outputs/distributions/{...}/`。**不同平台模块不得硬编码**，全读配置。
 
-### 4.4 重生成级联 + draft/update PATCH
+**验收**：`aav-公众号` 拼系列图(+二维码)、`aav-blog` 拼系列图+外链，两者成品不同且都正确落盘。
 
-**改 batch_processor / workflow**：
-- 加 `db.cascade_reset_for_regen(job_pk)`：把 article + draft 状态全置 pending，**保留 wechat_media_id** 给 PATCH
-- `_publish_worker` 读已有 `wechat_media_id`，有则调 `update_draft`（PATCH 同位置），无则 `create_draft`
-- API 端点 `/api/workflow/generate/run` 接 target_ids 时自动 cascade_reset
+### 3.3 模块资产上传与缓存
 
-**参考实现**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\db\database.py` 的 `cascade_reset_for_regen()`、`utils\drupal_client.py` 的 PATCH 路径、`core\workflow.py` 的 `_publish_worker`
+**文件**：`utils/wechat_client.py`（uploadimg 已有）+ manifest
 
-**关键**：跟 target-running 的设计完全一致 —— **URL 稳定**，旧外链 / SEO 不丢。
+**实现**：模块里的系列图/二维码上传公众号拿 mmbiz URL；用 `runtime/image_upload_manifest.json` 缓存避免重复上传（公众号 5000/日配额）；同图命中缓存只传 1 次。
 
-### 4.5 人工抽检闸
-
-**端点**：`/api/workflow/gate`
-
-**功能**：
-- 生成 → 翻译/发布之间可以挂"待人工抽检"
-- DB 加 `workflow_settings` 表（target-running 已有）存闸状态
-- 闸开时：生成完毕的文章 `review_status = pending`，dashboard 上需手动放行才会进入发布段
-- 闸关时：自动放行
-
-### 4.6 连续模式 supervisor
-
-**端点**：`/api/workflow/continuous/start` 和 `/stop`
-
-**功能**：后台线程自动驱动 generate → publish 全链路，直到所有 pending 完成
-
-**参考**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\core\workflow.py` 的 supervisor 实现
-
-### 4.7 余额 / 计费可视化
-
-**端点**：`/api/accounts/overview` + `/api/pricing`
-
-**实现**：复用 `utils/account_providers.py` 和 `utils/moonshot_billing.py`（已经在 Phase 0 拷贝过去了）
-
-**验收**：dashboard 顶部能看到 DeepSeek / Moonshot / qnaigc 各账户余额
+**验收**：同一系列图组装 5 次，实际只调微信 API 1 次（mock 验证 call_count）。
 
 ---
 
-# 各阶段共通：测试 & 部署
+# Phase 4：多平台投放 adapter
 
-## 测试策略
+## 目标
+
+把投放抽象成可插拔 adapter；先打通公众号多账户，blog/领英留可插拔占位。
+
+## 任务清单
+
+### 4.1 投放 adapter 抽象
+
+**文件**：新建 `utils/publishers/base.py`
+
+```python
+class Publisher(Protocol):
+    def publish(self, distribution, assembled_content) -> PublishResult:
+        """发布/更新一个 distribution，返回 media_id/url + 状态"""
+```
+
+**验收**：接口定义清晰；distribute 阶段通过该接口调具体平台。
+
+### 4.2 公众号多账户（token 隔离 — PROJECT 10.1 头号坑）
+
+**文件**：`utils/wechat_client.py` + `utils/publishers/wechat.py`
+
+**实现**：
+- `WeChatClient` 以 app_id 为缓存键，token 文件 `runtime/wechat_token_{account}.json` 隔离
+- 配置 AAV 账户 + 免疫客账户两套 `WECHAT_{ACCOUNT}_APP_ID/SECRET`
+- `wechat.py` 实现 `Publisher`：create/update draft + PATCH 重发
+
+**验收**：同一 article 扇出到两个公众号账户，两 token 不互踩；各自草稿独立、重发走 PATCH。
+
+### 4.3 genemedi blog adapter（待网站接口）
+
+**文件**：新建 `utils/publishers/blog.py`
+
+**实现**：先实现到"组装成品落盘 + 调用占位接口"；等网站人员给 post 脚本接口后接真实端点。`{lang}` 维度此处体现（配合 Phase 5）。
+
+**验收**：blog adapter 接口就位，成品落盘；真实接口 TODO 标清。
+
+### 4.4 LinkedIn adapter（占位，待调研）
+
+**文件**：新建 `utils/publishers/linkedin.py`（骨架）
+
+**验收**：占位 adapter 存在，不阻塞其它平台；调研结论记到本文件。
+
+---
+
+# Phase 5：AI 翻译阶段（移植 target-running）
+
+## 目标
+
+genemedi 多语言：基准正文生成后、组装前，跑独立 AI 翻译。直接复用 target-running 那套。
+
+## 任务清单
+
+### 5.1 移植翻译模块
+
+**文件**：新建 `utils/translator.py`（移植自 target-running）
+
+**实现**：`translate(article_markdown, target_lang) -> markdown`；接在 generate 之后、组装之前；只对需要多语言的平台（genemedi）触发。
+
+**参考**：target-running 的翻译实现（`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\`）。
+
+**验收**：中文基准正文 → `{lang}` 译稿，落盘 `outputs/translations/{...}/` + 写 `translations` 表；质量对齐 target-running。
+
+### 5.2 翻译接入 distribution
+
+**实现**：genemedi distribution 携带 `lang`，组装时取对应译稿而非基准正文。
+
+**验收**：同一 article 的 `en` / `zh` blog distribution 取到各自语言成品。
+
+---
+
+# Phase 6：质量安全网
+
+## 目标
+
+杜绝损坏稿 / 营销腔 / **正文夹带产品**（新架构下正文本应纯科普）流到投放。
+
+## 任务清单
+
+### 6.1 markdown 健康度安全网（移植）
+
+**文件**：新建 `utils/health_check.py`（移植自 target-running）
+
+**实现**：`_markdown_health_score(md) -> int`；拒绝条件：以 `<` 开头 / 含 `===PART_` / 长度过短 / 没 H1 / H2 过少。
+
+**源码参考**：`D:\dev-project\target-running\.claude\worktrees\epic-sanderson\core\main.py`
+
+### 6.2 科普调性自审 + 正文夹带产品扫描
+
+**文件**：新建 `utils/tonal_qa.py` + `prompts/tonal_qa.system.md`
+
+**实现**：
+- 静态扫描：硬广词黑名单（`data/hard_ad_words.txt`）+ **正文出现产品名 = 违规**（产品只该在结尾一句 + 模块里）
+- LLM 评分：科普中立度 0-100 + 改写建议
+- `score < THRESHOLD` 或正文夹带产品 → `publish_blocked`
+
+**验收**：故意让正文中段插产品被拦；正常纯科普稿不误杀；被拦稿仍落盘供人工 review。
+
+### 6.3（可选）多模型并行 + merger
+
+**文件**：`core/main.py` + `utils/verifier.py` + `prompts/healer.system.md` / `merger.system.md`
+
+**实现**：env 开关 `MULTI_ROUTE_ENABLED`（默认关）；3 路并行 → reviewer → merger；移植 target-running 并去掉 UniProt/fact_finder。候选稿落盘，DB 只存路径。
+
+**验收**：开关 on 质量提升、off 行为不变（向后兼容）。
+
+---
+
+# Phase 7：Dashboard + 人工抽检 + 重生成/重投放
+
+## 目标
+
+浏览器看「内容 × 投放」矩阵；人工抽检闸；重生成正文 / 重投放单平台走 PATCH。
+
+## 任务清单
+
+### 7.1 Flask app + 矩阵视图
+
+**文件**：`app.py`（改造自 target-running）+ `templates/` + `static/`
+
+**端点**：`/api/workflow/matrix` 返回 article × platform 网格（每格 distribution 状态）。
+
+### 7.2 单篇预览
+
+**端点**：`/preview/{article_id}`（基准正文）+ `/preview/{distribution_id}`（平台成品）。
+
+### 7.3 人工抽检闸
+
+**端点**：`/api/workflow/gate` + `workflow_settings` 表。生成→投放之间挂"待人工抽检"，闸开时需手动放行。
+
+### 7.4 重生成 / 重投放级联
+
+**实现**：
+- 重生成正文：`cascade_reset` article + 其下所有 distribution 置 pending（**保留 media_id/url** 给 PATCH）
+- 重投放单格：只重发该 distribution，走对应 adapter 的 PATCH（公众号 draft/update、blog 的 update 端点）
+- **URL/位置稳定**（沿用 target-running 设计），旧外链/SEO 不丢
+
+### 7.5 余额 / 计费可视化
+
+**端点**：`/api/accounts/overview`（复用 `utils/account_providers.py` + `utils/moonshot_billing.py`）。
+
+---
+
+# 各阶段共通：测试
 
 | Phase | 必须的测试 |
 |---|---|
-| 1 | `test_image_provider.py` (find + upload mock)、`test_wechat_html.py` 补充占位符替换 |
-| 2 | `test_tonal_qa.py` (静态扫描 + LLM mock)、`test_health_check.py` 移植自 target-running |
-| 3 | `test_verifier.py`、`test_main.py` 验证 3 路降级、`test_workflow.py` 多路集成 |
-| 4 | `test_dashboard_api.py`、`test_cascade_reset.py`、e2e: Playwright + 本地 dev 公众号（可选） |
-
-## 部署考虑（Phase 4 之后才相关）
-
-target-running 用了 systemd + 多 release 目录 + symlink + 重启的部署套路：
-- `/opt/wechat-article/releases/{TAG}/` + `/opt/wechat-article/current` symlink
-- `/opt/wechat-article/shared/.env`（生产配置不入 git）
-- `/opt/wechat-article/shared/logs/`
-- `systemd unit: wechat-article.service`
-
-参考 `D:\dev-project\target-running\Jenkinsfile` 的部署阶段定义。Jenkins 不一定要用，可以写一个 `scripts/deploy.sh` 手动跑。
+| 1 | `test_line_loader.py`、`test_main.py`（双线 prompt 组装 + 方案 B 注入） |
+| 2 | `test_database.py`（1:N 迁移）、`test_batch_processor.py`（两阶段） |
+| 3 | `test_product_module_loader.py`、`test_assembler.py`（line×platform 组装）、上传缓存 call_count |
+| 4 | `test_wechat_client.py`（多账户 token 隔离）、`test_publishers.py` |
+| 5 | `test_translator.py`（mock LLM） |
+| 6 | `test_health_check.py`、`test_tonal_qa.py`（含正文夹带产品扫描） |
+| 7 | `test_dashboard_api.py`、`test_cascade_reset.py` |
 
 ---
 
-# 不在范围内（但可能将来要做的）
+# 不在范围内（但可能将来要做）
 
-- 公众号自动发布（`freepublish` 接口）—— 永远不要！必须人工
-- 多公众号支持（一套 jobs 同时发到 N 个公众号）—— 大改 DB 结构
-- 内容分发到知乎 / 头条号等其它平台 —— 别在本项目里做，另起项目
-- AI 出封面图 / 插图（调 fal-ai / dreamina）—— 可作为 Phase 1 的可选 image_provider 实现
-- OCR 扫描版 PDF —— 加新 `utils/ocr_extractor.py`，pdf_extractor 失败时回退
-- 文章数据看板（PV/UV/分享）—— 公众号的统计 API 也开放，但不是优先级
+- 公众号自动发布（`freepublish`）—— **永远不要**，必须人工
+- 内容分发到知乎/头条等其它平台 —— 另起项目，别塞进来
+- AI 出封面图/插图（fal-ai / dreamina）—— 可作为图片来源的可选实现
+- OCR 扫描版 PDF —— 加 `utils/ocr_extractor.py`，pdf_extractor 失败时回退
+- PDF 网页源自动抓取 —— 加 `utils/{line}_fetcher.py`，替换"人工上传"入口
+- 文章数据看板（PV/UV/分享）—— 非优先级
 
 ---
 
-# 给 Codex 的建议工作流
+# 给接手者的建议工作流
 
-1. **第一次接手**：先读 `README.md` → `docs/PROJECT.md` → 本文件
-2. **挑任务**：从 Phase 1 第一个未完成任务开始，按编号顺序
-3. **写之前**：grep 一下相关文件已有逻辑（特别是 `utils/` 和 `core/`）
-4. **写完后**：
-   - 跑 `python -m pytest tests/ -q` 确保不挂老测试
-   - 加 1-3 个针对性单元测试
-   - 用真实小样例 dry-run 一次（PDF 真的能解析、yaml 真的能加载等）
-5. **不确定的设计抉择**：参考 target-running 同名/类似模块的做法（路径在 PROJECT.md 第 2 节）
-6. **commit 风格**：跟 target-running 一致 —— `feat: xxx` / `fix: xxx`，第一行简短、正文用中文说清楚动机和影响
+1. **第一次接手**：读 `README.md` → `docs/PROJECT.md` → 本文件
+2. **挑任务**：Phase 1 → 2 是硬前置，先做；之后 3/4/5/6 看人手并行
+3. **写之前**：grep 相关已有逻辑（尤其 `utils/` 和 `core/`）
+4. **写完后**：跑 `python -m pytest tests/ -q` + 加针对性单测 + 真实小样例 dry-run
+5. **不确定的设计**：参考 target-running 同名/类似模块（路径见 PROJECT.md 第 2 节），但**绝不改 target-running**
+6. **commit 风格**：`feat: xxx` / `fix: xxx`，首行简短、正文中文说清动机和影响
