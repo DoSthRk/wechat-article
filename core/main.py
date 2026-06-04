@@ -114,7 +114,7 @@ class ArticleAnalyzer:
         try:
             template = load_template_by_id(self.templates_dir, job.template)
             product = load_product_by_id(self.products_dir, job.product)
-            pdf_text = extract_text(job.pdf)
+            pdf_text = extract_text(job.pdf, max_pages=self._resolve_max_pages(job))
         except Exception as exc:
             return AnalysisResult(
                 job_id=job.job_id, success=False,
@@ -228,6 +228,23 @@ class ArticleAnalyzer:
             "- 产品**只在结尾出现一次**，正文零产品",
         ])
         return "\n".join(parts)
+
+    @staticmethod
+    def _resolve_max_pages(job: Job) -> Optional[int]:
+        """PDF 抽取页数上限：job.extra.max_pages > env PDF_MAX_PAGES > 不限。
+
+        大 PDF（如 200+ 页的 thesis / bundle）全喂会爆上下文，用它只截前 N 页。
+        """
+        raw = (job.extra or {}).get("max_pages")
+        if raw in (None, ""):
+            raw = os.getenv("PDF_MAX_PAGES", "").strip() or None
+        if raw in (None, ""):
+            return None
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
 
     @staticmethod
     def _strip_outer_code_fence(text: str) -> str:

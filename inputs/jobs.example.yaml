@@ -15,6 +15,8 @@ jobs:
     product: "purprox_aaveasy_spin_columns"    # inputs/products/purprox_aaveasy_spin_columns.yaml
     image_pool: "aav_sample"                   # 配图来自 PDF（Phase 1 用）
     title_hint: "从论文的机制发现切入，解读 AAV 工艺启示（可改）"
+    extra:
+      max_pages: 25                            # 可选：大 PDF 只抽前 N 页（防爆上下文）
 
   - job_id: "solidex-demo-001"
     line: "solidex"
