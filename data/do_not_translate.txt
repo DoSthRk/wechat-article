@@ -1,0 +1,38 @@
+# 任何目标语言里都保持原样的词（品牌 / 商标 / 通用学术缩写）。
+# 每行一个；# 开头是注释。
+
+# --- GeneMedi 品牌 / 产品 ---
+GeneMedi
+GeneMedi®
+PurProX
+PurProX™
+AAVEasy
+AAVEasy™
+AAVPure
+SOLIDEX
+SOLIDEX™
+SOLIDEX®-ISOEx
+SOLIDEX™-ISOEx
+TarMart
+TarMart™
+CAR-X
+LIBRA™
+
+# --- AAV / 基因递送 通用术语 ---
+AAV
+rAAV
+Cas9
+SaCas9
+CRISPR
+
+# --- 肿瘤免疫 / 通用 ---
+Glofitamab
+CD3
+CD20
+Pan-T
+BTKi
+CAR-T
+Western blot
+RNA-seq
+DOI
+PMID

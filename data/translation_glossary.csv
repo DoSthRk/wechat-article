@@ -1,0 +1,5 @@
+中文,英文,日语,韩语,俄语,使用范围,备注
+药诺生物,GeneMedi,薬諾生物 (GeneMedi),약약생물 (GeneMedi),ДжинМеди (GeneMedi),公司主体名称,与 do_not_translate 中 GeneMedi 冲突；多数情况保留 GeneMedi，按场景人工确认
+免疫磁珠,Immunomagnetic Beads (IMB),免疫磁気ビーズ (IMB),면역 자기 비드 (IMB),Иммуномагнитные шарики (IMB),细胞分离与纯化,
+腺相关病毒,adeno-associated virus (AAV),アデノ随伴ウイルス (AAV),아데노 부속 바이러스 (AAV),аденоассоциированный вирус (AAV),AAV 载体,首次出现给全称+缩写；后文用 AAV
+双特异性抗体,bispecific antibody,二重特異性抗体,이중특이성 항체,биспецифическое антитело,肿瘤免疫,
