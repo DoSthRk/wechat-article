@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ job_id }} · 预览</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body class="preview-body">
+  <header class="topbar">
+    <div class="brand">
+      <a class="back" href="/">← 流水线</a>
+      <h1>{{ job_id }}<span class="sub">基准正文预览</span></h1>
+    </div>
+  </header>
+  <main class="preview">
+    <article class="doc">{{ content | safe }}</article>
+    <p class="note">提示：<code>[图片:Figure X …]</code> 是图片占位符，由投放前的图片管线替换为真实图。</p>
+  </main>
+</body>
+</html>

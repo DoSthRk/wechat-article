@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wechat-article · 流水线</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◇</span>
+      <h1>wechat-article<span class="sub">内容 × 投放流水线</span></h1>
+    </div>
+    <div class="stats" id="stats" aria-live="polite"></div>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <button id="refresh" class="btn">↻ 刷新</button>
+      <span class="hint">公众号链路用中文原文 · blog 链路按目标语翻译</span>
+    </div>
+    <div class="table-wrap">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th>Job</th>
+            <th>标题</th>
+            <th>状态</th>
+            <th class="num">健康</th>
+            <th class="num">调性</th>
+            <th>质量闸</th>
+            <th>投放</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="8" class="muted">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

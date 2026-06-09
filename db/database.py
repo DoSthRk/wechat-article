@@ -447,6 +447,57 @@ class DatabaseManager:
         finally:
             session.close()
 
+    # ---- dashboard 概览 ----
+
+    def list_article_overview(self, page: int = 1, page_size: int = 100):
+        """分页返回 job + article + distributions 概览（dashboard 用）。"""
+        session = self.get_session()
+        try:
+            base = session.query(Job).order_by(Job.id.desc())
+            total = base.count()
+            jobs = base.offset(max(0, (page - 1) * page_size)).limit(page_size).all()
+            items: List[Dict[str, Any]] = []
+            for j in jobs:
+                a = j.article
+                items.append({
+                    "job_id": j.job_id,
+                    "status": j.status.value if j.status else None,
+                    "template_id": j.template_id,
+                    "product_id": j.product_id,
+                    "title": a.title if a else None,
+                    "word_count": int(a.word_count or 0) if a else 0,
+                    "markdown_health_score": (int(a.markdown_health_score or 0) if a else None),
+                    "tonal_score": (int(a.tonal_score or 0) if a else None),
+                    "publish_blocked": (bool(a.publish_blocked) if a else None),
+                    "block_reason": (a.block_reason if a else None),
+                    "distributions": [
+                        {
+                            "platform": d.platform, "account": d.account, "lang": d.lang,
+                            "publish_status": d.publish_status,
+                            "wechat_media_id": d.wechat_media_id, "external_url": d.external_url,
+                        }
+                        for d in j.distributions
+                    ],
+                })
+            return items, total
+        finally:
+            session.close()
+
+    def latest_content_dir(self, job_id: str) -> Optional[str]:
+        """按 job_id 找最近一篇文章的 content_dir（preview 用）。"""
+        session = self.get_session()
+        try:
+            row = (
+                session.query(Article)
+                .join(Job, Article.job_pk == Job.id)
+                .filter(Job.job_id == job_id)
+                .order_by(Article.id.desc())
+                .first()
+            )
+            return row.content_dir if row else None
+        finally:
+            session.close()
+
 
 # 单例
 _instance: Optional[DatabaseManager] = None
