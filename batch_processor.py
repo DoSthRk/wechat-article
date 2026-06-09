@@ -33,9 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
+from utils.health_check import markdown_health_score
 from utils.job_loader import Job, load_jobs
 from utils.line_loader import LineLoadError, load_line_by_id
 from utils.logger import setup_logger
+from utils.product_loader import load_product_by_id
+from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
 from utils.wechat_html import extract_title_and_digest, markdown_to_wechat_html
 
@@ -45,9 +48,13 @@ logger = setup_logger("batch_processor")
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_JOBS_YAML = str(PROJECT_ROOT / "inputs" / "jobs.yaml")
 LINES_DIR = str(PROJECT_ROOT / "inputs" / "lines")
+DATA_DIR = PROJECT_ROOT / "data"
+PRODUCTS_DIR = str(PROJECT_ROOT / "inputs" / "products")
 
 WECHAT_PLATFORM = "wechat"
 DEFAULT_LANG = "zh"
+HEALTH_THRESHOLD = int(os.getenv("MARKDOWN_HEALTH_THRESHOLD", "30") or 30)
+TONAL_THRESHOLD = int(os.getenv("TONAL_BLOCKED_THRESHOLD", "60") or 60)
 
 
 def main() -> int:
@@ -191,6 +198,24 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
     title, digest = extract_title_and_digest(result.markdown)
     html = markdown_to_wechat_html(result.markdown)
     (out_dir / "article.html").write_text(html, encoding="utf-8")
+
+    # 质量自审：健康度 + 调性 + 正文夹带产品（方案 B）
+    health = markdown_health_score(result.markdown)
+    hard_ad = load_hard_ad_words(str(DATA_DIR / "hard_ad_words.txt"))
+    tonal = scan_static(
+        result.markdown, hard_ad,
+        product_name=_safe_product_name(job), threshold=TONAL_THRESHOLD,
+    )
+    reasons: List[str] = []
+    if health < HEALTH_THRESHOLD:
+        reasons.append(f"markdown_unhealthy:{health}")
+    if tonal.body_product_leak:
+        reasons.append("body_product_leak")
+    if tonal.score < TONAL_THRESHOLD:
+        reasons.append(f"tonal_low:{tonal.score}")
+    publish_blocked = bool(reasons)
+    block_reason = ";".join(reasons) or None
+
     (out_dir / "meta.json").write_text(
         json.dumps({
             "job_id": job.job_id, "line": job.line, "title": title, "digest": digest,
@@ -199,6 +224,10 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
             "completion_tokens": result.completion_tokens,
             "latency_ms": result.latency_ms,
             "char_count": len(result.markdown),
+            "markdown_health_score": health,
+            "tonal_score": tonal.score,
+            "publish_blocked": publish_blocked,
+            "block_reason": block_reason,
             "generated_at": datetime.utcnow().isoformat(),
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -211,11 +240,23 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
         model=result.model,
         prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens,
         total_tokens=result.total_tokens, latency_ms=result.latency_ms,
+        markdown_health_score=health,
+        tonal_score=tonal.score,
+        tonal_feedback=json.dumps({
+            "hard_ad_hits": tonal.hard_ad_hits,
+            "body_product_leak": tonal.body_product_leak,
+            "suggestions": tonal.suggestions,
+        }, ensure_ascii=False),
+        publish_blocked=publish_blocked,
+        block_reason=block_reason,
     )
     db.update_job_status(job_pk, JobStatus.GENERATED)
+    if publish_blocked:
+        logger.warning("[%s] generated but BLOCKED: %s", job.job_id, block_reason)
     logger.info(
-        "[%s] generated: title=%s len=%d tokens=%d",
+        "[%s] generated: title=%s len=%d tokens=%d health=%d tonal=%d%s",
         job.job_id, (title or "?")[:40], len(result.markdown), result.total_tokens,
+        health, tonal.score, " [BLOCKED]" if publish_blocked else "",
     )
     return True
 
@@ -231,6 +272,10 @@ def _distribute_one(
         db.update_job_status(job_pk, JobStatus.FAILED, error_message="distribute: no article, run --stage generate first")
         logger.error("[%s] distribute: 还没生成基准正文", job.job_id)
         return False
+    if getattr(article, "publish_blocked", False):
+        # 质量闸拦下：稿子已落盘供人工 review，但不投放（不算失败）
+        logger.warning("[%s] 质量闸拦下，跳过投放：%s", job.job_id, article.block_reason)
+        return True
     html_path = Path(article.content_dir) / "article.html"
     if not html_path.exists():
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: missing {html_path}")
@@ -271,6 +316,16 @@ def _distribute_one(
     )
     db.update_job_status(job_pk, JobStatus.PUBLISHED)
     return True
+
+
+def _safe_product_name(job: Job) -> str:
+    """取产品显示名（用于正文夹带扫描）；取不到回空串（最佳努力，不阻断生成）。"""
+    if not job.product:
+        return ""
+    try:
+        return (load_product_by_id(PRODUCTS_DIR, job.product).name or "").strip()
+    except Exception:
+        return ""
 
 
 def _resolve_wechat_account(job: Job) -> str:

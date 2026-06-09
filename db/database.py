@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Enum,
@@ -125,6 +126,12 @@ class Article(Base):
     completion_tokens = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
     latency_ms = Column(Integer, default=0)
+    # Phase 6 质量自审
+    markdown_health_score = Column(Integer, default=0, comment="markdown 健康度 0-100")
+    tonal_score = Column(Integer, default=0, comment="调性分 0-100")
+    tonal_feedback = Column(Text, comment="调性自审详情 JSON（命中词 / 正文夹带产品 / 建议）")
+    publish_blocked = Column(Boolean, default=False, comment="质量闸：True 则不投放，留人工")
+    block_reason = Column(Text, comment="被拦原因")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -143,6 +150,11 @@ class Article(Base):
             "completion_tokens": int(self.completion_tokens or 0),
             "total_tokens": int(self.total_tokens or 0),
             "latency_ms": int(self.latency_ms or 0),
+            "markdown_health_score": int(self.markdown_health_score or 0),
+            "tonal_score": int(self.tonal_score or 0),
+            "tonal_feedback": self.tonal_feedback,
+            "publish_blocked": bool(self.publish_blocked),
+            "block_reason": self.block_reason,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -233,10 +245,35 @@ class DatabaseManager:
         self.SessionLocal = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
         Path(DEFAULT_SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=self.engine)
+        self._ensure_sqlite_columns()
         logger.info("DB initialized: %s", self.engine.url)
 
     def get_session(self) -> Session:
         return self.SessionLocal()
+
+    def _ensure_sqlite_columns(self) -> None:
+        """SQLite 平滑迁移：给既有表补上后加的列（create_all 不会 ALTER 既有表）。
+
+        新库由 create_all 直接建全列，此处对既有库做 ADD COLUMN。仅 SQLite。
+        """
+        if not self.engine.url.get_backend_name().startswith("sqlite"):
+            return
+        additions = {
+            "articles": {
+                "markdown_health_score": "INTEGER DEFAULT 0",
+                "tonal_score": "INTEGER DEFAULT 0",
+                "tonal_feedback": "TEXT",
+                "publish_blocked": "BOOLEAN DEFAULT 0",
+                "block_reason": "TEXT",
+            },
+        }
+        with self.engine.begin() as conn:
+            for table, cols in additions.items():
+                existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+                for col, ddl in cols.items():
+                    if col not in existing:
+                        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                        logger.info("migrated: added %s.%s", table, col)
 
     # ---- task / job ----
 
