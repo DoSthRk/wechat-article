@@ -29,6 +29,11 @@ def _args():
     return argparse.Namespace(placeholder_author="TarMart", placeholder_thumb_media="thumb-1")
 
 
+def _get(client):
+    """把单个 client 包成 get_client(account) 形式（_distribute_one 现在收 getter）。"""
+    return lambda _account: client
+
+
 class TestDistributeOne(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -52,7 +57,7 @@ class TestDistributeOne(unittest.TestCase):
 
     def test_first_creates_then_repeat_patches(self):
         fake = FakeWeChat()
-        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, fake, _args()))
+        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         self.assertEqual(len(fake.created), 1)        # 首次 create
         self.assertEqual(len(fake.updated), 0)
         dist = self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh")
@@ -61,7 +66,7 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(dist.assembled_dir, str(Path(self._tmp.name) / "out"))
 
         # 重投放：同 distribution 已有 media_id → PATCH，不再 create
-        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, fake, _args()))
+        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         self.assertEqual(len(fake.created), 1)
         self.assertEqual(len(fake.updated), 1)
         self.assertEqual(fake.updated[0][0], "media-NEW")
@@ -70,13 +75,13 @@ class TestDistributeOne(unittest.TestCase):
         task = self.db.get_or_create_task("t")
         empty_pk = self.db.upsert_job(task.id, "j2", pdf_path="p", template_id="t", product_id="pr").id
         job2 = Job(job_id="j2", pdf="p", template="t", product="pr")
-        self.assertFalse(bp._distribute_one(self.db, empty_pk, job2, FakeWeChat(), _args()))
+        self.assertFalse(bp._distribute_one(self.db, empty_pk, job2, _get(FakeWeChat()), _args()))
 
     def test_blocked_article_skips_distribute(self):
         # 质量闸拦下的稿：跳过投放（不算失败、不建 distribution、不调微信）
         self.db.upsert_article(self.job_pk, publish_blocked=True, block_reason="markdown_unhealthy:0")
         fake = FakeWeChat()
-        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, fake, _args()))
+        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         self.assertEqual(len(fake.created), 0)
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
 

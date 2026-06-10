@@ -8,9 +8,10 @@
 
 Phase 0 不实现：material/add（永久图文素材）、freepublish、消息群发。
 
-access_token 缓存策略：内存 + 文件（``runtime/wechat_token.json``）。
-文件缓存让多个进程（batch_processor + dashboard）共享同一个 token，
-避免 token 互相覆盖（微信只允许一个有效 token，新拿一个旧的就失效）。
+access_token 缓存策略：内存 + 文件，**按账户隔离** ``runtime/wechat_token_{account}.json``。
+多账户（AAV / 免疫客）各自一个 token 文件，避免互相覆盖（微信每个账户同一时刻只允许
+一个有效 token，新拿一个旧的就失效）；多进程通过同一文件共享同账户的 token。
+凭据按账户读 ``WECHAT_{ACCOUNT}_APP_ID/SECRET``（回落通用 ``WECHAT_APP_ID/SECRET``）。
 """
 from __future__ import annotations
 
@@ -48,17 +49,32 @@ class WeChatClient:
         self,
         app_id: Optional[str] = None,
         app_secret: Optional[str] = None,
+        account: str = "default",
         token_cache_path: Optional[str] = None,
         timeout: float = 20.0,
     ):
-        self.app_id = (app_id or os.getenv("WECHAT_APP_ID", "")).strip()
-        self.app_secret = (app_secret or os.getenv("WECHAT_APP_SECRET", "")).strip()
+        self.account = (account or "default").strip() or "default"
+        acc = self.account.upper()
+        # 凭据优先级：显式参数 > 账户命名空间 env（WECHAT_{ACCOUNT}_*）> 通用 env（WECHAT_*）
+        self.app_id = (
+            app_id
+            or os.getenv(f"WECHAT_{acc}_APP_ID", "")
+            or os.getenv("WECHAT_APP_ID", "")
+        ).strip()
+        self.app_secret = (
+            app_secret
+            or os.getenv(f"WECHAT_{acc}_APP_SECRET", "")
+            or os.getenv("WECHAT_APP_SECRET", "")
+        ).strip()
         if not (self.app_id and self.app_secret):
             raise WeChatAPIError(
-                "WECHAT_APP_ID / WECHAT_APP_SECRET not configured"
+                f"账户 '{self.account}' 凭据未配置（WECHAT_{acc}_APP_ID / WECHAT_{acc}_APP_SECRET）"
             )
         self.timeout = float(timeout)
-        default_cache = Path(__file__).resolve().parent.parent / "runtime" / "wechat_token.json"
+        # token 按账户隔离：微信每个账户同一时刻只允许一个有效 token，多账户各用各的文件
+        default_cache = (
+            Path(__file__).resolve().parent.parent / "runtime" / f"wechat_token_{self.account}.json"
+        )
         self.token_cache_path = Path(token_cache_path) if token_cache_path else default_cache
         self.token_cache_path.parent.mkdir(parents=True, exist_ok=True)
         self._token: Optional[str] = None

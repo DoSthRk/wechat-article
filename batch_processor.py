@@ -24,7 +24,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -127,24 +127,15 @@ def main() -> int:
             logger.error("ArticleAnalyzer init failed: %s", exc)
             return 3
 
-    wechat_client: Optional[WeChatClient] = None
-    if do_distribute:
-        if not args.placeholder_thumb_media:
-            logger.error(
-                "no DEFAULT_THUMB_MEDIA_ID / --placeholder-thumb-media; "
-                "公众号草稿需要封面素材。用 --dry-run 或 --stage generate 跳过投放。"
-            )
-            return 3
-        try:
-            wechat_client = WeChatClient()
-        except WeChatAPIError as exc:
-            logger.error("WeChatClient init failed: %s", exc)
-            return 3
+    # 投放：按账户惰性建 client（token 隔离）；凭据/封面缺失在 _distribute_one 内按 job 报错
+    get_client: Optional[Callable[[str], WeChatClient]] = (
+        _make_client_getter() if do_distribute else None
+    )
 
     success = 0
     failed = 0
     for j in selected:
-        ok = _run_one_job(db, task.id, j, analyzer, wechat_client, args, do_generate, do_distribute)
+        ok = _run_one_job(db, task.id, j, analyzer, get_client, args, do_generate, do_distribute)
         if ok:
             success += 1
         else:
@@ -164,7 +155,7 @@ def _filter_jobs(jobs: List[Job], only: Optional[List[str]]) -> List[Job]:
 def _run_one_job(
     db, task_id: int, job: Job,
     analyzer: Optional[ArticleAnalyzer],
-    wechat_client: Optional[WeChatClient],
+    get_client: Optional[Callable[[str], WeChatClient]],
     args: argparse.Namespace,
     do_generate: bool,
     do_distribute: bool,
@@ -176,9 +167,9 @@ def _run_one_job(
             return False
 
     if do_distribute:
-        if wechat_client is None:
+        if get_client is None:
             return True
-        return _distribute_one(db, job_pk, job, wechat_client, args)
+        return _distribute_one(db, job_pk, job, get_client, args)
 
     return True
 
@@ -263,10 +254,10 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
 
 def _distribute_one(
     db, job_pk: int, job: Job,
-    wechat_client: WeChatClient,
+    get_client: Callable[[str], WeChatClient],
     args: argparse.Namespace,
 ) -> bool:
-    """投放阶段：取基准正文 → 公众号草稿（同 distribution 已有 media_id 则走 PATCH）。"""
+    """投放阶段：取基准正文 → 该线对应账户的公众号草稿（已有 media_id 则走 PATCH）。"""
     article = db.get_article(job_pk)
     if not article or not article.content_dir:
         db.update_job_status(job_pk, JobStatus.FAILED, error_message="distribute: no article, run --stage generate first")
@@ -284,6 +275,23 @@ def _distribute_one(
     # 从 article.md（唯一事实源）实时渲染 HTML —— 标题样式等改动无需重生成即可生效
     html = markdown_to_wechat_html(md_path.read_text(encoding="utf-8"))
     account = _resolve_wechat_account(job)
+    try:
+        client = get_client(account)
+    except WeChatAPIError as exc:
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: {exc}")
+        logger.error("[%s] distribute: 账户 %s 凭据未配置：%s", job.job_id, account, exc)
+        return False
+    thumb_media_id = _resolve_thumb_media_id(account, args)
+    if not thumb_media_id:
+        db.update_job_status(
+            job_pk, JobStatus.FAILED,
+            error_message=f"distribute: account '{account}' 缺封面 thumb_media_id",
+        )
+        logger.error(
+            "[%s] distribute: 账户 %s 缺封面（设 WECHAT_%s_THUMB_MEDIA_ID 或 DEFAULT_THUMB_MEDIA_ID）",
+            job.job_id, account, account.upper(),
+        )
+        return False
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
@@ -291,15 +299,15 @@ def _distribute_one(
         title=article.title or job.title_hint or job.job_id,
         digest=article.digest or "", content_html=html,
         author=args.placeholder_author,
-        thumb_media_id=args.placeholder_thumb_media,
+        thumb_media_id=thumb_media_id,
     )
     try:
         if existing and existing.wechat_media_id:
-            wechat_client.update_draft(existing.wechat_media_id, 0, payload)
+            client.update_draft(existing.wechat_media_id, 0, payload)
             media_id = existing.wechat_media_id
             logger.info("[%s] PATCH wechat/%s media_id=%s", job.job_id, account, media_id)
         else:
-            media_id = wechat_client.create_draft([payload])
+            media_id = client.create_draft([payload])
             logger.info("[%s] POST wechat/%s media_id=%s", job.job_id, account, media_id)
     except WeChatAPIError as exc:
         db.upsert_distribution(
@@ -338,6 +346,27 @@ def _resolve_wechat_account(job: Job) -> str:
     except LineLoadError:
         return "default"
     return str((line.extra or {}).get("wechat_account") or "default")
+
+
+def _make_client_getter() -> Callable[[str], WeChatClient]:
+    """返回按账户建并缓存 WeChatClient 的 getter —— token 按账户隔离（头号坑）。"""
+    cache: Dict[str, WeChatClient] = {}
+
+    def get_client(account: str) -> WeChatClient:
+        if account not in cache:
+            cache[account] = WeChatClient(account=account)
+        return cache[account]
+
+    return get_client
+
+
+def _resolve_thumb_media_id(account: str, args: argparse.Namespace) -> str:
+    """该账户封面素材 id：WECHAT_{ACCOUNT}_THUMB_MEDIA_ID > --placeholder-thumb-media > DEFAULT。"""
+    return (
+        os.getenv(f"WECHAT_{account.upper()}_THUMB_MEDIA_ID", "").strip()
+        or (getattr(args, "placeholder_thumb_media", "") or "").strip()
+        or os.getenv("DEFAULT_THUMB_MEDIA_ID", "").strip()
+    )
 
 
 def _build_article_payload(
