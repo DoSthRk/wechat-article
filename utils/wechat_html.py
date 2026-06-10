@@ -7,9 +7,10 @@
 - 表格要内联 border/padding，否则丑
 - ``<a>`` 只能链到公众号文章 / 视频号 / 小程序，外链会被吞（除认证账号）
 
-Phase 0 策略：用 ``markdown`` 库基础渲染 → 给 ``<table>`` / ``<th>`` / ``<td>`` /
-``<blockquote>`` 加最低限度的内联样式 → 保留 ``[图片:xxx]`` 占位符**原样不动**
-（Phase 1 由 image_provider 接管替换）。
+策略：``markdown`` 库基础渲染 → 给**各级标题（h1-h4，分级字体/字号/颜色，
+公众号草稿里一眼看出层次）**和表格 / 引用 / 代码等加内联样式（公众号只认元素
+上的 ``style=""``，会剥掉 ``<style>`` 块和 class）→ 保留 ``[图片:xxx]`` 占位符
+**原样不动**（由 image_provider 接管替换）。
 """
 from __future__ import annotations
 
@@ -25,8 +26,29 @@ logger = setup_logger("wechat_html")
 # 占位符语法：[图片:描述文字]；描述允许中文/英文/标点，不允许跨行
 IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[图片:([^\[\]\n]+?)\]")
 
-# 给表格/引用块加点最低限度内联样式，避免在公众号里裸奔
+# 内联样式（公众号只认 style=""）。标题分级用「字体 + 字号 + 颜色 + 视觉标记」
+# 三重区分，确保草稿里大标题 / 小标题 / 子标题层次分明：
+#   h1 大标题 —— 衬线、居中、近黑、最大
+#   h2 小标题 —— 无衬线、品牌蓝、左侧色条
+#   h3 子标题 —— 无衬线、青色、更小
+_HEAD_SANS = "-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif"
 INLINE_STYLES = {
+    "h1": (
+        "font-family:'Songti SC','SimSun',serif;font-size:23px;font-weight:700;"
+        "color:#15171a;line-height:1.45;margin:6px 0 22px;text-align:center;letter-spacing:1px;"
+    ),
+    "h2": (
+        f"font-family:{_HEAD_SANS};font-size:19px;font-weight:700;color:#2563eb;"
+        "line-height:1.5;margin:30px 0 14px;padding-left:11px;border-left:4px solid #2563eb;"
+    ),
+    "h3": (
+        f"font-family:{_HEAD_SANS};font-size:16px;font-weight:600;color:#0f766e;"
+        "line-height:1.6;margin:22px 0 10px;"
+    ),
+    "h4": (
+        f"font-family:{_HEAD_SANS};font-size:15px;font-weight:600;color:#57606a;"
+        "line-height:1.6;margin:18px 0 8px;"
+    ),
     "table": "border-collapse:collapse;width:100%;margin:12px 0;",
     "th": "border:1px solid #d0d7de;padding:6px 10px;background:#f6f8fa;font-weight:600;text-align:left;",
     "td": "border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;",

@@ -276,12 +276,13 @@ def _distribute_one(
         # 质量闸拦下：稿子已落盘供人工 review，但不投放（不算失败）
         logger.warning("[%s] 质量闸拦下，跳过投放：%s", job.job_id, article.block_reason)
         return True
-    html_path = Path(article.content_dir) / "article.html"
-    if not html_path.exists():
-        db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: missing {html_path}")
-        logger.error("[%s] distribute: 缺 article.html (%s)", job.job_id, html_path)
+    md_path = Path(article.content_dir) / "article.md"
+    if not md_path.exists():
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: missing {md_path}")
+        logger.error("[%s] distribute: 缺 article.md (%s)", job.job_id, md_path)
         return False
-    html = html_path.read_text(encoding="utf-8")
+    # 从 article.md（唯一事实源）实时渲染 HTML —— 标题样式等改动无需重生成即可生效
+    html = markdown_to_wechat_html(md_path.read_text(encoding="utf-8"))
     account = _resolve_wechat_account(job)
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)

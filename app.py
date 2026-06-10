@@ -65,11 +65,17 @@ def create_app(testing: bool = False) -> Flask:
         md_path = Path(content_dir) / "article.md"
         if not md_path.exists():
             abort(404)
-        html = md_lib.markdown(
-            md_path.read_text(encoding="utf-8"),
-            extensions=["tables", "fenced_code", "sane_lists"],
-        )
-        return render_template("markdown_preview.html", job_id=job_id, content=html)
+        md_text = md_path.read_text(encoding="utf-8")
+        wechat = bool(request.args.get("wechat"))
+        if wechat:
+            # 公众号草稿样式：正是投放到草稿的 HTML（含分级标题内联样式）
+            from utils.wechat_html import markdown_to_wechat_html
+            content = markdown_to_wechat_html(md_text)
+        else:
+            content = md_lib.markdown(
+                md_text, extensions=["tables", "fenced_code", "sane_lists"],
+            )
+        return render_template("markdown_preview.html", job_id=job_id, content=content, wechat=wechat)
 
     return app
 

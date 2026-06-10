@@ -10,12 +10,20 @@
   <header class="topbar">
     <div class="brand">
       <a class="back" href="/">← 流水线</a>
-      <h1>{{ job_id }}<span class="sub">基准正文预览</span></h1>
+      <h1>{{ job_id }}<span class="sub">{{ '公众号草稿样式' if wechat else '基准正文预览' }}</span></h1>
+    </div>
+    <div class="modes">
+      <a href="/preview/{{ job_id }}" class="{{ '' if wechat else 'active' }}">阅读预览</a>
+      <a href="/preview/{{ job_id }}?wechat=1" class="{{ 'active' if wechat else '' }}">公众号草稿样式</a>
     </div>
   </header>
   <main class="preview">
-    <article class="doc">{{ content | safe }}</article>
-    <p class="note">提示：<code>[图片:Figure X …]</code> 是图片占位符，由投放前的图片管线替换为真实图。</p>
+    {% if wechat %}
+      <article class="wxbody">{{ content | safe }}</article>
+    {% else %}
+      <article class="doc">{{ content | safe }}</article>
+      <p class="note">提示：<code>[图片:Figure X …]</code> 是图片占位符，由投放前的图片管线替换为真实图。</p>
+    {% endif %}
   </main>
 </body>
 </html>

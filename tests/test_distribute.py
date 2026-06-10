@@ -41,7 +41,8 @@ class TestDistributeOne(unittest.TestCase):
         ).id
         content_dir = base / "out"
         content_dir.mkdir()
-        (content_dir / "article.html").write_text("<h1>标题</h1><p>正文</p>", encoding="utf-8")
+        # distribute 从 article.md 实时渲染，所以这里写 markdown
+        (content_dir / "article.md").write_text("# 标题\n\n正文段落。", encoding="utf-8")
         self.db.upsert_article(self.job_pk, title="测试标题", digest="测试摘要", content_dir=str(content_dir))
         self.job = Job(job_id="j1", pdf="p", template="t", product="pr", line=None)
 

@@ -124,3 +124,21 @@ a.preview:hover { text-decoration: underline; }
 .doc th, .doc td { border: 1px solid #ddd; padding: 6px 10px; }
 .note { color: #888; font-size: 13px; margin-top: 2rem; border-top: 1px dashed #ddd; padding-top: 1rem; }
 .note code, .doc code { background: #ececec; padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: .9em; }
+
+/* ---- 公众号草稿样式预览（让标题内联样式原样呈现，模拟手机阅读宽度）---- */
+.wxbody {
+  max-width: 600px; margin: 0 auto; background: #fff;
+  padding: 26px 18px 90px; color: #222; font-size: 16px; line-height: 1.85;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.wxbody p { margin: 0 0 1em; }
+.wxbody img { max-width: 100%; }
+.wxbody table { border-collapse: collapse; width: 100%; }
+
+/* 模式切换 */
+.modes { display: flex; gap: 8px; }
+.modes a {
+  font-size: 12px; text-decoration: none; padding: 4px 12px;
+  border: 1px solid #ddd; border-radius: 999px; color: #666;
+}
+.modes a.active { color: #fff; background: #2563eb; border-color: #2563eb; }
