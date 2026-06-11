@@ -1,16 +1,18 @@
-"""从 PDF 抽取插图 —— 题注定位 + 渲染裁剪（pypdfium2 渲染 + pdfplumber 定位）。
+"""从 PDF 抽取插图 —— 题注定位 + 图页识别 + 渲染裁剪（pypdfium2 + pdfplumber）。
 
-策略（对矢量图 / 位图 / 拼版图通用）：
-1. pdfplumber 找真题注：以「(Extended Data )Fig. N |」开头的行（竖线是 Nature 题注
-   标记，正文引用没有竖线，可靠区分）。
-2. 图区域 = 题注上方（回落下方）那一带里**图形元素（image/rect/curve/line）的并集 bbox**
-   —— 排除正文文字，裁得紧。
-3. pypdfium2 把该页渲染成高 DPI 位图，按 bbox 裁剪成 PNG。
+版式洞察：很多期刊 PDF 是「题注在文本页底部、图在下一张整页」。所以：
+1. pdfplumber 找真题注：行首「(Extended Data )Fig. N |」（竖线是 Nature 题注标记，
+   正文引用没有竖线，可靠区分）。
+2. 给每页分类：图页 = 图形元素多 + 文字少。
+3. **主图题注**（文本页上的 Fig N）→ 取**下一张图页**的整页图形并集区域；
+   取不到再回落到题注同页的图形区域（附录图 / 同页图属此类）。
+4. pypdfium2 渲染目标页，按区域裁剪成 PNG。
 
-产出 figures_manifest.json：每条 {label, is_extended, caption, page, image_path}。
-正文占位符 [图片:Figure N …] 按图号 label 匹配（主图优先于 Extended Data）。
+产出 figures_manifest.json：{label, is_extended, page, image_path, ...}。
+正文 [图片:Figure N …] 按图号 + 类别匹配（主图配主图，绝不拿附录顶替）。
 
-注：复杂论文不保证 100% 准确（接受尽力自动）。版权：复用已发表论文图需自行确认。
+注：复杂论文版式不规则，不保证 100%（接受尽力自动）；配不上的留占位符，可人工放图。
+版权：复用已发表论文图需自行确认（开放获取 CC-BY 才稳）。
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pdfplumber
 import pypdfium2 as pdfium
@@ -27,21 +29,22 @@ from utils.logger import setup_logger
 
 logger = setup_logger("pdf_figure_extractor")
 
-# 题注：行首「(Extended Data )Fig(ure) N |」（竖线 | 或全角 ｜ 是真题注标记）
 _CAP_RE = re.compile(r"^(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[|｜]", re.I)
-# 取图号（占位符 / 题注通用）："Figure 1e" → "1"
 _NUM_RE = re.compile(r"(?:Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)", re.I)
 _DPI = 170
-_MARGIN = 28          # 页边距（点）
-_MIN_REGION = 120     # 区域最小边长（点），太小视为没抓到
+_MARGIN = 24
+_MIN_REGION = 120     # 区域最小边长（点）
+_FIGPAGE_MIN_GFX = 300   # 图页：图形元素数下限
+_FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
+_TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
 
 
 @dataclass
 class Figure:
-    label: str          # 图号 "1" / "3"
-    is_extended: bool    # True = Extended Data 附录图
+    label: str           # 图号 "1" / "3"
+    is_extended: bool     # True = Extended Data 附录图
     caption: str
-    page: int            # 1-based
+    page: int             # 图所在页（1-based）
     image_path: str
     width: int
     height: int
@@ -53,38 +56,69 @@ def figure_number(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _graphics_union(page, band_top: float, band_bottom: float) -> Optional[Tuple[float, float, float, float]]:
-    """题注带内图形元素（image/rect/curve/line，排除文字）的并集 bbox。"""
+def match_figure(figures: List[Figure], description: str) -> Optional[Figure]:
+    """占位符 → 同图号且同类别的图（主图配主图，附录配附录）；绝不拿附录顶替主图。找不到回 None。"""
+    num = figure_number(description)
+    if not num:
+        return None
+    want_ext = bool(re.search(r"extended\s*data|附录|扩展数据", description or "", re.I))
+    pool = [f for f in figures if f.label == num and f.is_extended == want_ext]
+    return pool[0] if pool else None
+
+
+def _gfx_elements(page) -> list:
+    out: list = []
+    for kind in ("images", "rects", "curves", "lines"):
+        out.extend(getattr(page, kind, None) or [])
+    return out
+
+
+def _union(elems: list, band_top: Optional[float] = None,
+           band_bottom: Optional[float] = None) -> Optional[Tuple[float, float, float, float]]:
+    """图形元素并集 bbox（可限定纵向带 band_top..band_bottom）。"""
     xs0: List[float] = []
     ys0: List[float] = []
     xs1: List[float] = []
     ys1: List[float] = []
-    for kind in ("images", "rects", "curves", "lines"):
-        for e in (getattr(page, kind, None) or []):
-            top, bottom = float(e.get("top", 0)), float(e.get("bottom", 0))
-            if bottom <= band_top or top >= band_bottom:
-                continue
-            xs0.append(float(e.get("x0", 0)))
-            ys0.append(max(top, band_top))
-            xs1.append(float(e.get("x1", 0)))
-            ys1.append(min(bottom, band_bottom))
+    for e in elems:
+        t, b = float(e.get("top", 0)), float(e.get("bottom", 0))
+        if band_top is not None and b <= band_top:
+            continue
+        if band_bottom is not None and t >= band_bottom:
+            continue
+        xs0.append(float(e.get("x0", 0)))
+        xs1.append(float(e.get("x1", 0)))
+        ys0.append(max(t, band_top) if band_top is not None else t)
+        ys1.append(min(b, band_bottom) if band_bottom is not None else b)
     if not xs0:
         return None
     return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+def _words_in(words: list, region: Tuple[float, float, float, float]) -> int:
+    rx0, rt, rx1, rb = region
+    return sum(
+        1 for w in words
+        if float(w["x0"]) >= rx0 - 2 and float(w["x1"]) <= rx1 + 2
+        and float(w["top"]) >= rt - 2 and float(w["bottom"]) <= rb + 2
+    )
+
+
+def _is_figure_page(nwords: int, ngfx: int) -> bool:
+    return ngfx >= _FIGPAGE_MIN_GFX and nwords <= _FIGPAGE_MAX_WORDS
 
 
 def extract_figures(
     pdf_path: str, out_dir: str, *,
     max_pages: Optional[int] = None, dpi: int = _DPI, use_cache: bool = True,
 ) -> List[Figure]:
-    """抽图到 out_dir，写 figures_manifest.json。use_cache=True 时若 manifest 在则直接读。"""
+    """抽图到 out_dir，写 figures_manifest.json。use_cache=True 且 manifest 在则直接读。"""
     out = Path(out_dir)
     manifest_path = out / "figures_manifest.json"
     if use_cache and manifest_path.exists():
         try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            return [Figure(**d) for d in data]
-        except Exception:  # noqa: BLE001 - 缓存坏了就重抽
+            return [Figure(**d) for d in json.loads(manifest_path.read_text(encoding="utf-8"))]
+        except Exception:  # noqa: BLE001
             pass
 
     out.mkdir(parents=True, exist_ok=True)
@@ -95,49 +129,57 @@ def extract_figures(
         with pdfplumber.open(pdf_path) as pdf:
             total = len(pdf.pages)
             limit = min(max_pages, total) if max_pages else total
+            prof: List[Dict] = []
             for i in range(limit):
-                page = pdf.pages[i]
+                pg = pdf.pages[i]
+                words = pg.extract_words() or []
+                gfx = _gfx_elements(pg)
                 caps = []
-                for ln in page.extract_text_lines():
+                for ln in pg.extract_text_lines():
                     m = _CAP_RE.match((ln.get("text") or "").strip())
                     if m:
                         caps.append((bool(m.group(1)), m.group(2),
                                      float(ln.get("top", 0)), float(ln.get("bottom", 0))))
-                if not caps:
-                    continue
-                caps.sort(key=lambda c: c[2])
-                rendered = doc[i].render(scale=scale).to_pil()
-                pw, ph = float(page.width), float(page.height)
-                words = page.extract_words() or []
-                for idx, (is_ext, num, ctop, cbot) in enumerate(caps):
-                    prev_bottom = caps[idx - 1][3] if idx > 0 else _MARGIN
-                    next_top = caps[idx + 1][2] if idx + 1 < len(caps) else ph - _MARGIN
-                    # 先试题注上方，太矮回落到下方
-                    region = _graphics_union(page, prev_bottom, ctop)
-                    if not region or (region[3] - region[1]) < _MIN_REGION:
-                        region = _graphics_union(page, cbot, next_top)
-                    if not region:
+                prof.append({
+                    "pg": pg, "words": words, "gfx": gfx, "caps": caps,
+                    "is_fig": _is_figure_page(len(words), len(gfx)),
+                })
+
+            used_pages: set = set()
+            for i in range(limit):
+                for (is_ext, num, ctop, cbot) in prof[i]["caps"]:
+                    fp: Optional[int] = None
+                    region: Optional[Tuple[float, float, float, float]] = None
+                    # (a) 主图题注在文本页 → 下一张整页图页
+                    if (not is_ext) and (not prof[i]["is_fig"]) \
+                            and i + 1 < limit and prof[i + 1]["is_fig"] and (i + 1) not in used_pages:
+                        fp = i + 1
+                        region = _union(prof[fp]["gfx"])
+                        used_pages.add(fp)
+                    # (b) 回落：题注同页的图形区域（附录图 / 同页图）
+                    if region is None:
+                        pg = prof[i]["pg"]
+                        ph = float(pg.height)
+                        region = _union(prof[i]["gfx"], _MARGIN, ctop) \
+                            or _union(prof[i]["gfx"], cbot, ph - _MARGIN)
+                        fp = i
+                        if region and not prof[i]["is_fig"] \
+                                and _words_in(prof[i]["words"], region) > _TEXT_GUARD_WORDS:
+                            region = None  # 文字密集 → 是正文，跳过
+                    if region is None or fp is None:
                         continue
-                    rx0, rtop, rx1, rbot = region
-                    if (rx1 - rx0) < _MIN_REGION or (rbot - rtop) < _MIN_REGION:
+                    rx0, rt, rx1, rb = region
+                    if (rx1 - rx0) < _MIN_REGION or (rb - rt) < _MIN_REGION:
                         continue
-                    # 文字密度护栏：区域内文字过多 → 是正文不是图，跳过（绝不把文字块当图）
-                    n_words = sum(
-                        1 for w in words
-                        if float(w["x0"]) >= rx0 - 2 and float(w["x1"]) <= rx1 + 2
-                        and float(w["top"]) >= rtop - 2 and float(w["bottom"]) <= rbot + 2
-                    )
-                    if n_words > 45:
-                        logger.info("p%d fig%s 区域文字过多(%d 词)，判为正文跳过", i + 1, num, n_words)
-                        continue
-                    box = (max(0, int(rx0 * scale)), max(0, int(rtop * scale)),
-                           int(rx1 * scale), int(rbot * scale))
+                    rendered = doc[fp].render(scale=scale).to_pil()
+                    box = (max(0, int(rx0 * scale)), max(0, int(rt * scale)),
+                           int(rx1 * scale), int(rb * scale))
                     crop = rendered.crop(box)
-                    fname = f"{'ed' if is_ext else 'fig'}{num}_p{i + 1}.png"
+                    fname = f"{'ed' if is_ext else 'fig'}{num}_p{fp + 1}.png"
                     crop.save(str(out / fname))
                     figures.append(Figure(
                         label=num, is_extended=is_ext, caption="",
-                        page=i + 1, image_path=str(out / fname),
+                        page=fp + 1, image_path=str(out / fname),
                         width=crop.width, height=crop.height,
                     ))
     finally:
@@ -148,16 +190,3 @@ def extract_figures(
     )
     logger.info("extracted %d figure(s) from %s", len(figures), Path(pdf_path).name)
     return figures
-
-
-def match_figure(figures: List[Figure], description: str) -> Optional[Figure]:
-    """占位符描述 → 同图号且同类别的图（主图配主图，附录配附录）。
-
-    绝不拿附录图（Extended Data）顶替主图——它们是不同的图，顶替=插错。找不到回 None。
-    """
-    num = figure_number(description)
-    if not num:
-        return None
-    want_ext = bool(re.search(r"extended\s*data|附录|扩展数据", description or "", re.I))
-    pool = [f for f in figures if f.label == num and f.is_extended == want_ext]
-    return pool[0] if pool else None
