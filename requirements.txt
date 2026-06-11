@@ -8,8 +8,10 @@ openai>=1.40.0
 python-dotenv>=1.0.0
 PyYAML>=6.0
 
-# PDF 抽取
+# PDF 抽取（文本）+ 图（渲染裁剪：pypdfium2 渲染 + Pillow 裁剪）
 pdfplumber>=0.11.0
+pypdfium2>=4.0.0
+Pillow>=10.0.0
 
 # Markdown 转 HTML
 markdown>=3.6
