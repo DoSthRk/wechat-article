@@ -281,20 +281,23 @@ def _distribute_one(
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: {exc}")
         logger.error("[%s] distribute: 账户 %s 凭据未配置：%s", job.job_id, account, exc)
         return False
+    existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
     thumb_media_id = _resolve_thumb_media_id(account, args)
+    if not thumb_media_id and existing and existing.wechat_media_id:
+        # 重投 PATCH：复用原草稿现有封面，省去手动配 thumb_media_id
+        thumb_media_id = _existing_draft_thumb(client, existing.wechat_media_id)
     if not thumb_media_id:
         db.update_job_status(
             job_pk, JobStatus.FAILED,
             error_message=f"distribute: account '{account}' 缺封面 thumb_media_id",
         )
         logger.error(
-            "[%s] distribute: 账户 %s 缺封面（设 WECHAT_%s_THUMB_MEDIA_ID 或 DEFAULT_THUMB_MEDIA_ID）",
+            "[%s] distribute: 账户 %s 缺封面（设 WECHAT_%s_THUMB_MEDIA_ID；或确保原草稿在以复用其封面）",
             job.job_id, account, account.upper(),
         )
         return False
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
-    existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
     payload = _build_article_payload(
         title=article.title or job.title_hint or job.job_id,
         digest=article.digest or "", content_html=html,
@@ -367,6 +370,18 @@ def _resolve_thumb_media_id(account: str, args: argparse.Namespace) -> str:
         or (getattr(args, "placeholder_thumb_media", "") or "").strip()
         or os.getenv("DEFAULT_THUMB_MEDIA_ID", "").strip()
     )
+
+
+def _existing_draft_thumb(client: WeChatClient, media_id: str) -> str:
+    """取已存草稿当前封面 thumb_media_id（重投 PATCH 时复用）；取不到回空串。"""
+    try:
+        data = client.get_draft(media_id)
+    except WeChatAPIError:
+        return ""
+    items = data.get("news_item") or []
+    if items:
+        return str(items[0].get("thumb_media_id") or "").strip()
+    return ""
 
 
 def _build_article_payload(

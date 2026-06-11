@@ -181,6 +181,17 @@ class WeChatClient:
             raise WeChatAPIError(f"update_draft failed: {data}", errcode=data.get("errcode"), raw=data)
         logger.info("draft updated media_id=%s index=%d", media_id, index)
 
+    def get_draft(self, media_id: str) -> Dict[str, Any]:
+        """GET /cgi-bin/draft/get —— 取已存草稿内容（重投 PATCH 时复用其封面 thumb_media_id）。"""
+        token = self.get_access_token()
+        url = f"{WECHAT_API_BASE}/cgi-bin/draft/get?access_token={token}"
+        status, body = self._http_post_json(url, {"media_id": media_id})
+        data = self._parse_json(body)
+        if status != 200 or "news_item" not in data:
+            self._maybe_invalidate_token(data)
+            raise WeChatAPIError(f"get_draft failed: {data}", errcode=data.get("errcode"), raw=data)
+        return data
+
     def upload_image(self, local_path: str) -> str:
         """POST /cgi-bin/media/uploadimg。仅供公众号图文正文里 <img src> 用。
 
