@@ -19,12 +19,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -40,7 +41,13 @@ from utils.logger import setup_logger
 from utils.product_loader import load_product_by_id
 from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
-from utils.wechat_html import extract_title_and_digest, markdown_to_wechat_html
+from utils.pdf_figure_extractor import extract_figures, figure_number, match_figure
+from utils.wechat_html import (
+    extract_title_and_digest,
+    find_image_placeholders,
+    markdown_to_wechat_html,
+    replace_image_placeholder,
+)
 
 load_dotenv()
 logger = setup_logger("batch_processor")
@@ -50,6 +57,7 @@ DEFAULT_JOBS_YAML = str(PROJECT_ROOT / "inputs" / "jobs.yaml")
 LINES_DIR = str(PROJECT_ROOT / "inputs" / "lines")
 DATA_DIR = PROJECT_ROOT / "data"
 PRODUCTS_DIR = str(PROJECT_ROOT / "inputs" / "products")
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
 
 WECHAT_PLATFORM = "wechat"
 DEFAULT_LANG = "zh"
@@ -297,6 +305,11 @@ def _distribute_one(
         )
         return False
 
+    html, n_figs = _apply_figures(html, job, client, account)
+    leftover = len(find_image_placeholders(html))
+    if n_figs or leftover:
+        logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
+
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
     payload = _build_article_payload(
         title=article.title or job.title_hint or job.job_id,
@@ -382,6 +395,75 @@ def _existing_draft_thumb(client: WeChatClient, media_id: str) -> str:
     if items:
         return str(items[0].get("thumb_media_id") or "").strip()
     return ""
+
+
+def _fig_max_pages(job: Job) -> Optional[int]:
+    raw = (job.extra or {}).get("max_pages")
+    try:
+        n = int(raw)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_figure_path(description: str, figures_dir: Path, extracted) -> Optional[str]:
+    """占位符 → 图片本地路径：优先人工放的 figures/fig{N}.{png,jpg}，否则自动抽取的匹配图。"""
+    num = figure_number(description)
+    if num:
+        for ext in (".png", ".jpg", ".jpeg"):
+            p = figures_dir / f"fig{num}{ext}"
+            if p.exists():
+                return str(p)
+    fig = match_figure(extracted, description)
+    return fig.image_path if fig else None
+
+
+def _upload_cached(client: WeChatClient, account: str, local_path: str) -> str:
+    """上传图片到该账户，sha256 缓存避免重复上传（公众号 uploadimg 5000/日配额）。"""
+    manifest_path = RUNTIME_DIR / f"image_upload_manifest_{account}.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        manifest = {}
+    h = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    sha = h.hexdigest()
+    if sha in manifest:
+        return str(manifest[sha])
+    url = client.upload_image(local_path)
+    manifest[sha] = url
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return url
+
+
+def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> Tuple[str, int]:
+    """把 [图片:Figure N …] 占位符替换为真实公众号图（人工放的 fig{N}.png 优先，自动抽取兜底）。"""
+    placeholders = find_image_placeholders(html)
+    if not placeholders:
+        return html, 0
+    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
+    extracted = []
+    if job.pdf and Path(job.pdf).exists():
+        try:
+            extracted = extract_figures(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+        except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
+            logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
+    used = 0
+    for desc in placeholders:
+        path = _resolve_figure_path(desc, figures_dir, extracted)
+        if not path:
+            continue
+        try:
+            url = _upload_cached(client, account, path)
+        except WeChatAPIError as exc:
+            logger.warning("[%s] 配图上传失败 %s：%s", job.job_id, path, exc)
+            continue
+        html = replace_image_placeholder(html, desc, url)
+        used += 1
+    return html, used
 
 
 def _build_article_payload(
