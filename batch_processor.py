@@ -452,9 +452,14 @@ def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> T
         except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
             logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
     used = 0
+    used_paths: set = set()
     for desc in placeholders:
         path = _resolve_figure_path(desc, figures_dir, extracted)
         if not path:
+            continue
+        if path in used_paths:
+            # 同一张图已用过（如 Figure 1 与 Figure 1e 都指向 Fig 1）→ 删掉重复占位符，不重复插图
+            html = html.replace(f"[图片:{desc}]", "", 1)
             continue
         try:
             url = _upload_cached(client, account, path)
@@ -462,6 +467,7 @@ def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> T
             logger.warning("[%s] 配图上传失败 %s：%s", job.job_id, path, exc)
             continue
         html = replace_image_placeholder(html, desc, url)
+        used_paths.add(path)
         used += 1
     return html, used
 
