@@ -456,6 +456,8 @@ def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> T
     for desc in placeholders:
         path = _resolve_figure_path(desc, figures_dir, extracted)
         if not path:
+            # 配不到图：删掉占位符，不在草稿里留 [图片:…] 方括号文字
+            html = html.replace(f"[图片:{desc}]", "", 1)
             continue
         if path in used_paths:
             # 同一张图已用过（如 Figure 1 与 Figure 1e 都指向 Fig 1）→ 删掉重复占位符，不重复插图
