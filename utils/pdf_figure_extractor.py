@@ -108,6 +108,30 @@ def _is_figure_page(nwords: int, ngfx: int) -> bool:
     return ngfx >= _FIGPAGE_MIN_GFX and nwords <= _FIGPAGE_MAX_WORDS
 
 
+def _figure_region_on_page(page, gfx: list, words: list) -> Optional[Tuple[float, float, float, float]]:
+    """整页图页里框出"图"区域：按行统计图形 vs 文字密度，取图形占主导的纵向连续带，
+    排除顶部续排正文 / 底部页脚 —— 解决"上文下图"页裁进正文的问题。"""
+    ph = float(page.height)
+    nb = 24
+    band = ph / nb
+    g = [0] * nb
+    w = [0] * nb
+    for e in gfx:
+        k = int(float(e.get("top", 0)) // band)
+        if 0 <= k < nb:
+            g[k] += 1
+    for x in words:
+        k = int(float(x.get("top", 0)) // band)
+        if 0 <= k < nb:
+            w[k] += 1
+    fig_bands = [k for k in range(nb) if g[k] >= 5 and g[k] > w[k]]
+    if not fig_bands:
+        return None
+    top = fig_bands[0] * band
+    bottom = (fig_bands[-1] + 1) * band
+    return _union(gfx, top, bottom)
+
+
 def extract_figures(
     pdf_path: str, out_dir: str, *,
     max_pages: Optional[int] = None, dpi: int = _DPI, use_cache: bool = True,
@@ -154,7 +178,8 @@ def extract_figures(
                     if (not is_ext) and (not prof[i]["is_fig"]) \
                             and i + 1 < limit and prof[i + 1]["is_fig"] and (i + 1) not in used_pages:
                         fp = i + 1
-                        region = _union(prof[fp]["gfx"])
+                        region = _figure_region_on_page(prof[fp]["pg"], prof[fp]["gfx"], prof[fp]["words"]) \
+                            or _union(prof[fp]["gfx"])
                         used_pages.add(fp)
                     # (b) 回落：题注同页的图形区域（附录图 / 同页图）
                     if region is None:
