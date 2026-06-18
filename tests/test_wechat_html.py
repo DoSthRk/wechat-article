@@ -10,26 +10,38 @@ from utils.wechat_html import (
 )
 
 
-class TestHeadingStyles(unittest.TestCase):
+class TestFormatRules(unittest.TestCase):
+    """格式规则（用户拍板）：删大标题 / 正文 14px / 小标题 15px #ab1942 / 统一微软雅黑。"""
+
     def setUp(self):
-        md = "# 大标题\n\n正文一。\n\n## 小标题A\n\n正文二。\n\n### 子标题\n\n正文三。"
+        md = "# 大标题\n\n正文一段。\n\n## 小标题A\n\n正文二段。"
         self.html = markdown_to_wechat_html(md)
 
-    def test_each_level_has_inline_style(self):
-        self.assertRegex(self.html, r'<h1 style="[^"]+">大标题</h1>')
-        self.assertRegex(self.html, r'<h2 style="[^"]+">小标题A</h2>')
-        self.assertRegex(self.html, r'<h3 style="[^"]+">子标题</h3>')
+    def test_h1_big_title_removed(self):
+        self.assertNotIn("<h1", self.html)
+        self.assertNotIn("大标题", self.html)  # h1 文本一并删除
 
-    def test_levels_are_visually_distinct(self):
-        h1 = re.search(r'<h1 style="([^"]+)"', self.html).group(1)
-        h2 = re.search(r'<h2 style="([^"]+)"', self.html).group(1)
-        h3 = re.search(r'<h3 style="([^"]+)"', self.html).group(1)
-        # 三级样式互不相同（字体 / 字号 / 颜色至少有别）
-        self.assertNotEqual(h1, h2)
-        self.assertNotEqual(h2, h3)
-        # h1 衬线、h2 品牌蓝
-        self.assertIn("serif", h1)
-        self.assertIn("#2563eb", h2)
+    def test_h2_subheading_color_and_size(self):
+        m = re.search(r'<h2 style="([^"]+)">小标题A</h2>', self.html)
+        self.assertIsNotNone(m)
+        style = m.group(1)
+        self.assertIn("#ab1942", style)
+        self.assertIn("font-size:15px", style)
+        self.assertIn("Microsoft YaHei", style)
+
+    def test_body_paragraph_14px(self):
+        m = re.search(r'<p style="([^"]+)">正文一段。</p>', self.html)
+        self.assertIsNotNone(m)
+        self.assertIn("font-size:14px", m.group(1))
+        self.assertIn("Microsoft YaHei", m.group(1))
+
+    def test_no_serif_or_blue_anywhere(self):
+        # sans-serif（无衬线回退）允许；真正的衬线/宋体不允许
+        self.assertNotIn("serif", self.html.replace("sans-serif", ""))
+        self.assertNotIn("SimSun", self.html)
+        self.assertNotIn("Songti", self.html)
+        self.assertNotIn("宋体", self.html)
+        self.assertNotIn("#2563eb", self.html)  # 旧的蓝色不再出现
 
 
 class TestPlaceholderAndSafety(unittest.TestCase):

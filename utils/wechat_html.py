@@ -7,10 +7,10 @@
 - 表格要内联 border/padding，否则丑
 - ``<a>`` 只能链到公众号文章 / 视频号 / 小程序，外链会被吞（除认证账号）
 
-策略：``markdown`` 库基础渲染 → 给**各级标题（h1-h4，分级字体/字号/颜色，
-公众号草稿里一眼看出层次）**和表格 / 引用 / 代码等加内联样式（公众号只认元素
-上的 ``style=""``，会剥掉 ``<style>`` 块和 class）→ 保留 ``[图片:xxx]`` 占位符
-**原样不动**（由 image_provider 接管替换）。
+策略：``markdown`` 库基础渲染 → **删掉正文 h1 大标题**（与草稿 title 重复）→ 给
+正文 / 小标题 / 表格 / 引用 等加内联样式（统一微软雅黑、正文 14px、小标题 15px
+配色 #ab1942；公众号只认元素上的 ``style=""``，会剥掉 ``<style>`` 块和 class）→
+保留 ``[图片:xxx]`` 占位符**原样不动**（由 image_provider 接管替换）。
 """
 from __future__ import annotations
 
@@ -26,33 +26,38 @@ logger = setup_logger("wechat_html")
 # 占位符语法：[图片:描述文字]；描述允许中文/英文/标点，不允许跨行
 IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[图片:([^\[\]\n]+?)\]")
 
-# 内联样式（公众号只认 style=""）。标题分级用「字体 + 字号 + 颜色 + 视觉标记」
-# 三重区分，确保草稿里大标题 / 小标题 / 子标题层次分明：
-#   h1 大标题 —— 衬线、居中、近黑、最大
-#   h2 小标题 —— 无衬线、品牌蓝、左侧色条
-#   h3 子标题 —— 无衬线、青色、更小
-_HEAD_SANS = "-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif"
+# 内联样式（公众号只认 style=""）。格式规则（用户拍板）：
+#   - 大标题(h1) 不进正文 —— 与草稿 title 重复，整体删除（见 markdown_to_wechat_html）
+#   - 统一一种字体：电脑端微信/浏览器默认 微软雅黑（不用宋体/衬线）
+#   - 正文 14px、小标题(h2) 15px；小标题颜色 #ab1942（不用蓝色）
+_FONT = "'Microsoft YaHei','微软雅黑',-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif"
+_ACCENT = "#ab1942"   # 小标题主色
+_BODY_COLOR = "#333333"
 INLINE_STYLES = {
-    "h1": (
-        "font-family:'Songti SC','SimSun',serif;font-size:23px;font-weight:700;"
-        "color:#15171a;line-height:1.45;margin:6px 0 22px;text-align:center;letter-spacing:1px;"
+    "h2": (  # 小标题
+        f"font-family:{_FONT};font-size:15px;font-weight:700;color:{_ACCENT};"
+        f"line-height:1.6;margin:26px 0 12px;padding-left:10px;border-left:3px solid {_ACCENT};"
     ),
-    "h2": (
-        f"font-family:{_HEAD_SANS};font-size:19px;font-weight:700;color:#2563eb;"
-        "line-height:1.5;margin:30px 0 14px;padding-left:11px;border-left:4px solid #2563eb;"
-    ),
-    "h3": (
-        f"font-family:{_HEAD_SANS};font-size:16px;font-weight:600;color:#0f766e;"
-        "line-height:1.6;margin:22px 0 10px;"
+    "h3": (  # 子标题（当前文章未用；保留以防）
+        f"font-family:{_FONT};font-size:15px;font-weight:600;color:{_ACCENT};"
+        "line-height:1.6;margin:20px 0 10px;"
     ),
     "h4": (
-        f"font-family:{_HEAD_SANS};font-size:15px;font-weight:600;color:#57606a;"
-        "line-height:1.6;margin:18px 0 8px;"
+        f"font-family:{_FONT};font-size:14px;font-weight:600;color:{_BODY_COLOR};"
+        "line-height:1.6;margin:16px 0 8px;"
     ),
+    "p": f"font-family:{_FONT};font-size:14px;line-height:1.75;color:{_BODY_COLOR};margin:14px 0;",
+    "li": f"font-family:{_FONT};font-size:14px;line-height:1.75;color:{_BODY_COLOR};margin:6px 0;",
     "table": "border-collapse:collapse;width:100%;margin:12px 0;",
-    "th": "border:1px solid #d0d7de;padding:6px 10px;background:#f6f8fa;font-weight:600;text-align:left;",
-    "td": "border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;",
-    "blockquote": "border-left:3px solid #d0d7de;margin:12px 0;padding:6px 12px;color:#57606a;background:#f6f8fa;",
+    "th": (
+        f"border:1px solid #d0d7de;padding:6px 10px;background:#f6f8fa;font-weight:600;"
+        f"text-align:left;font-family:{_FONT};font-size:14px;"
+    ),
+    "td": f"border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;font-family:{_FONT};font-size:14px;",
+    "blockquote": (
+        f"border-left:3px solid #d0d7de;margin:12px 0;padding:6px 12px;color:#57606a;"
+        f"background:#f6f8fa;font-family:{_FONT};font-size:14px;"
+    ),
     "code": "background:#f6f8fa;padding:1px 4px;border-radius:3px;font-family:Consolas,Monaco,monospace;",
     "pre": "background:#f6f8fa;padding:10px;border-radius:5px;overflow-x:auto;",
     "hr": "border:none;border-top:1px solid #d0d7de;margin:18px 0;",
@@ -70,7 +75,10 @@ def markdown_to_wechat_html(markdown_text: str) -> str:
         extensions=["tables", "fenced_code", "sane_lists", "nl2br"],
     )
 
-    # 2. 注入内联样式到关键标签（公众号会保留 style 属性）
+    # 2. 删除正文大标题(h1)：标题已单独作草稿 title 字段，正文里不再重复
+    html = re.sub(r"<h1\b[^>]*>.*?</h1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+
+    # 3. 注入内联样式到关键标签（公众号会保留 style 属性）
     for tag, style in INLINE_STYLES.items():
         # 只给没有 style 的标签注；已有 style 不动（让后续手工微调有空间）
         html = re.sub(
@@ -79,7 +87,7 @@ def markdown_to_wechat_html(markdown_text: str) -> str:
             html,
         )
 
-    # 3. 剥掉公众号不接受的标签（保守做法，Phase 1 可放宽）
+    # 4. 剥掉公众号不接受的标签（保守做法，Phase 1 可放宽）
     html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r"<iframe\b[^>]*>.*?</iframe>", "", html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r"<style\b[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)

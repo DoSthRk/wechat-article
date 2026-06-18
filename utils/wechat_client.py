@@ -6,7 +6,10 @@
 - ``update_draft(media_id, index, payload)``：``/cgi-bin/draft/update``，重发用
 - ``upload_image(local_path)``：``/cgi-bin/media/uploadimg``，返回 mmbiz URL（图片专用，永久）
 
-Phase 0 不实现：material/add（永久图文素材）、freepublish、消息群发。
+- ``add_permanent_material(local_path, type)``：``/cgi-bin/material/add_material``，
+  返回永久素材 ``media_id``（可作草稿封面 ``thumb_media_id``；与 uploadimg 不同）
+
+不实现：freepublish、消息群发。
 
 access_token 缓存策略：内存 + 文件，**按账户隔离** ``runtime/wechat_token_{account}.json``。
 多账户（AAV / 免疫客）各自一个 token 文件，避免互相覆盖（微信每个账户同一时刻只允许
@@ -211,6 +214,46 @@ class WeChatClient:
         mmbiz_url = str(data["url"])
         logger.info("image uploaded: %s -> %s", path.name, mmbiz_url)
         return mmbiz_url
+
+    def add_permanent_material(self, local_path: str, material_type: str = "image") -> str:
+        """POST /cgi-bin/material/add_material?type=image —— 上传永久素材，返回 media_id。
+
+        与 ``upload_image``（media/uploadimg，只供正文 <img src> 用、返回 URL 不返回 media_id）
+        不同：永久素材返回的 ``media_id`` 可直接作草稿封面 ``thumb_media_id``。
+        注意永久图片素材有数量上限（公众号后台可查），调用方应做去重缓存。
+        """
+        path = Path(local_path)
+        if not path.exists():
+            raise WeChatAPIError(f"material not found: {local_path}")
+        token = self.get_access_token()
+        url = (
+            f"{WECHAT_API_BASE}/cgi-bin/material/add_material"
+            f"?access_token={token}&type={material_type}"
+        )
+        status, body = self._http_post_multipart(url, path)
+        data = self._parse_json(body)
+        if status != 200 or "media_id" not in data:
+            self._maybe_invalidate_token(data)
+            raise WeChatAPIError(f"add_material failed: {data}", errcode=data.get("errcode"), raw=data)
+        media_id = str(data["media_id"])
+        logger.info("permanent material added: %s -> media_id=%s", path.name, media_id)
+        return media_id
+
+    def batchget_freepublish(self, offset: int = 0, count: int = 20, no_content: int = 0) -> Dict[str, Any]:
+        """POST /cgi-bin/freepublish/batchget —— 拉取已发布图文列表（默认含正文 content）。
+
+        用于从已发布文章里抽取人工做好的内容（如文末产品模块）。``count`` ≤ 20；
+        ``no_content=0`` 返回正文 HTML。返回原始 dict（item[].content.news_item[]）。
+        """
+        token = self.get_access_token()
+        url = f"{WECHAT_API_BASE}/cgi-bin/freepublish/batchget?access_token={token}"
+        payload = {"offset": int(offset), "count": int(count), "no_content": int(no_content)}
+        status, body = self._http_post_json(url, payload)
+        data = self._parse_json(body)
+        if status != 200 or "item" not in data:
+            self._maybe_invalidate_token(data)
+            raise WeChatAPIError(f"freepublish batchget failed: {data}", errcode=data.get("errcode"), raw=data)
+        return data
 
     # ----------------- HTTP plumbing -----------------
 

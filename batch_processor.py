@@ -41,7 +41,7 @@ from utils.logger import setup_logger
 from utils.product_loader import load_product_by_id
 from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
-from utils.pdf_figure_extractor import extract_figures, figure_number, match_figure
+from utils.pdf_figure_extractor import Figure, extract_figures, figure_number, match_figure
 from utils.wechat_html import (
     extract_title_and_digest,
     find_image_placeholders,
@@ -295,6 +295,9 @@ def _distribute_one(
         # 重投 PATCH：复用原草稿现有封面，省去手动配 thumb_media_id
         thumb_media_id = _existing_draft_thumb(client, existing.wechat_media_id)
     if not thumb_media_id:
+        # 既没配封面也没旧草稿可借（首次发该账户草稿）→ 用文章首图传永久素材自动当封面
+        thumb_media_id = _auto_cover_media_id(client, account, job, html)
+    if not thumb_media_id:
         db.update_job_status(
             job_pk, JobStatus.FAILED,
             error_message=f"distribute: account '{account}' 缺封面 thumb_media_id",
@@ -310,18 +313,31 @@ def _distribute_one(
     if n_figs or leftover:
         logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
 
+    # 拼接产品模块（line×platform 平台专属视觉块：文章链接 + 公众号名片卡 + 产品/二维码图）
+    module = _load_product_module(job.line, WECHAT_PLATFORM)
+    if module:
+        html = html + module
+        logger.info("[%s] 已拼接产品模块 %s-%s", job.job_id, job.line, WECHAT_PLATFORM)
+
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
     payload = _build_article_payload(
         title=article.title or job.title_hint or job.job_id,
         digest=article.digest or "", content_html=html,
-        author=args.placeholder_author,
+        author=_resolve_author(account, args),
         thumb_media_id=thumb_media_id,
     )
     try:
         if existing and existing.wechat_media_id:
-            client.update_draft(existing.wechat_media_id, 0, payload)
-            media_id = existing.wechat_media_id
-            logger.info("[%s] PATCH wechat/%s media_id=%s", job.job_id, account, media_id)
+            try:
+                client.update_draft(existing.wechat_media_id, 0, payload)
+                media_id = existing.wechat_media_id
+                logger.info("[%s] PATCH wechat/%s media_id=%s", job.job_id, account, media_id)
+            except WeChatAPIError as exc:
+                if exc.errcode != 40007:  # 40007=media_id 失效（草稿已被删/过期）→ 重建；其它错抛出
+                    raise
+                logger.warning("[%s] 原草稿 media_id 失效(40007)，改为新建草稿", job.job_id)
+                media_id = client.create_draft([payload])
+                logger.info("[%s] POST wechat/%s media_id=%s（原草稿已删，重建）", job.job_id, account, media_id)
         else:
             media_id = client.create_draft([payload])
             logger.info("[%s] POST wechat/%s media_id=%s", job.job_id, account, media_id)
@@ -374,6 +390,31 @@ def _make_client_getter() -> Callable[[str], WeChatClient]:
         return cache[account]
 
     return get_client
+
+
+def _load_product_module(line: Optional[str], platform: str) -> str:
+    """读取 (line, platform) 的产品模块 HTML，拼到正文尾；无则回空串（不强制每线都有）。
+
+    模块是平台专属视觉块（公众号文章链接 + 公众号名片卡 + 产品/二维码大图），由人工在公众号
+    编辑器做好、用 get_draft 抽出存档到 inputs/product_modules/{line}-{platform}.html。微信编辑器
+    原样 HTML（含 mp-common-profile 名片卡、data-src 图片）经 create_draft 重提交可正常渲染。
+    """
+    if not line:
+        return ""
+    path = PROJECT_ROOT / "inputs" / "product_modules" / f"{line}-{platform}.html"
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def _resolve_author(account: str, args: argparse.Namespace) -> str:
+    """草稿作者署名（用公众号名）：WECHAT_{ACCOUNT}_AUTHOR > --placeholder-author > DEFAULT_AUTHOR。"""
+    return (
+        os.getenv(f"WECHAT_{account.upper()}_AUTHOR", "").strip()
+        or (getattr(args, "placeholder_author", "") or "").strip()
+        or os.getenv("DEFAULT_AUTHOR", "").strip()
+    )
 
 
 def _resolve_thumb_media_id(account: str, args: argparse.Namespace) -> str:
@@ -439,18 +480,115 @@ def _upload_cached(client: WeChatClient, account: str, local_path: str) -> str:
     return url
 
 
+def _upload_cover_cached(client: WeChatClient, account: str, local_path: str) -> str:
+    """上传封面到永久素材（material/add）拿 media_id，sha256 缓存避免重复（永久素材有数量上限）。"""
+    manifest_path = RUNTIME_DIR / f"cover_material_manifest_{account}.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        manifest = {}
+    h = hashlib.sha256()
+    with open(local_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    sha = h.hexdigest()
+    if sha in manifest:
+        return str(manifest[sha])
+    media_id = client.add_permanent_material(local_path, "image")
+    manifest[sha] = media_id
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return media_id
+
+
+def _load_pool_figures(job: Job) -> List[Figure]:
+    """从 image_pool 的 figures_manifest.json 载入预备配图（按图号匹配 ``[图片:Figure N]``）。
+
+    image_pool 是人工/预抽取放好的配图目录，优先于 PDF 自动抽取。caption 里的 FIG{N}
+    解析出图号喂 match_figure。无 pool / 无 manifest / 解析失败都回 []（由 PDF 抽取兜底）。
+    """
+    if not job.image_pool:
+        return []
+    pool = PROJECT_ROOT / "inputs" / "image_pools" / job.image_pool
+    manifest = pool / "figures_manifest.json"
+    if not manifest.exists():
+        return []
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        logger.warning("[%s] image_pool manifest 解析失败：%s", job.job_id, exc)
+        return []
+    figs: List[Figure] = []
+    for item in data.get("figures", []):
+        rel = str(item.get("path") or "").replace("\\", "/")
+        if not rel:
+            continue
+        p = PROJECT_ROOT / rel
+        if not p.exists():
+            p = Path(rel)  # path 可能已是绝对路径
+        if not p.exists():
+            logger.warning("[%s] image_pool 图缺失：%s", job.job_id, rel)
+            continue
+        caption = str(item.get("caption") or "")
+        figs.append(Figure(
+            label=figure_number(caption), is_extended=False, caption=caption,
+            page=int(item.get("page") or 0), image_path=str(p),
+            width=int(item.get("width") or 0), height=int(item.get("height") or 0),
+        ))
+    return figs
+
+
+def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
+    """该 job 的配图来源：image_pool 能按图号匹配则优先，否则回落 PDF 自动抽取。
+
+    关键：pool 的 figures_manifest 若 caption 没有 FIG{N}（图号解析为空，如 AAV 池
+    caption 全空），这些图无法和正文 ``[图片:Figure N]`` 占位符匹配 —— 这时必须回落到
+    带图号的 PDF 抽取图，否则正文会漏掉所有配图。
+    """
+    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
+    pool_figs = _load_pool_figures(job)
+    if any(f.label for f in pool_figs):  # pool 里至少有一张能按图号匹配才用 pool
+        return pool_figs, figures_dir
+    if job.pdf and Path(job.pdf).exists():
+        try:
+            return extract_figures(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job)), figures_dir
+        except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
+            logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
+    return [], figures_dir
+
+
+def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str) -> str:
+    """首次发该账户草稿、又没配封面时：用文章首图自动当封面（image_pool 优先，PDF 抽取兜底）。
+
+    取 html 里第一个 ``[图片:…]`` 占位符对应的图；取不到回落到首张可用配图。
+    传永久素材拿 thumb media_id（sha 缓存）。任何环节取不到图就回空串，由上层报"缺封面"。
+    """
+    extracted, figures_dir = _resolve_job_figures(job)
+    cover_path: Optional[str] = None
+    for desc in find_image_placeholders(html):
+        cover_path = _resolve_figure_path(desc, figures_dir, extracted)
+        if cover_path:
+            break
+    if not cover_path and extracted:
+        cover_path = extracted[0].image_path
+    if not cover_path:
+        logger.warning("[%s] 自动封面：没抽到可用图（image_pool / PDF 都空）", job.job_id)
+        return ""
+    try:
+        media_id = _upload_cover_cached(client, account, cover_path)
+    except WeChatAPIError as exc:
+        logger.error("[%s] 自动封面：上传永久素材失败 %s", job.job_id, exc)
+        return ""
+    logger.info("[%s] 自动封面：%s -> thumb media_id=%s", job.job_id, Path(cover_path).name, media_id)
+    return media_id
+
+
 def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> Tuple[str, int]:
     """把 [图片:Figure N …] 占位符替换为真实公众号图（人工放的 fig{N}.png 优先，自动抽取兜底）。"""
     placeholders = find_image_placeholders(html)
     if not placeholders:
         return html, 0
-    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
-    extracted = []
-    if job.pdf and Path(job.pdf).exists():
-        try:
-            extracted = extract_figures(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
-        except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
-            logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
+    extracted, figures_dir = _resolve_job_figures(job)
     used = 0
     used_paths: set = set()
     for desc in placeholders:
