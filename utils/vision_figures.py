@@ -139,7 +139,7 @@ def _ask_page(client, model: str, pil) -> Optional[dict]:
 
 
 def _crop_bbox(pil, bbox) -> "Optional[object]":
-    """按归一化 bbox 裁图；越界/过小则回落整页。"""
+    """按归一化 bbox 裁图（VLM bbox 回落用）；越界/过小则回落整页。"""
     try:
         x0, y0, x1, y1 = (float(v) for v in bbox)
     except (TypeError, ValueError):
@@ -149,6 +149,71 @@ def _crop_bbox(pil, bbox) -> "Optional[object]":
     if box[2] - box[0] < _MIN_CROP_PX or box[3] - box[1] < _MIN_CROP_PX:
         return pil
     return pil.crop(box)
+
+
+# 确定性裁剪参数（pdfplumber 图形元素，单位 pt）
+_BIN_PT = 4.0           # 纵向占用直方图 bin 大小
+_HEADER_MAX_PT = 60.0   # 顶部"小块"高度 < 此值 → 疑似期刊 Logo/页眉
+_HEADER_GAP_PT = 18.0   # 该小块与正图之间的空隙 ≥ 此值 → 确认是页眉，剪掉
+_LOGO_TOP_FRAC = 0.20   # 仅当小块落在页面顶部这一比例内才剪（避免误伤正图）
+
+
+def _graphics_crop_box(pdf_path: str, idx: int):
+    """用 pdfplumber 图形元素算"整张图"的紧致框（pt）：图形并集 → 题注/页脚/正文(纯文字)自动排除，
+    再剪掉顶部分离的期刊 Logo/页眉短带。返回 (x0,y0,x1,y1) 或 None（无图形）。"""
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        if idx >= len(pdf.pages):
+            return None
+        pg = pdf.pages[idx]
+        h = float(pg.height)
+        els = []
+        for kind in ("images", "rects", "curves", "lines"):
+            els.extend(getattr(pg, kind, None) or [])
+        if not els:
+            return None
+        x0 = min(float(e["x0"]) for e in els)
+        x1 = max(float(e["x1"]) for e in els)
+        y0 = min(float(e["top"]) for e in els)
+        y1 = max(float(e["bottom"]) for e in els)
+        # 顶部 Logo/页眉剪除：纵向占用直方图找"顶部短带 + 空隙"
+        nb = int(h // _BIN_PT) + 1
+        occ = [0] * nb
+        for e in els:
+            for k in range(int(float(e["top"]) // _BIN_PT), int(float(e["bottom"]) // _BIN_PT) + 1):
+                if 0 <= k < nb:
+                    occ[k] += 1
+        cov = [occ[k] >= 1 for k in range(nb)]  # 任意图形元素都算"有内容"
+        i = int(y0 // _BIN_PT)
+        run_start = i
+        while i < nb and cov[i]:                 # 顶部第一块内容（疑似 Logo/页眉）
+            i += 1
+        block_h = (i - run_start) * _BIN_PT
+        gap_start = i
+        while i < nb and not cov[i]:             # 其后的空隙
+            i += 1
+        gap_h = (i - gap_start) * _BIN_PT
+        if (block_h < _HEADER_MAX_PT and gap_h >= _HEADER_GAP_PT
+                and (run_start * _BIN_PT) < _LOGO_TOP_FRAC * h and i < nb):
+            y0 = i * _BIN_PT  # 跳过页眉小块，从正图开始
+    return (max(0.0, x0), max(0.0, y0), x1, y1)
+
+
+def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
+    """优先用确定性图形框裁剪（排除题注/页脚/正文/顶部 Logo）；失败回落 VLM bbox。"""
+    box_pt = None
+    try:
+        box_pt = _graphics_crop_box(pdf_path, idx)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("graphics 裁剪失败，回落 VLM bbox：%s", exc)
+    if box_pt:
+        w, h = pil.size
+        x0, y0, x1, y1 = (int(v * _RENDER_SCALE) for v in box_pt)
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+        if x1 - x0 >= _MIN_CROP_PX and y1 - y0 >= _MIN_CROP_PX:
+            return pil.crop((x0, y0, x1, y1))
+    return _crop_bbox(pil, vlm_bbox or [0, 0, 1, 1])
 
 
 def extract_figures_via_vision(
@@ -182,7 +247,7 @@ def extract_figures_via_vision(
         num = re.sub(r"[^0-9]", "", str(info.get("figure_number") or ""))
         if not num or num in seen:
             continue
-        crop = _crop_bbox(pil, info.get("bbox") or [0, 0, 1, 1])
+        crop = _make_crop(pdf_path, idx, pil, info.get("bbox"))
         fp = out / f"figvis{num}_p{idx + 1}.jpg"
         crop.save(str(fp), quality=85)
         figs.append(Figure(
