@@ -79,6 +79,11 @@ class TestAutoCoverFromPool(unittest.TestCase):
         figs, _ = bp._resolve_job_figures(self.job)            # 无图号 + 无 PDF → 不用 pool
         self.assertEqual(figs, [])
 
+    def test_render_pdf_cover_missing_pdf_returns_none(self):
+        job = Job(job_id="j", pdf="does-not-exist.pdf", template="t", product="p",
+                  line="x", image_pool=None)
+        self.assertIsNone(bp._render_pdf_cover(job, self.base / "figs"))
+
     def test_auto_cover_uploads_first_figure_then_caches(self):
         client = FakeMaterialClient()
         html = "<p>[图片:Figure 1 入组与治疗流程]</p>"

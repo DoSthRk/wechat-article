@@ -549,12 +549,45 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     pool_figs = _load_pool_figures(job)
     if any(f.label for f in pool_figs):  # pool 里至少有一张能按图号匹配才用 pool
         return pool_figs, figures_dir
+    # VLM 视觉抽图：渲染含图页 → 模型给图号+整图 bbox（密集多面板图也能按图号抽，启发式做不到）
+    try:
+        from utils.vision_figures import extract_figures_via_vision, vision_enabled
+        if vision_enabled() and job.pdf and Path(job.pdf).exists():
+            vfigs = extract_figures_via_vision(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            if vfigs:
+                return vfigs, figures_dir
+    except Exception as exc:  # noqa: BLE001 - VLM 失败回落启发式
+        logger.warning("[%s] VLM 抽图失败，回落启发式：%s", job.job_id, exc)
     if job.pdf and Path(job.pdf).exists():
         try:
             return extract_figures(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job)), figures_dir
         except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
             logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
     return [], figures_dir
+
+
+def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
+    """兜底封面：把 PDF 首页渲染成 PNG（期刊/综述 PDF 抽不到插图时用）。取不到回 None。
+
+    这些来源 PDF 常无 Nature 式题注、抽图为 0，又没配固定封面 —— 渲染首页保证有封面可发。
+    首页截图当封面只是占位，建议给该账户设固定品牌封面（WECHAT_{ACCOUNT}_THUMB_MEDIA_ID 优先）。
+    """
+    if not (job.pdf and Path(job.pdf).exists()):
+        return None
+    try:
+        import pypdfium2 as pdfium  # 已是依赖（pdf_figure_extractor 用）
+        doc = pdfium.PdfDocument(job.pdf)
+        try:
+            pil = doc[0].render(scale=2.0).to_pil()
+        finally:
+            doc.close()
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        out = figures_dir / "_cover_page1.png"
+        pil.save(str(out))
+        return str(out)
+    except Exception as exc:  # noqa: BLE001 - 兜底失败不阻断（回落空串→上层报缺封面）
+        logger.warning("[%s] 兜底封面（PDF 首页）渲染失败：%s", job.job_id, exc)
+        return None
 
 
 def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str) -> str:
@@ -572,7 +605,9 @@ def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str
     if not cover_path and extracted:
         cover_path = extracted[0].image_path
     if not cover_path:
-        logger.warning("[%s] 自动封面：没抽到可用图（image_pool / PDF 都空）", job.job_id)
+        cover_path = _render_pdf_cover(job, figures_dir)  # 兜底：渲染 PDF 首页当封面
+    if not cover_path:
+        logger.warning("[%s] 自动封面：没抽到可用图、PDF 首页也渲染失败", job.job_id)
         return ""
     try:
         media_id = _upload_cover_cached(client, account, cover_path)
