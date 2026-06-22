@@ -1,4 +1,4 @@
-"""方案 B prompt 契约测试：正文零产品、结尾点名固定产品、配图来自 PDF。"""
+"""prompt 契约测试：全文零产品（产品与正文完全解耦）、配图来自 PDF。"""
 import unittest
 from pathlib import Path
 
@@ -45,15 +45,16 @@ class TestPromptContractB(unittest.TestCase):
         self.assertNotIn("独门卖点ZZZ", self.msg)
         self.assertNotIn("## 核心卖点", self.msg)
 
-    def test_closing_info_present(self):
-        self.assertIn("测试纯化柱X", self.msg)          # 固定产品名
-        self.assertIn("测试融入角度YYY", self.msg)       # closing_hint
-        self.assertIn("不要承诺临床级用途", self.msg)     # 合规红线
+    def test_no_product_anywhere_in_message(self):
+        # 产品与正文解耦：产品名 / 融入角度 / 合规红线都不再喂进 user message
+        self.assertNotIn("测试纯化柱X", self.msg)        # 固定产品名
+        self.assertNotIn("测试融入角度YYY", self.msg)     # closing_hint
+        self.assertNotIn("不要承诺临床级用途", self.msg)   # 合规红线
 
-    def test_task_forbids_product_in_body(self):
-        self.assertIn("正文", self.msg)
-        self.assertIn("绝不出现", self.msg)
-        self.assertIn("最后一段", self.msg)
+    def test_task_forbids_product_everywhere(self):
+        self.assertIn("全文", self.msg)
+        self.assertIn("零产品", self.msg)
+        self.assertNotIn("最后一段", self.msg)            # 不再允许结尾点名产品
 
     def test_pdf_and_title_present(self):
         self.assertIn("PDF正文内容ABC", self.msg)
@@ -63,9 +64,9 @@ class TestPromptContractB(unittest.TestCase):
 class TestBasePromptFiles(unittest.TestCase):
     def test_base_prompt_contract(self):
         base = (_PROMPTS / "base.system.md").read_text(encoding="utf-8")
-        self.assertIn("正文", base)
         self.assertIn("零产品", base)
-        self.assertIn("最后一段", base)
+        self.assertIn("解耦", base)            # 产品与正文解耦
+        self.assertNotIn("最后一段", base)      # 不再有"结尾点名产品"契约
         self.assertIn("PDF", base)
 
     def test_aav_overlay_exists(self):

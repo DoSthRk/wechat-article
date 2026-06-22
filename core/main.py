@@ -177,12 +177,11 @@ class ArticleAnalyzer:
     def _build_user_message(
         job: Job, pdf_text: str, template: StyleTemplate, product: Product,
     ) -> str:
-        """组装 user message（方案 B）：风格约束 + PDF 原文 + 结尾产品信息 + 任务。
+        """组装 user message：风格约束 + PDF 原文 + 任务。
 
-        注意：**不再**把整块产品信息（卖点 / 规格）喂进正文——产品只在结尾出现，
-        生成侧只需要"产品名 + 融入角度 + 合规红线"。
+        产品与正文已**解耦**：正文和结尾**全程零产品**，产品推广交给发布环节的固定模块。
+        ``product`` 参数保留（调用方签名兼容；产品配置仍在别处用于调性扫描），此处不写入正文 prompt。
         """
-        closing_hint = (getattr(product, "closing_hint", "") or "").strip()
         parts = [
             template.to_prompt_block(),
             "",
@@ -197,25 +196,13 @@ class ArticleAnalyzer:
             "",
             "---",
             "",
-            "# 结尾产品信息（⚠️ 仅用于文章最后一段；正文严禁出现）",
-            "",
-            f"- 固定产品名（人工锁定，**不得更换、也不得新增**别的产品）：{product.name}",
-            f"- 融入角度：{closing_hint or '（无特别要求，自然贴合本篇主题即可）'}",
-        ]
-        if product.forbidden_claims:
-            parts.append("- 合规红线（**绝不违反**）：")
-            parts.extend(f"  - {fc}" for fc in product.forbidden_claims)
-        parts.extend([
-            "",
-            "---",
-            "",
             "# 任务",
             "",
             "写一篇符合上述模板约束的科普文章，主题围绕这份 PDF 的核心内容。",
-            "**正文（结尾产品段之前的全部内容）绝不出现任何产品名 / 品牌 / 公司名 / 链接**；",
-            "只在**最后一段**自然、克制地点名上面给定的固定产品**一次**——"
-            "像中立智库顺手提一个恰好合适的工具，去乙方化、润物细无声。",
-        ])
+            "**全文（正文和结尾）纯科普，绝不出现任何产品名 / 品牌 / 公司名 / 链接 / 二维码，"
+            "也不要为任何产品或工具铺垫需求、顺势带出**——产品推广由发布环节的固定模块承担，与正文解耦。",
+            "结尾用纯科普方式收束（总结意义 + 一个引导读者思考的开放问题），不要拐到任何产品 / 工具。",
+        ]
         if job.title_hint:
             parts.append(f"\n标题方向参考：{job.title_hint}（不必照搬，可改；标题里不要出现产品名）")
         parts.extend([
@@ -225,7 +212,7 @@ class ArticleAnalyzer:
             "- 第一行必须是 `# 标题`",
             "- 配图占位符 `[图片:Figure X 描述]` **只能来自 PDF 里的图**，全文 3-4 张，描述具体、中文、≤30 字",
             "- 全文遵守模板的禁用词约束、字数区间、调性关键词",
-            "- 产品**只在结尾出现一次**，正文零产品",
+            "- **全文零产品**（正文和结尾都不出现产品 / 品牌 / 公司 / 链接）",
         ])
         return "\n".join(parts)
 
