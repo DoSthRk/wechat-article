@@ -44,6 +44,30 @@ class TestFormatRules(unittest.TestCase):
         self.assertNotIn("#2563eb", self.html)  # 旧的蓝色不再出现
 
 
+class TestListRendering(unittest.TestCase):
+    """公众号编辑器会给 <ul>/<li> 插空 bullet → 改成手动符号的 <p>。"""
+
+    def test_unordered_list_becomes_bullet_paragraphs(self):
+        html = markdown_to_wechat_html("正文\n\n- 第一项\n- 第二项\n- 第三项")
+        self.assertNotIn("<ul", html)
+        self.assertNotIn("<li", html)
+        self.assertEqual(html.count("•"), 3)
+        self.assertIn("• 第一项", html)
+
+    def test_ordered_list_becomes_numbered_paragraphs(self):
+        html = markdown_to_wechat_html("正文\n\n1. 甲\n2. 乙")
+        self.assertNotIn("<ol", html)
+        self.assertNotIn("<li", html)
+        self.assertIn("1. 甲", html)
+        self.assertIn("2. 乙", html)
+
+    def test_list_items_keep_inline_styles(self):
+        html = markdown_to_wechat_html("正文\n\n- **加粗**项内容")
+        m = re.search(r'<p style="([^"]+)">• <strong>加粗</strong>项内容</p>', html)
+        self.assertIsNotNone(m)
+        self.assertIn("font-size:14px", m.group(1))
+
+
 class TestPlaceholderAndSafety(unittest.TestCase):
     def test_image_placeholder_preserved(self):
         html = markdown_to_wechat_html("# T\n\n[图片:Figure 1 示意图]\n\n正文")

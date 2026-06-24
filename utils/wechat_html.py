@@ -26,6 +26,9 @@ logger = setup_logger("wechat_html")
 # 占位符语法：[图片:描述文字]；描述允许中文/英文/标点，不允许跨行
 IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[图片:([^\[\]\n]+?)\]")
 
+# 列表项符号（公众号编辑器会给语义 <ul>/<li> 插入空 bullet，故弃用真列表，改手动符号）
+_LIST_BULLET = "•"
+
 # 内联样式（公众号只认 style=""）。格式规则（用户拍板）：
 #   - 大标题(h1) 不进正文 —— 与草稿 title 重复，整体删除（见 markdown_to_wechat_html）
 #   - 统一一种字体：电脑端微信/浏览器默认 微软雅黑（不用宋体/衬线）
@@ -47,7 +50,6 @@ INLINE_STYLES = {
         "line-height:1.6;margin:16px 0 8px;"
     ),
     "p": f"font-family:{_FONT};font-size:14px;line-height:1.75;color:{_BODY_COLOR};margin:14px 0;",
-    "li": f"font-family:{_FONT};font-size:14px;line-height:1.75;color:{_BODY_COLOR};margin:6px 0;",
     "table": "border-collapse:collapse;width:100%;margin:12px 0;",
     "th": (
         f"border:1px solid #d0d7de;padding:6px 10px;background:#f6f8fa;font-weight:600;"
@@ -63,6 +65,34 @@ INLINE_STYLES = {
     "hr": "border:none;border-top:1px solid #d0d7de;margin:18px 0;",
 }
 
+# 列表项样式：与正文同字号，悬挂缩进让换行对齐到符号后（公众号里好看）
+_LIST_ITEM_STYLE = (
+    f"font-family:{_FONT};font-size:14px;line-height:1.75;color:{_BODY_COLOR};"
+    "margin:8px 0;padding-left:1.2em;text-indent:-1.2em;"
+)
+
+
+def _delist(html: str) -> str:
+    """把 ``<ul>``/``<ol>`` 转成带手动符号的 ``<p>``。
+
+    公众号编辑器对语义列表支持差：导入 ``<ul><li>`` 后会在每项前插入一个空 bullet
+    （正文看到一行空圆点 + 一行内容，排版错乱）。改成手动 ``• `` / ``1. `` 前缀的段落，
+    编辑器对 ``<p>`` 处理稳定。仅处理扁平列表（当前内容无嵌套）。
+    """
+    def convert(match: "re.Match[str]") -> str:
+        block = match.group(0)
+        ordered = block[:3].lower() == "<ol"
+        items = re.findall(r"<li\b[^>]*>(.*?)</li>", block, flags=re.DOTALL | re.IGNORECASE)
+        out = []
+        for i, item in enumerate(items, 1):
+            marker = f"{i}. " if ordered else f"{_LIST_BULLET} "
+            out.append(f'<p style="{_LIST_ITEM_STYLE}">{marker}{item.strip()}</p>')
+        return "".join(out)
+
+    html = re.sub(r"<ul\b[^>]*>.*?</ul>", convert, html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<ol\b[^>]*>.*?</ol>", convert, html, flags=re.DOTALL | re.IGNORECASE)
+    return html
+
 
 def markdown_to_wechat_html(markdown_text: str) -> str:
     """主入口：markdown → 公众号可用 HTML，保留图片占位符。"""
@@ -77,6 +107,9 @@ def markdown_to_wechat_html(markdown_text: str) -> str:
 
     # 2. 删除正文大标题(h1)：标题已单独作草稿 title 字段，正文里不再重复
     html = re.sub(r"<h1\b[^>]*>.*?</h1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+
+    # 2b. 列表转手动符号段落（公众号编辑器会给 <ul>/<li> 插空 bullet）
+    html = _delist(html)
 
     # 3. 注入内联样式到关键标签（公众号会保留 style 属性）
     for tag, style in INLINE_STYLES.items():

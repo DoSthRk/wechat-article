@@ -47,6 +47,49 @@ class TestVisionEnabled(unittest.TestCase):
         self.assertFalse(vf.vision_enabled())
 
 
+def _el(x0, top, x1, bottom):
+    return {"x0": x0, "top": top, "x1": x1, "bottom": bottom}
+
+
+class _FakePage:
+    def __init__(self, images=None, rects=None, curves=None, lines=None):
+        self.images, self.rects = images or [], rects or []
+        self.curves, self.lines = curves or [], lines or []
+
+
+class TestDominantImageBox(unittest.TestCase):
+    """图文摘要 / 整版单图：裁到主导大图（含紧贴边框），绕开散落 Logo/图例点。"""
+
+    AREA = 600.0 * 800.0
+
+    def test_dominant_image_crops_to_image_plus_border_excludes_junk(self):
+        pg = _FakePage(
+            images=[_el(50, 190, 340, 480),   # 主导大图 ~17.5%
+                    _el(50, 700, 66, 716)],   # 角落小徽标
+            curves=[_el(48, 188, 342, 482),   # 紧贴主图的边框
+                    _el(500, 700, 540, 760),  # 远处 CellPress logo（应排除）
+                    _el(120, 600, 130, 610)],  # Highlights 圆点（应排除）
+        )
+        box = vf._dominant_image_box(pg, self.AREA)
+        self.assertIsNotNone(box)
+        x0, y0, x1, y1 = box
+        self.assertAlmostEqual(x0, 48, delta=1)   # 含边框
+        self.assertAlmostEqual(y1, 482, delta=1)
+        self.assertLess(x1, 360)                   # 不被远处 logo 拉宽
+        self.assertLess(y1, 500)                   # 不被底部圆点/页脚拉高
+
+    def test_multi_panel_returns_none(self):
+        pg = _FakePage(images=[_el(40, 40, 300, 300), _el(320, 40, 560, 300)])  # 两张相当大小
+        self.assertIsNone(vf._dominant_image_box(pg, self.AREA))
+
+    def test_small_images_return_none(self):
+        pg = _FakePage(images=[_el(40, 40, 90, 90), _el(120, 40, 170, 90)])  # 都很小
+        self.assertIsNone(vf._dominant_image_box(pg, self.AREA))
+
+    def test_no_image_returns_none(self):
+        self.assertIsNone(vf._dominant_image_box(_FakePage(), self.AREA))
+
+
 class TestExtractFlow(unittest.TestCase):
     """mock _image_pages/_render/_client/_ask_page，验证抽取→裁剪→标号→manifest。"""
 
