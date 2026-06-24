@@ -3,42 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>wechat-article · 流水线</title>
+  <title>wechat-article · 操作面板</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="logo">◇</span>
-      <h1>wechat-article<span class="sub">内容 × 投放流水线</span></h1>
+      <div>
+        <h1>wechat-article</h1>
+        <span class="sub">PDF → 科普正文 → VLM 配图 → 产品模块 → 公众号草稿</span>
+      </div>
     </div>
     <div class="stats" id="stats" aria-live="polite"></div>
   </header>
 
   <main>
-    <div class="toolbar">
-      <button id="refresh" class="btn">↻ 刷新</button>
-      <span class="hint">公众号链路用中文原文 · blog 链路按目标语翻译</span>
-    </div>
-    <div class="table-wrap">
-      <table class="grid">
-        <thead>
-          <tr>
-            <th>Job</th>
-            <th>标题</th>
-            <th>状态</th>
-            <th class="num">健康</th>
-            <th class="num">调性</th>
-            <th>质量闸</th>
-            <th>投放</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="rows">
-          <tr><td colspan="8" class="muted">加载中…</td></tr>
-        </tbody>
-      </table>
-    </div>
+    <!-- 1. 内容源：各线 PDF + 一键跑 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>① 内容源</h2>
+        <button id="refresh-src" class="btn ghost">↻ 刷新</button>
+      </div>
+      <div id="sources"><p class="muted">加载中…</p></div>
+    </section>
+
+    <!-- 2. 运行状态 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>② 运行</h2>
+        <span id="run-badge" class="run-badge idle">空闲</span>
+      </div>
+      <div id="run-current" class="run-current"></div>
+      <pre id="run-log" class="run-log muted">（无运行）</pre>
+      <div id="run-history" class="run-history"></div>
+    </section>
+
+    <!-- 3. 文章 × 投放 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>③ 文章 × 投放</h2>
+        <button id="refresh-art" class="btn ghost">↻ 刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Job</th><th>标题</th><th>状态</th>
+              <th class="num">健康</th><th class="num">调性</th>
+              <th>质量闸</th><th>投放</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>

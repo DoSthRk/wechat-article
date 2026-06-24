@@ -461,6 +461,7 @@ class DatabaseManager:
                 a = j.article
                 items.append({
                     "job_id": j.job_id,
+                    "pdf_path": j.pdf_path,
                     "status": j.status.value if j.status else None,
                     "template_id": j.template_id,
                     "product_id": j.product_id,

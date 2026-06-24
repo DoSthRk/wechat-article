@@ -13,3 +13,4 @@ status: active
 extra:
   product_line: SOLIDEX
   wechat_account: immune                     # 投放层（P4）：免疫客公众号
+  pdf_folder: 免疫客                          # inputs/pdfs/免疫客/ 下的 PDF 归本线（操作面板用）

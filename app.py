@@ -26,9 +26,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from db.database import get_db_manager
 
 
+_MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # 单次上传上限（科普 PDF 一般 < 30MB）
+
+
 def create_app(testing: bool = False) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = testing
+    app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
 
     @app.get("/api/health")
     def health():
@@ -56,6 +60,32 @@ def create_app(testing: bool = False) -> Flask:
             "articles": items, "page": page, "page_size": page_size,
             "total": total, "stats": stats,
         })
+
+    @app.get("/api/sources")
+    def api_sources():
+        from utils.panel_runner import list_sources
+        return jsonify({"lines": list_sources()})
+
+    @app.post("/api/upload")
+    def api_upload():
+        from utils.panel_runner import save_uploaded_pdf
+        line_id = request.form.get("line_id", "")
+        files = [f for f in request.files.getlist("file") if f and f.filename]
+        if not files:
+            return jsonify({"ok": False, "error": "未收到文件"}), 400
+        results = [save_uploaded_pdf(line_id, f.filename, f.read()) for f in files]
+        return jsonify({"ok": all(r.get("ok") for r in results), "results": results})
+
+    @app.post("/api/run")
+    def api_run():
+        from utils.panel_runner import start_run
+        data = request.get_json(silent=True) or {}
+        return jsonify(start_run(str(data.get("line_id", "")), list(data.get("pdfs") or [])))
+
+    @app.get("/api/runs")
+    def api_runs():
+        from utils.panel_runner import runs_status
+        return jsonify(runs_status())
 
     @app.get("/preview/<job_id>")
     def preview(job_id: str):
