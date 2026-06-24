@@ -549,6 +549,16 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     pool_figs = _load_pool_figures(job)
     if any(f.label for f in pool_figs):  # pool 里至少有一张能按图号匹配才用 pool
         return pool_figs, figures_dir
+    # 题注锚定抽图（移植 pdffigures2 思路）：最稳、纯 Python 不耗 VLM；题注定图号+边界，多面板算一张、
+    # 正文/页脚天然在框外。找不到题注（如 Cell 图文摘要无 Figure N 题注）→ 回落 VLM。
+    try:
+        from utils.caption_figures import caption_enabled, extract_figures_by_caption
+        if caption_enabled() and job.pdf and Path(job.pdf).exists():
+            cfigs = extract_figures_by_caption(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            if cfigs:
+                return cfigs, figures_dir
+    except Exception as exc:  # noqa: BLE001 - 题注抽图失败回落 VLM
+        logger.warning("[%s] 题注抽图失败，回落 VLM：%s", job.job_id, exc)
     # VLM 视觉抽图：渲染含图页 → 模型给图号+整图 bbox（密集多面板图也能按图号抽，启发式做不到）
     try:
         from utils.vision_figures import extract_figures_via_vision, vision_enabled
