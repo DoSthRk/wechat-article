@@ -85,15 +85,28 @@ async function uploadPdfs(lineId, fileList) {
   const fd = new FormData();
   fd.append("line_id", lineId);
   for (const f of files) fd.append("file", f);
+  let resp;
   try {
-    const r = await (await fetch("/api/upload", { method: "POST", body: fd })).json();
-    const results = r.results || [];
-    const failed = results.filter((x) => !x.ok);
-    const over = results.filter((x) => x.ok && x.overwrite).map((x) => x.name);
-    if (failed.length) alert("部分上传失败：\n" + failed.map((x) => x.error).join("\n"));
-    else if (over.length) alert("已上传（覆盖同名）：" + over.join("、"));
-    loadSources();
-  } catch (e) { alert("上传失败：" + esc(e.message)); }
+    resp = await fetch("/api/upload", { method: "POST", body: fd });
+  } catch (e) { alert("上传失败（网络）：" + esc(e.message)); return; }
+  let r;
+  try { r = await resp.json(); }
+  catch {
+    const hint = resp.status === 404 ? "服务端无 /api/upload，面板可能是旧版，请重启" : "请重试或换更小的 PDF";
+    alert(`上传失败：服务端返回 HTTP ${resp.status}（非 JSON）。${hint}`);
+    return;
+  }
+  const results = r.results || [];
+  const failed = results.filter((x) => !x.ok);
+  const over = results.filter((x) => x.ok && x.overwrite).map((x) => x.name);
+  if (!resp.ok || (r.ok === false && !results.length)) {
+    alert("上传失败：" + (r.error || `HTTP ${resp.status}`));
+  } else if (failed.length) {
+    alert("部分上传失败：\n" + failed.map((x) => `${x.name || ""}：${x.error}`).join("\n"));
+  } else if (over.length) {
+    alert("已上传（覆盖同名）：" + over.join("、"));
+  }
+  loadSources();
 }
 
 function statusBadge(f) {

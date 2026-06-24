@@ -26,13 +26,18 @@ if str(PROJECT_ROOT) not in sys.path:
 from db.database import get_db_manager
 
 
-_MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # 单次上传上限（科普 PDF 一般 < 30MB）
+_MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 单次上传上限（图多的论文 PDF 可能上百 MB）
 
 
 def create_app(testing: bool = False) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
+
+    @app.errorhandler(413)
+    def _too_large(_e):
+        # 超过 MAX_CONTENT_LENGTH 时 Flask 默认回 HTML；改回 JSON，前端能给出明确提示
+        return jsonify({"ok": False, "error": f"文件超过 {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB 上限"}), 413
 
     @app.get("/api/health")
     def health():

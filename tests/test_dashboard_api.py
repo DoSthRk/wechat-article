@@ -1,7 +1,8 @@
-"""dashboard API 测试：/api/health 与 /api/articles（含质量 + 投放概览）。
+"""dashboard API 测试：/api/health 与 /api/articles（含质量 + 投放概览）+ /api/upload。
 
 用临时库注入 db.database 单例 + Flask test client。
 """
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ import db.database as dbmod
 from db.database import DatabaseManager, JobStatus
 
 import app as appmod
+from utils import panel_runner as pr
 
 
 class TestDashboardApi(unittest.TestCase):
@@ -57,6 +59,57 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(art["distributions"][0]["publish_status"], "published")
         self.assertEqual(data["stats"]["published"], 1)
         self.assertEqual(data["stats"]["blocked"], 0)
+
+
+class TestUploadApi(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_pdfs, pr.PDFS_DIR = pr.PDFS_DIR, Path(self._tmp.name)
+        self.client = appmod.create_app(testing=True).test_client()
+
+    def tearDown(self):
+        pr.PDFS_DIR = self._saved_pdfs
+        self._tmp.cleanup()
+
+    def test_upload_ok(self):
+        r = self.client.post("/api/upload", data={
+            "line_id": "solidex",
+            "file": (io.BytesIO(b"%PDF-1.7\n%x\n"), "新文章.pdf"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["results"][0]["name"], "新文章.pdf")
+        self.assertTrue((pr.PDFS_DIR / "免疫客" / "新文章.pdf").exists())
+
+    def test_upload_bad_content_is_json_error(self):
+        r = self.client.post("/api/upload", data={
+            "line_id": "solidex",
+            "file": (io.BytesIO(b"not a pdf"), "x.pdf"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertIn("PDF", body["results"][0]["error"])
+
+    def test_upload_no_file_400(self):
+        r = self.client.post("/api/upload", data={"line_id": "solidex"},
+                             content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(r.get_json()["ok"])
+
+    def test_too_large_returns_json(self):
+        app = appmod.create_app(testing=True)
+        app.config["MAX_CONTENT_LENGTH"] = 16  # 强制触发 413
+        client = app.test_client()
+        r = client.post("/api/upload", data={
+            "line_id": "solidex",
+            "file": (io.BytesIO(b"%PDF-1.7\n" + b"0" * 100), "big.pdf"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 413)
+        body = r.get_json()  # 关键：413 也回 JSON（前端能给明确提示）
+        self.assertIsNotNone(body)
+        self.assertFalse(body["ok"])
 
 
 if __name__ == "__main__":
