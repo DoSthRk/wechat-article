@@ -90,6 +90,23 @@ class TestDominantImageBox(unittest.TestCase):
         self.assertIsNone(vf._dominant_image_box(_FakePage(), self.AREA))
 
 
+class TestRuleLine(unittest.TestCase):
+    """剔除「贯穿大半页的细规则线」（分栏线/页眉页脚横线），但不误伤正图内短线。"""
+    W, H = 600.0, 800.0
+
+    def test_full_width_thin_horizontal_is_rule(self):
+        self.assertTrue(vf._is_rule_line(_el(40, 400, 560, 400.5), self.W, self.H))
+
+    def test_full_height_thin_vertical_is_rule(self):
+        self.assertTrue(vf._is_rule_line(_el(300, 40, 301, 760), self.W, self.H))
+
+    def test_short_line_is_not_rule(self):
+        self.assertFalse(vf._is_rule_line(_el(100, 100, 200, 100.5), self.W, self.H))
+
+    def test_figure_box_is_not_rule(self):
+        self.assertFalse(vf._is_rule_line(_el(100, 100, 500, 400), self.W, self.H))
+
+
 class TestExtractFlow(unittest.TestCase):
     """mock _image_pages/_render/_client/_ask_page，验证抽取→裁剪→标号→manifest。"""
 
@@ -130,6 +147,25 @@ class TestExtractFlow(unittest.TestCase):
         self.assertGreater(first, 0)
         vf.extract_figures_via_vision("x.pdf", self.out, use_cache=True)  # 命中缓存
         self.assertEqual(calls["n"], first)  # 不再调用 VLM
+
+    def test_recrop_when_crop_version_stale(self):
+        """裁剪逻辑升级（version 陈旧）→ 命中缓存也就地重切，但不重调 VLM。"""
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2", "bbox": [0, 0, 1, 1]}
+        vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
+        (Path(self.out) / ".crop_version").unlink()  # 模拟"旧裁剪产物"
+        ask_calls = {"n": 0}
+        vf._ask_page = lambda c, m, pil: ask_calls.__setitem__("n", ask_calls["n"] + 1) or {"has_figure": False}
+        recrop = {"n": 0}
+        real_make = vf._make_crop
+        vf._make_crop = lambda *a, **k: recrop.__setitem__("n", recrop["n"] + 1) or real_make(*a, **k)
+        try:
+            figs = vf.extract_figures_via_vision("x.pdf", self.out, use_cache=True)
+        finally:
+            vf._make_crop = real_make
+        self.assertEqual(ask_calls["n"], 0)            # 没重调 VLM
+        self.assertGreater(recrop["n"], 0)             # 触发了重切
+        self.assertTrue((Path(self.out) / ".crop_version").exists())
+        self.assertEqual(len(figs), 1)
 
 
 if __name__ == "__main__":

@@ -67,6 +67,15 @@ class TestListRendering(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn("font-size:14px", m.group(1))
 
+    def test_loose_list_no_nested_block(self):
+        # 松散列表（项间空行）→ markdown 包成 <li><p>…</p></li>；需剥掉内层 <p>，否则换行错乱
+        md = "引言：\n\n1.  **甲标题**：甲内容。\n\n2.  **乙标题**：乙内容。"
+        html = markdown_to_wechat_html(md)
+        self.assertNotIn("<li", html)
+        # 序号与内容同段，内层不再有块级 <p>
+        m = re.search(r'<p style="[^"]*text-indent[^"]*">1\. <strong>甲标题</strong>：甲内容。</p>', html)
+        self.assertIsNotNone(m, html)
+
 
 class TestPlaceholderAndSafety(unittest.TestCase):
     def test_image_placeholder_preserved(self):

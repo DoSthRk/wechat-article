@@ -72,6 +72,17 @@ _LIST_ITEM_STYLE = (
 )
 
 
+def _unwrap_li(item: str) -> str:
+    """去掉 markdown 给「松散列表」每项包的块级 ``<p>``（否则嵌套 <p> 会把内容挤到符号下一行）。
+
+    松散列表（项之间有空行）渲染成 ``<li><p>内容</p></li>``；紧凑列表是 ``<li>内容</li>``。
+    多段的项用 ``<br>`` 连接，避免再产生块级换行。
+    """
+    item = re.sub(r"</p>\s*<p\b[^>]*>", "<br>", item, flags=re.IGNORECASE)  # 多段 → 软换行
+    item = re.sub(r"</?p\b[^>]*>", "", item, flags=re.IGNORECASE)           # 去掉剩余 <p>/</p>
+    return item.strip()
+
+
 def _delist(html: str) -> str:
     """把 ``<ul>``/``<ol>`` 转成带手动符号的 ``<p>``。
 
@@ -86,7 +97,7 @@ def _delist(html: str) -> str:
         out = []
         for i, item in enumerate(items, 1):
             marker = f"{i}. " if ordered else f"{_LIST_BULLET} "
-            out.append(f'<p style="{_LIST_ITEM_STYLE}">{marker}{item.strip()}</p>')
+            out.append(f'<p style="{_LIST_ITEM_STYLE}">{marker}{_unwrap_li(item)}</p>')
         return "".join(out)
 
     html = re.sub(r"<ul\b[^>]*>.*?</ul>", convert, html, flags=re.DOTALL | re.IGNORECASE)
