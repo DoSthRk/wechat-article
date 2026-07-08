@@ -9,7 +9,7 @@ Group=admin
 WorkingDirectory=/opt/gm-blog/current
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/opt/gm-blog/shared/.env
-ExecStart=/opt/gm-blog/current/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:8001 --access-logfile - --error-logfile - app:create_app()
+ExecStart=/opt/gm-blog/current/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:5000 --access-logfile - --error-logfile - app:create_app()
 Restart=always
 RestartSec=5
 

@@ -13,7 +13,7 @@ def test_lightweight_server_deploy_config_is_tracked():
     assert "gunicorn==" in requirements.lower()
     assert "WorkingDirectory=/opt/gm-blog/current" in service
     assert "EnvironmentFile=-/opt/gm-blog/shared/.env" in service
-    assert "0.0.0.0:8001" in service
+    assert "0.0.0.0:5000" in service
     assert "app:create_app()" in service
 
 
