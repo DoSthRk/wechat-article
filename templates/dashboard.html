@@ -32,7 +32,10 @@
     <section class="card">
       <div class="card-head">
         <h2>② 运行</h2>
-        <span id="run-badge" class="run-badge idle">空闲</span>
+        <div class="run-actions">
+          <button id="cancel-run" class="btn danger" disabled>停止任务</button>
+          <span id="run-badge" class="run-badge idle">空闲</span>
+        </div>
       </div>
       <div id="run-current" class="run-current"></div>
       <pre id="run-log" class="run-log muted">（无运行）</pre>
@@ -51,10 +54,10 @@
             <tr>
               <th>Job</th><th>标题</th><th>状态</th>
               <th class="num">健康</th><th class="num">调性</th>
-              <th>质量闸</th><th>投放</th><th></th>
+              <th class="num">成本</th><th>质量闸</th><th>投放</th><th></th>
             </tr>
           </thead>
-          <tbody id="rows"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+          <tbody id="rows"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
         </table>
       </div>
     </section>

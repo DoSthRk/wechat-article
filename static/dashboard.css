@@ -44,6 +44,12 @@ main { max-width: 1180px; margin: 22px auto; padding: 0 18px; display: flex; fle
 .line-acts { margin-left: auto; display: flex; gap: 8px; }
 .tag { background: rgba(171,25,66,.18); color: var(--accent-2); border: 1px solid rgba(171,25,66,.4);
   padding: 1px 8px; border-radius: 20px; font-size: 12px; }
+.line-summary { color: var(--muted); font-size: 12px; }
+.line-summary b { color: var(--text); }
+.src-section-title { margin: 6px 0 4px; color: var(--muted); font-size: 12px; }
+.processed-box { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.processed-box summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; }
+.processed-box[open] summary { color: var(--accent-2); }
 .src-grid { width: 100%; border-collapse: collapse; }
 .src-grid th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 8px; }
 .src-grid td { padding: 5px 8px; border-top: 1px solid var(--line); }
@@ -61,18 +67,26 @@ main { max-width: 1180px; margin: 22px auto; padding: 0 18px; display: flex; fle
 .btn:disabled { opacity: .4; cursor: not-allowed; filter: none; }
 .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
 .btn.ghost:hover { border-color: var(--accent-2); color: var(--accent-2); }
+.btn.danger { background: rgba(229,72,77,.14); color: #ff8a8f; border: 1px solid rgba(229,72,77,.45); }
+.btn.danger:hover { border-color: #ff8a8f; }
 
 /* 运行 */
+.run-actions { display: flex; align-items: center; gap: 10px; }
 .run-badge { font-size: 12px; padding: 3px 10px; border-radius: 20px; }
 .run-badge.idle { background: #2a2f3a; color: var(--muted); }
 .run-badge.running { background: rgba(46,166,107,.18); color: var(--ok); border: 1px solid rgba(46,166,107,.5); }
 .run-current { padding: 10px 16px 0; font-size: 13px; }
+.run-summary { margin-top: 8px; padding: 8px 10px; background: rgba(255,255,255,.035);
+  border: 1px solid var(--line); border-radius: 8px; color: var(--text); }
+.run-summary span { margin-left: 10px; color: var(--muted); }
+.run-problem { margin-top: 4px; color: #ff8a8f; font-family: var(--mono); font-size: 12px; }
 .run-log { margin: 8px 16px; padding: 12px; background: #0c0e13; border: 1px solid var(--line);
   border-radius: 8px; font-family: var(--mono); font-size: 12px; line-height: 1.6;
   max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .run-history { padding: 0 16px 14px; }
 .hist-item { margin-top: 6px; }
 .hist-item summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 4px 0; }
+.hist-summary .run-summary { margin: 4px 0 6px; }
 .hist-item .run-log { margin: 6px 0; max-height: 200px; }
 
 /* 表格 */

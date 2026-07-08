@@ -4,18 +4,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import db.database as dbmod
+from db.database import DatabaseManager, JobStatus
 from utils import panel_runner as pr
 
 
 class _FakeProc:
     def __init__(self):
         self.returncode = None
+        self.terminated = False
 
     def poll(self):
         return self.returncode
 
     def finish(self, rc=0):
         self.returncode = rc
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
 
 
 class TestJobId(unittest.TestCase):
@@ -59,6 +66,15 @@ class TestRunStateMachine(unittest.TestCase):
         self.proc.finish(1)
         self.assertEqual(pr.runs_status()["history"][0]["status"], "failed")
 
+    def test_cancel_active_run_archives_history(self):
+        pr.start_run("solidex", ["inputs/pdfs/免疫客/x.pdf"])
+        r = pr.cancel_run()
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(self.proc.terminated)
+        st = pr.runs_status()
+        self.assertFalse(st["busy"])
+        self.assertEqual(st["history"][0]["status"], "cancelled")
+
     def test_no_pdfs_rejected(self):
         self.assertFalse(pr.start_run("solidex", [])["ok"])
 
@@ -72,10 +88,20 @@ class TestUpload(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_pdfs, pr.PDFS_DIR = pr.PDFS_DIR, Path(self._tmp.name)
+        self._run_tmp = tempfile.TemporaryDirectory()
+        self._saved_run_dir, pr.RUN_DIR = pr.RUN_DIR, Path(self._run_tmp.name)
+        self._db_tmp = tempfile.TemporaryDirectory()
+        self._orig_db_instance = dbmod._instance
+        dbmod._instance = DatabaseManager(database_url=f"sqlite:///{(Path(self._db_tmp.name) / 't.db').as_posix()}")
 
     def tearDown(self):
         pr.PDFS_DIR = self._saved_pdfs
+        pr.RUN_DIR = self._saved_run_dir
+        dbmod._instance.engine.dispose()
+        dbmod._instance = self._orig_db_instance
         self._tmp.cleanup()
+        self._run_tmp.cleanup()
+        self._db_tmp.cleanup()
 
     def test_saves_into_line_folder(self):
         r = pr.save_uploaded_pdf("solidex", "新文章.pdf", self._PDF)
@@ -89,6 +115,29 @@ class TestUpload(unittest.TestCase):
         pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
         r = pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
         self.assertTrue(r["overwrite"])
+        self.assertFalse(r["already_generated"])
+
+    def test_overwrite_generated_file_is_flagged(self):
+        db = dbmod.get_db_manager()
+        first = pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
+        task = db.get_or_create_task("upload-generated")
+        jpk = db.upsert_job(
+            task.id, "x", pdf_path=first["pdf"], template_id="t", product_id="p",
+            status=JobStatus.GENERATED,
+        ).id
+        db.upsert_article(jpk, title="已生成", content_dir="x")
+
+        r = pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
+
+        self.assertTrue(r["overwrite"])
+        self.assertTrue(r["already_generated"])
+
+        src = pr.list_sources()
+        sol = next(l for l in src if l["line_id"] == "solidex")
+        item = next(f for f in sol["pdfs"] if f["name"] == "x.pdf")
+        self.assertTrue(item["has_article"])
+        self.assertTrue(item["operator_pending"])
+        self.assertTrue(item["already_generated"])
 
     def test_path_traversal_stripped_to_basename(self):
         r = pr.save_uploaded_pdf("solidex", "../../../evil.pdf", self._PDF)
@@ -109,10 +158,91 @@ class TestUpload(unittest.TestCase):
     def test_bad_line_rejected(self):
         self.assertFalse(pr.save_uploaded_pdf("does-not-exist", "a.pdf", self._PDF)["ok"])
 
+    def test_write_error_returns_json_shape(self):
+        blocked = Path(self._tmp.name) / "not-a-dir"
+        blocked.write_text("x", encoding="utf-8")
+        pr.PDFS_DIR = blocked
+        r = pr.save_uploaded_pdf("solidex", "a.pdf", self._PDF)
+        self.assertFalse(r["ok"])
+        self.assertIn("保存失败", r["error"])
+
     def test_safe_name_helper(self):
         self.assertIsNone(pr._safe_pdf_name(".pdf"))
         self.assertIsNone(pr._safe_pdf_name("a.docx"))
         self.assertEqual(pr._safe_pdf_name("dir\\sub\\论文 1.pdf"), "论文 1.pdf")
+
+    def test_delete_pending_pdf(self):
+        saved = pr.save_uploaded_pdf("solidex", "待删.pdf", self._PDF)
+        self.assertTrue(saved["ok"], saved)
+        target = pr.PDFS_DIR / "免疫客" / "待删.pdf"
+        self.assertTrue(target.exists())
+
+        deleted = pr.delete_pending_pdf("solidex", saved["pdf"])
+
+        self.assertTrue(deleted["ok"], deleted)
+        self.assertFalse(target.exists())
+
+    def test_delete_rejects_path_outside_line_folder(self):
+        r = pr.delete_pending_pdf("solidex", "inputs/pdfs/AAVTx/a.pdf")
+        self.assertFalse(r["ok"])
+        self.assertIn("不属于", r["error"])
+
+    def test_delete_generated_override_removes_queue_not_file(self):
+        db = dbmod.get_db_manager()
+        first = pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
+        task = db.get_or_create_task("delete-generated-override")
+        jpk = db.upsert_job(
+            task.id, "x", pdf_path=first["pdf"], template_id="t", product_id="p",
+            status=JobStatus.GENERATED,
+        ).id
+        db.upsert_article(jpk, title="已生成", content_dir="x")
+        marked = pr.save_uploaded_pdf("solidex", "x.pdf", self._PDF)
+        target = pr.PDFS_DIR / "免疫客" / "x.pdf"
+
+        deleted = pr.delete_pending_pdf("solidex", marked["pdf"])
+
+        self.assertTrue(deleted["ok"], deleted)
+        self.assertTrue(deleted["removed_from_pending"])
+        self.assertTrue(target.exists())
+        src = pr.list_sources()
+        item = next(f for l in src for f in l["pdfs"] if f["name"] == "x.pdf")
+        self.assertFalse(item["operator_pending"])
+
+    def test_operator_pending_file_tolerates_utf8_bom(self):
+        pr.RUN_DIR.mkdir(parents=True, exist_ok=True)
+        (pr.RUN_DIR / "operator_pending.json").write_text(
+            '[{"line_id":"solidex","pdf":"inputs/pdfs/免疫客/x.pdf","name":"x.pdf"}]',
+            encoding="utf-8-sig",
+        )
+
+        keys = pr._operator_pending_keys("solidex")
+
+        self.assertIn("inputs/pdfs/免疫客/x.pdf", keys)
+
+    def test_generated_without_wechat_draft_is_not_operator_pending_state(self):
+        db = dbmod.get_db_manager()
+        saved = pr.save_uploaded_pdf("solidex", "draft-missing.pdf", self._PDF)
+        task = db.get_or_create_task("draft-missing")
+        jpk = db.upsert_job(
+            task.id, "draft-missing", pdf_path=saved["pdf"], template_id="t", product_id="p",
+            status=JobStatus.GENERATED,
+        ).id
+        db.upsert_article(jpk, title="已生成但没有草稿", content_dir="draft-missing")
+
+        sol = next(l for l in pr.list_sources() if l["line_id"] == "solidex")
+        item = next(f for f in sol["pdfs"] if f["name"] == "draft-missing.pdf")
+        self.assertTrue(item["has_article"])
+        self.assertFalse(item["published"])
+        self.assertFalse(item["needs_action"])
+        self.assertEqual(sol["counts"]["pending"], 0)
+
+        db.upsert_distribution(
+            jpk, "wechat", account="immune", publish_status="published", wechat_media_id="m1",
+        )
+        sol = next(l for l in pr.list_sources() if l["line_id"] == "solidex")
+        item = next(f for f in sol["pdfs"] if f["name"] == "draft-missing.pdf")
+        self.assertTrue(item["published"])
+        self.assertFalse(item["needs_action"])
 
 
 class TestNormPdfKey(unittest.TestCase):
@@ -140,6 +270,38 @@ class TestListSources(unittest.TestCase):
             self.assertIn("job_id", f)
             if f["bound"]:  # 绑定到文章时 job_id 应是库里真实 id（非文件名推导）
                 self.assertTrue(f["job_id"])
+
+    def test_line_counts_support_collapsed_processed_ui(self):
+        sol = next((l for l in pr.list_sources() if l["line_id"] == "solidex"), None)
+        counts = sol["counts"]
+        self.assertEqual(counts["total"], len(sol["pdfs"]))
+        self.assertEqual(counts["processed"], sum(1 for f in sol["pdfs"] if f["has_article"]))
+        self.assertEqual(counts["pending"], sum(1 for f in sol["pdfs"] if f["needs_action"]))
+        self.assertEqual(counts["published"], sum(1 for f in sol["pdfs"] if f["published"]))
+
+
+class TestRunSummary(unittest.TestCase):
+    def test_done_summary_reports_wechat_draft_count(self):
+        lines = [
+            "2026 - INFO - [a] generated: title=A len=100 tokens=20 health=90 tonal=80",
+            "2026 - INFO - [a] POST wechat/aav media_id=m1",
+        ]
+        summary = pr._summarize_log(lines, "done", 1)
+        self.assertEqual(summary["drafted"], 1)
+        self.assertIn("公众号草稿箱", summary["message"])
+
+    def test_summary_extracts_business_counts_from_log_tail(self):
+        lines = [
+            "2026 - INFO - [a] generated: title=A len=100 tokens=20 health=90 tonal=80",
+            "2026 - WARNING - [b] generated but BLOCKED: tonal_score<60",
+            "2026 - ERROR - [c] generate failed: PDF 文本为空",
+        ]
+        summary = pr._summarize_log(lines, "running", 3)
+        self.assertEqual(summary["generated"], 1)
+        self.assertEqual(summary["blocked"], 1)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["total"], 3)
+        self.assertIn("失败", summary["message"])
 
 
 if __name__ == "__main__":

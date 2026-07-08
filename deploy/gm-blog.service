@@ -1,0 +1,17 @@
+[Unit]
+Description=GeneMedi GM Blog dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/gm-blog/current
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/gm-blog/shared/.env
+ExecStart=/opt/gm-blog/current/.venv/bin/gunicorn --workers 2 --bind 0.0.0.0:8001 --access-logfile - --error-logfile - app:create_app()
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

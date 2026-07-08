@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import subprocess
 import sys
 import threading
@@ -31,6 +32,7 @@ LINES_DIR = PROJECT_ROOT / "inputs" / "lines"
 PDFS_DIR = PROJECT_ROOT / "inputs" / "pdfs"
 RUN_DIR = PROJECT_ROOT / "runtime" / "panel_runs"
 _DEFAULT_MAX_PAGES = 20
+_OPERATOR_PENDING_FILE = "operator_pending.json"
 
 
 def _job_id_from_pdf(pdf_stem: str) -> str:
@@ -69,21 +71,148 @@ def save_uploaded_pdf(line_id: str, filename: str, data: bytes) -> dict:
         return {"ok": False, "error": "不是有效的 PDF（缺少 %PDF 头）"}
 
     dest_dir = PDFS_DIR / folder
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / name
-    overwrite = dest.exists()
-    dest.write_bytes(data)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / name
+        overwrite = dest.exists()
+        dest.write_bytes(data)
+    except OSError as exc:
+        return {"ok": False, "error": f"保存失败：{exc}"}
     logger.info(
         "panel upload: line=%s file=%s bytes=%d overwrite=%s", line_id, name, len(data), overwrite,
     )
-    try:
-        rel = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")  # 生产：项目相对路径
-    except ValueError:
-        rel = dest.as_posix()  # 测试场景：PDFS_DIR 被指到项目外的临时目录
+    rel = _display_pdf_path(dest)
+    already_generated = _is_generated_pdf(rel)
+    if already_generated:
+        _mark_operator_pending(line_id, rel, name)
     return {
         "ok": True, "name": name, "overwrite": overwrite,
+        "already_generated": already_generated,
+        "operator_pending": already_generated,
         "pdf": rel, "job_id": _job_id_from_pdf(dest.stem),
     }
+
+
+def _is_generated_pdf(pdf_path: str) -> bool:
+    """判断 PDF 是否已经绑定过生成文章；用于重复上传时给业务页明确反馈。"""
+    try:
+        from db.database import get_db_manager
+        items, _ = get_db_manager().list_article_overview(page=1, page_size=500)
+    except Exception:
+        return False
+    target_key = _norm_pdf_key(pdf_path)
+    target_name = Path(pdf_path).name.lower()
+    for item in items:
+        if not item.get("title"):
+            continue
+        item_path = item.get("pdf_path") or ""
+        if _norm_pdf_key(item_path) == target_key or Path(item_path).name.lower() == target_name:
+            return True
+    return False
+
+
+def _operator_pending_path() -> Path:
+    return RUN_DIR / _OPERATOR_PENDING_FILE
+
+
+def _load_operator_pending() -> List[dict]:
+    try:
+        raw = _operator_pending_path().read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_operator_pending(items: List[dict]) -> None:
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    _operator_pending_path().write_text(
+        json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+
+
+def _mark_operator_pending(line_id: str, pdf: str, name: str) -> None:
+    items = _load_operator_pending()
+    key = _norm_pdf_key(pdf)
+    kept = [
+        item for item in items
+        if not (item.get("line_id") == line_id and _norm_pdf_key(item.get("pdf") or "") == key)
+    ]
+    kept.append({
+        "line_id": line_id,
+        "pdf": pdf,
+        "name": name,
+        "added_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+    })
+    _save_operator_pending(kept)
+
+
+def _unmark_operator_pending(line_id: str, pdf: str) -> bool:
+    items = _load_operator_pending()
+    key = _norm_pdf_key(pdf)
+    kept = [
+        item for item in items
+        if not (item.get("line_id") == line_id and _norm_pdf_key(item.get("pdf") or "") == key)
+    ]
+    if len(kept) == len(items):
+        return False
+    _save_operator_pending(kept)
+    return True
+
+
+def _operator_pending_keys(line_id: str) -> set[str]:
+    return {
+        _norm_pdf_key(item.get("pdf") or "")
+        for item in _load_operator_pending()
+        if item.get("line_id") == line_id
+    }
+
+
+def delete_pending_pdf(line_id: str, pdf: str) -> dict:
+    """删除该内容线下尚未生成的 PDF。业务页只把待处理文件交给这里。"""
+    line_id = (line_id or "").strip()
+    try:
+        line = load_line_by_id(str(LINES_DIR), line_id)
+    except LineLoadError as exc:
+        return {"ok": False, "error": f"线配置无效：{exc}"}
+    folder = str((line.extra or {}).get("pdf_folder") or "").strip()
+    if not folder:
+        return {"ok": False, "error": "该线未配置 pdf_folder"}
+
+    line_dir = (PDFS_DIR / folder).resolve()
+    target = (PROJECT_ROOT / str(pdf)).resolve() if not Path(str(pdf)).is_absolute() else Path(str(pdf)).resolve()
+    try:
+        target.relative_to(line_dir)
+    except ValueError:
+        return {"ok": False, "error": "该文件不属于当前内容线"}
+    if target.suffix.lower() != ".pdf":
+        return {"ok": False, "error": "只能删除 PDF 文件"}
+    if not target.exists():
+        return {"ok": False, "error": "文件不存在"}
+
+    target_display = _display_pdf_path(target)
+    if _unmark_operator_pending(line_id, target_display):
+        return {
+            "ok": True, "name": target.name, "pdf": target_display,
+            "removed_from_pending": True,
+        }
+
+    # 防止从业务页删掉已经绑定文章的历史素材。
+    for line_info in list_sources():
+        if line_info.get("line_id") != line_id:
+            continue
+        for item in line_info.get("pdfs", []):
+            if _norm_pdf_key(item.get("pdf") or "") == _norm_pdf_key(str(target)):
+                if item.get("has_article"):
+                    return {"ok": False, "error": "该文件已生成内容，请在管理员版处理"}
+                break
+
+    try:
+        target.unlink()
+    except OSError as exc:
+        return {"ok": False, "error": f"删除失败：{exc}"}
+    logger.info("panel delete: line=%s file=%s", line_id, target.name)
+    return {"ok": True, "name": target.name, "pdf": target_display, "removed_from_pending": False}
 
 
 def _line_ids() -> List[str]:
@@ -97,6 +226,14 @@ def _norm_pdf_key(path: str) -> str:
         return pp.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix().lower()
     except (ValueError, OSError):
         return pp.name.lower()  # 项目外 / 解析失败 → 退化到文件名
+
+
+def _display_pdf_path(path: Path) -> str:
+    """生产返回项目相对路径；测试/外部目录退化为绝对 posix 路径。"""
+    try:
+        return str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    except ValueError:
+        return path.as_posix()
 
 
 def list_sources() -> List[dict]:
@@ -119,26 +256,43 @@ def list_sources() -> List[dict]:
         folder = str((line.extra or {}).get("pdf_folder") or "").strip()
         d = PDFS_DIR / folder if folder else None
         pdfs = sorted(d.glob("*.pdf")) if d and d.is_dir() else []
+        operator_pending = _operator_pending_keys(line_id)
         files = []
         for p in pdfs:
+            display_pdf = _display_pdf_path(p)
             info = by_pdf.get(_norm_pdf_key(str(p)))
             dists = info.get("distributions", []) if info else []
+            op_pending = _norm_pdf_key(display_pdf) in operator_pending
+            already_generated = bool(info and info.get("title"))
+            drafted = any(x.get("publish_status") == "published" for x in dists)
+            needs_action = (not already_generated) or op_pending
             files.append({
-                "pdf": str(p.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+                "pdf": display_pdf,
                 "name": p.name,
                 # 绑定到则用文章真实 job_id（预览/状态用）；否则用文件名推导值（仅供新跑）
                 "job_id": (info.get("job_id") if info else _job_id_from_pdf(p.stem)),
                 "bound": bool(info),
-                "has_article": bool(info and info.get("title")),
+                "has_article": already_generated,
+                "already_generated": already_generated,
+                "operator_pending": op_pending,
+                "needs_action": needs_action,
                 "title": (info.get("title") if info else None),
-                "published": any(x.get("publish_status") == "published" for x in dists),
+                "published": drafted,
                 "blocked": bool(info.get("publish_blocked")) if info else False,
             })
+        counts = {
+            "total": len(files),
+            "pending": sum(1 for f in files if f["needs_action"]),
+            "processed": sum(1 for f in files if f["has_article"]),
+            "published": sum(1 for f in files if f["published"]),
+            "blocked": sum(1 for f in files if f["blocked"]),
+        }
         out.append({
             "line_id": line_id,
             "name": line.name,
             "account": str((line.extra or {}).get("wechat_account") or ""),
             "folder": folder,
+            "counts": counts,
             "pdfs": files,
         })
     return out
@@ -152,15 +306,17 @@ class _Run:
     jobs: List[str]
     log_path: str
     proc: Any = None
-    status: str = "running"  # running | done | failed
+    status: str = "running"  # running | done | failed | cancelled
     started: float = field(default_factory=time.time)
 
     def serialize(self, tail: int = 60) -> dict:
+        log_lines = _tail(self.log_path, tail)
         return {
             "run_id": self.run_id, "task": self.task, "line_id": self.line_id,
             "jobs": self.jobs, "status": self.status,
             "started": time.strftime("%H:%M:%S", time.localtime(self.started)),
-            "log": _tail(self.log_path, tail),
+            "summary": _summarize_log(log_lines, self.status, len(self.jobs)),
+            "log": log_lines,
         }
 
 
@@ -179,6 +335,44 @@ def _tail(path: str, n: int) -> List[str]:
     return lines[-n:]
 
 
+def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
+    """从原始日志尾部抽一个业务摘要；原始日志仍原样返回供排查。"""
+    generated = sum(1 for ln in lines if " generated:" in ln)
+    drafted = sum(1 for ln in lines if " POST wechat/" in ln)
+    blocked = sum(1 for ln in lines if "BLOCKED" in ln or " publish_blocked" in ln)
+    failed = sum(1 for ln in lines if " failed:" in ln.lower() or " - error - " in ln.lower())
+    last_problem = ""
+    for ln in reversed(lines):
+        low = ln.lower()
+        if " failed:" in low or " - error - " in low or "blocked" in low:
+            last_problem = ln
+            break
+
+    if status == "cancelled":
+        message = "任务已停止，已保留已有日志"
+    elif failed:
+        message = f"发现 {failed} 个失败，建议先看摘要下方最后一条错误"
+    elif blocked:
+        message = f"{blocked} 篇被质量闸拦下，已保留文章供预览"
+    elif status == "done":
+        if drafted:
+            message = f"运行完成：{drafted}/{total_jobs} 篇已提交到公众号草稿箱"
+        else:
+            message = f"运行完成：{generated}/{total_jobs} 篇生成日志已记录；未看到公众号草稿提交日志"
+    else:
+        message = f"运行中：{generated}/{total_jobs} 篇已生成，{drafted}/{total_jobs} 篇已提交草稿"
+
+    return {
+        "total": int(total_jobs or 0),
+        "generated": generated,
+        "drafted": drafted,
+        "blocked": blocked,
+        "failed": failed,
+        "message": message,
+        "last_problem": last_problem,
+    }
+
+
 def _reap() -> Optional[_Run]:
     """检查当前子进程是否结束；结束则归档到 history，返回仍在跑的 run（或 None）。"""
     global _current
@@ -190,6 +384,31 @@ def _reap() -> Optional[_Run]:
         del _history[6:]
         _current = None
     return _current
+
+
+def cancel_run() -> dict:
+    """停止当前面板任务；用于业务误点或发现素材选错时快速止损。"""
+    global _current
+    with _lock:
+        cur = _reap()
+        if cur is None:
+            return {"ok": False, "error": "没有正在运行的任务"}
+        try:
+            if cur.proc is not None and cur.proc.poll() is None:
+                cur.proc.terminate()
+        except Exception as exc:  # pragma: no cover - 取决于平台/进程状态
+            return {"ok": False, "error": f"停止失败：{exc}"}
+        cur.status = "cancelled"
+        try:
+            with open(cur.log_path, "a", encoding="utf-8") as fh:
+                fh.write("\n[panel] 用户停止了当前任务\n")
+        except OSError:
+            pass
+        logger.info("panel run %s cancelled", cur.run_id)
+        _history.insert(0, cur)
+        del _history[6:]
+        _current = None
+        return {"ok": True, "run_id": cur.run_id}
 
 
 def start_run(line_id: str, pdfs: List[str]) -> dict:
@@ -212,6 +431,7 @@ def start_run(line_id: str, pdfs: List[str]) -> dict:
         jobs = []
         for rel in pdfs:
             stem = Path(rel).stem
+            _unmark_operator_pending(line_id, rel)
             jobs.append({
                 "job_id": _job_id_from_pdf(stem), "line": line_id, "pdf": rel,
                 "template": line.template, "product": line.product,

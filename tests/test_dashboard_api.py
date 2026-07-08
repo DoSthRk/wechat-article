@@ -28,6 +28,7 @@ class TestDashboardApi(unittest.TestCase):
         db.upsert_article(
             jpk, title="测试标题", content_dir="x",
             markdown_health_score=100, tonal_score=100, publish_blocked=False,
+            model="deepseek-chat", prompt_tokens=1_000_000, completion_tokens=0,
         )
         db.upsert_distribution(
             jpk, "wechat", account="aav", lang="zh",
@@ -46,6 +47,42 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["status"], "ok")
 
+    def test_root_redirects_to_operator_page(self):
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r.headers["Location"].endswith("/operator"))
+
+    def test_operator_page_is_minimal(self):
+        r = self.client.get("/operator")
+        self.assertEqual(r.status_code, 200)
+        html = r.get_data(as_text=True)
+        self.assertIn("operator.js", html)
+        self.assertNotIn("/admin", html)
+        self.assertNotIn("管理员版", html)
+        self.assertNotIn("文章 × 投放", html)
+        self.assertNotIn("成本", html)
+
+        js = self.client.get("/static/operator.js").get_data(as_text=True)
+        self.assertIn('aav: "AAV"', js)
+        self.assertIn('solidex: "Solidex"', js)
+        self.assertIn("上传 PDF", js)
+        self.assertIn("生成选中文件", js)
+        self.assertIn("pending-pick", js)
+        self.assertIn("覆盖同名", js)
+        self.assertIn("此文件已生成过", js)
+        self.assertNotIn("未进草稿箱", js)
+        self.assertIn("待处理文件", js)
+        self.assertIn("needs_action", js)
+        self.assertNotIn("confirm(", js)
+        self.assertIn("/api/pdf/delete", js)
+
+    def test_admin_page_keeps_full_dashboard(self):
+        r = self.client.get("/admin")
+        self.assertEqual(r.status_code, 200)
+        html = r.get_data(as_text=True)
+        self.assertIn("文章 × 投放", html)
+        self.assertIn("成本", html)
+
     def test_articles_overview(self):
         r = self.client.get("/api/articles")
         self.assertEqual(r.status_code, 200)
@@ -59,6 +96,10 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(art["distributions"][0]["publish_status"], "published")
         self.assertEqual(data["stats"]["published"], 1)
         self.assertEqual(data["stats"]["blocked"], 0)
+        # 成本：1M 输入 token × 默认 ¥2/M = ¥2.0（无 env 覆盖时）
+        self.assertAlmostEqual(art["cost_cny"], 2.0, places=4)
+        self.assertAlmostEqual(data["stats"]["cost_cny"], 2.0, places=2)
+        self.assertIn("deepseek-chat", data["rates"])
 
 
 class TestUploadApi(unittest.TestCase):
@@ -81,6 +122,22 @@ class TestUploadApi(unittest.TestCase):
         self.assertTrue(body["ok"], body)
         self.assertEqual(body["results"][0]["name"], "新文章.pdf")
         self.assertTrue((pr.PDFS_DIR / "免疫客" / "新文章.pdf").exists())
+
+    def test_delete_pending_pdf_ok(self):
+        upload = self.client.post("/api/upload", data={
+            "line_id": "solidex",
+            "file": (io.BytesIO(b"%PDF-1.7\n%x\n"), "待删.pdf"),
+        }, content_type="multipart/form-data").get_json()
+
+        r = self.client.post("/api/pdf/delete", json={
+            "line_id": "solidex",
+            "pdf": upload["results"][0]["pdf"],
+        })
+
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"], body)
+        self.assertFalse((pr.PDFS_DIR / "免疫客" / "待删.pdf").exists())
 
     def test_upload_bad_content_is_json_error(self):
         r = self.client.post("/api/upload", data={
@@ -110,6 +167,14 @@ class TestUploadApi(unittest.TestCase):
         body = r.get_json()  # 关键：413 也回 JSON（前端能给明确提示）
         self.assertIsNotNone(body)
         self.assertFalse(body["ok"])
+
+    def test_cancel_run_endpoint_returns_json_when_idle(self):
+        r = self.client.post("/api/run/cancel")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertIsNotNone(body)
+        self.assertFalse(body["ok"])
+        self.assertIn("没有", body["error"])
 
 
 if __name__ == "__main__":

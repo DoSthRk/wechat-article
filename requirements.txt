@@ -22,3 +22,4 @@ PyMySQL>=1.1.0          # 若用 MySQL；用 SQLite 可不装但留着方便
 
 # Dashboard（Phase 7，服务端渲染，无前端构建）
 Flask>=3.0.0
+gunicorn>=22.0.0

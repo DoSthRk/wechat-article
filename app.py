@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import markdown as md_lib
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -44,14 +44,27 @@ def create_app(testing: bool = False) -> Flask:
         return jsonify({"status": "ok"})
 
     @app.get("/")
+    def index():
+        return redirect(url_for("operator"))
+
+    @app.get("/operator")
+    def operator():
+        return render_template("operator.html")
+
+    @app.get("/admin")
     def dashboard():
         return render_template("dashboard.html")
 
     @app.get("/api/articles")
     def api_articles():
+        from utils.pricing import article_cost_cny, rate_card
         page = max(1, request.args.get("page", 1, type=int))
         page_size = max(1, min(200, request.args.get("page_size", 100, type=int)))
         items, total = get_db_manager().list_article_overview(page=page, page_size=page_size)
+        for it in items:  # 每篇估算 LLM 生成成本（CNY）
+            it["cost_cny"] = round(
+                article_cost_cny(it.get("model"), it.get("prompt_tokens"), it.get("completion_tokens")), 4,
+            )
         stats = {
             "total": total,
             "generated": sum(1 for i in items if i.get("title")),
@@ -60,10 +73,12 @@ def create_app(testing: bool = False) -> Flask:
                 1 for i in items
                 if any(d.get("publish_status") == "published" for d in i.get("distributions", []))
             ),
+            "cost_cny": round(sum(i.get("cost_cny", 0.0) for i in items), 2),
+            "tokens": sum(i.get("total_tokens", 0) for i in items),
         }
         return jsonify({
             "articles": items, "page": page, "page_size": page_size,
-            "total": total, "stats": stats,
+            "total": total, "stats": stats, "rates": rate_card(),
         })
 
     @app.get("/api/sources")
@@ -81,11 +96,22 @@ def create_app(testing: bool = False) -> Flask:
         results = [save_uploaded_pdf(line_id, f.filename, f.read()) for f in files]
         return jsonify({"ok": all(r.get("ok") for r in results), "results": results})
 
+    @app.post("/api/pdf/delete")
+    def api_delete_pdf():
+        from utils.panel_runner import delete_pending_pdf
+        data = request.get_json(silent=True) or {}
+        return jsonify(delete_pending_pdf(str(data.get("line_id", "")), str(data.get("pdf", ""))))
+
     @app.post("/api/run")
     def api_run():
         from utils.panel_runner import start_run
         data = request.get_json(silent=True) or {}
         return jsonify(start_run(str(data.get("line_id", "")), list(data.get("pdfs") or [])))
+
+    @app.post("/api/run/cancel")
+    def api_cancel_run():
+        from utils.panel_runner import cancel_run
+        return jsonify(cancel_run())
 
     @app.get("/api/runs")
     def api_runs():

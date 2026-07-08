@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>公众号文章生成</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='operator.css') }}">
+</head>
+<body>
+  <header>
+    <h1>公众号文章生成</h1>
+  </header>
+
+  <main>
+    <section id="status" class="status">空闲</section>
+    <section id="lines" class="lines"></section>
+  </main>
+
+  <script src="{{ url_for('static', filename='operator.js') }}"></script>
+</body>
+</html>
