@@ -22,8 +22,12 @@ inputs/image_pools/*
 inputs/jobs.yaml
 inputs/style_templates/*.yaml
 !inputs/style_templates/*.example.yaml
+!inputs/style_templates/aav_academic_soft_intro.yaml
+!inputs/style_templates/oncology_wechat_pop_sci.yaml
 inputs/products/*.yaml
 !inputs/products/*.example.yaml
+!inputs/products/purprox_aaveasy_spin_columns.yaml
+!inputs/products/solidex_pan_t_cell_iso_kit.yaml
 
 # 产物
 outputs/

@@ -1,0 +1,37 @@
+name: SOLIDEX®-ISOEx 人CD3+ Pan-T细胞分选试剂盒（柱式，Untouched）
+one_liner: 面向 T 细胞相关免疫学、肿瘤免疫和双特异性抗体研究的人 CD3+ Pan-T 细胞负向分选试剂盒。
+selling_points:
+- 采用 Untouched 阴性选择思路，尽量避免直接标记或激活目标 T 细胞。
+- 适用于需要保留 T 细胞天然状态的体外功能实验、共培养实验和免疫机制研究。
+- 可用于双特异性抗体、CAR-T 前研究、T 细胞介导杀伤和细胞因子释放相关实验的上游样本准备。
+- 柱式分选流程清晰，适合标准化处理 PBMC 或相关人源样本中的 CD3+ Pan-T 细胞。
+specs:
+  产品货号: GM-Pan-T-Cell-iso-kit
+  产品系列: SOLIDEX®-ISOEx
+  产品名称: 人CD3+ Pan-T细胞分选试剂盒（柱式，Untouched）
+  分选方式: 阴性选择
+  适配场景: T 细胞功能研究、肿瘤免疫研究、双特异性抗体体外机制验证
+  相关产品:
+  - GM-CD4-T-Cell-iso-kit：人CD4+ T细胞分选试剂盒（柱式，Untouched）
+  - GM-CD8-T-Cell-iso-kit：人CD8+ T细胞分选试剂盒（柱式，Untouched）
+  - GM-Tg-hg-T87075-iso-nanoIMB：人CD3分选纳米磁珠（柱式）
+use_cases:
+- Glofitamab 等 CD20×CD3 双特异性抗体的 T 细胞依赖性杀伤机制研究
+- 淋巴瘤细胞与人源 T 细胞共培养实验
+- T 细胞活化、耗竭、细胞因子释放和免疫表型分析
+- 临床样本或 PBMC 中 T 细胞群体的前处理
+target_users:
+- 血液肿瘤研究团队
+- 肿瘤免疫实验室
+- 双特异性抗体和细胞治疗研发团队
+- 医学院和科研院所免疫学课题组
+forbidden_claims:
+- 不要宣称产品可用于临床诊断或临床治疗。
+- 不要暗示产品可直接改善 Glofitamab 疗效或患者预后。
+- 不要承诺适用于所有样本类型或所有实验体系。
+- 不要使用“最佳”“第一”“唯一”等绝对化表述。
+closing_hint: 结尾落到“T 细胞功能 / 双特异性抗体体外机制研究中，高质量、未被激活的 Pan-T 细胞是实验起点”的现实需求，顺势提及本产品（Untouched 阴性分选）适合这类上游样本制备；保持中立、不承诺临床用途、不暗示改善疗效。
+extra:
+  product_id: solidex_pan_t_cell_iso_kit
+  selected_reason: 该论文核心机制涉及 CD20×CD3 双特异性抗体招募 T 细胞杀伤 B 细胞肿瘤，Pan-T 细胞 Untouched 分选更适合作为 T 细胞功能研究和双抗体外验证场景的软植入产品。
+  source_product_list: 用户提供的药诺生物 SOLIDEX®-ISOEx 磁珠产品清单。

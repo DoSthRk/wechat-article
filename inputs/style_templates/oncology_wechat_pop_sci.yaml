@@ -1,0 +1,44 @@
+name: 肿瘤研究微信公众号科普
+description: 面向医学生、科研人员和血液肿瘤方向从业者，用专业但通俗的语言解读临床研究，最后自然软植入相关实验工具。
+target_length:
+  min: 1200
+  max: 1800
+section_count:
+  min: 5
+  max: 7
+tone_keywords:
+- 专业通俗
+- 科学严谨
+- 层次分明
+- 手机阅读友好
+- 软广克制
+forbidden_phrases:
+- 业界领先
+- 首选品牌
+- 市场第一
+- 最佳选择
+- 立刻购买
+- 限时优惠
+- 震撼发布
+- 神药
+- 治愈所有
+- 彻底攻克
+opening_guidance: 从复发/难治套细胞淋巴瘤的治疗困境切入，说明为什么 Glofitamab 这类 CD20×CD3 双特异性抗体值得关注。
+closing_guidance: 结尾总结研究对临床治疗和转化研究的意义，并提出一个引导读者思考的问题；随后用一小段自然引出匹配的药诺生物磁珠产品。
+extra:
+  template_id: oncology_wechat_pop_sci
+  target_readers:
+  - 医学生
+  - 科研人员
+  - 血液肿瘤方向从业者
+  source_article_url: https://pmc.ncbi.nlm.nih.gov/articles/PMC11771347/pdf/jco-43-318.pdf
+  required_sections:
+  - 研究背景
+  - 研究目的
+  - 研究方法（简要）
+  - 核心发现
+  - 创新点或突破
+  - 实际意义
+  - 总结与思考
+  image_policy: 只允许使用 PDF 内图片；在正文中用 [图片:Figure X ...] 标注插图位置；如果 PDF 可用图片不足，减少插图数量并继续生成。
+  raw_instruction: 请以微信公众号科普文章风格撰写关于 Glofitamab in relapsed/refractory mantle cell lymphoma 的文章，标题有吸引力但不夸张，语言专业但通俗，清晰讲解研究目的、方法、核心发现、创新点和实际意义，可加入类比或近期研究进展帮助理解，结尾提出引导读者思考的问题，并自然软植入药诺生物磁珠产品。

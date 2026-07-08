@@ -1,0 +1,32 @@
+name: AAV 学术智库软植入
+description: 参考示例公众号文章的篇幅和结构，用高维学术内容解析 AAV 论文，产品露出克制自然。
+target_length:
+  min: 1800
+  max: 2800
+section_count:
+  min: 4
+  max: 6
+tone_keywords:
+- 学术中立
+- 工艺洞察
+- 去乙方化
+- 润物细无声
+- AAV 工艺智库
+forbidden_phrases:
+- 业界领先
+- 首选品牌
+- 市场第一
+- 最佳选择
+- 立刻购买
+- 限时优惠
+- 震撼发布
+opening_guidance: 从论文中的机制发现或工艺矛盾切入，不用营销化开场。
+closing_guidance: 结尾落到 AAV 制备和纯化工艺的具体启示，再自然提及产品。
+extra:
+  template_id: aav_academic_soft_intro
+  reference_urls:
+  - https://mp.weixin.qq.com/s/wFHRUAE2napP_fxMXYR1cw
+  - https://mp.weixin.qq.com/s/nGDaHlNF5d8HnL0PLHgiOg
+  raw_instruction: 参考这两家公司发布的微信公众号文章的内容和篇幅，帮我解析下面的这篇文章，需要挑文章里3-4附图插入，最后再推荐我们的AAV快速纯化离心柱
+    ， 要求是用高维度的学术内容，降维打击市场，名为科普，实为带货（PurProX AAV纯化离心柱），但要做到“润物细无声”。去乙方化。看起来像是一个中立的AAV工艺智库或学术社区，而不是GeneMedi的产品宣传册。
+  image_count: 3-4
