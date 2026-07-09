@@ -30,6 +30,8 @@ from utils.logger import setup_logger
 logger = setup_logger("pdf_figure_extractor")
 
 _CAP_RE = re.compile(r"^(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[|｜]", re.I)
+_LEGEND_HEADING_RE = re.compile(r"\bFIGURE\s+LEGENDS?\b", re.I)
+_LEGEND_CAP_RE = re.compile(r"^(?:\d+\s+)?(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[\.\|｜]", re.I)
 _NUM_RE = re.compile(r"(?:Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)", re.I)
 _DPI = 170
 _MARGIN = 24
@@ -64,6 +66,47 @@ def match_figure(figures: List[Figure], description: str) -> Optional[Figure]:
     want_ext = bool(re.search(r"extended\s*data|附录|扩展数据", description or "", re.I))
     pool = [f for f in figures if f.label == num and f.is_extended == want_ext]
     return pool[0] if pool else None
+
+
+def _legend_caption_numbers(lines: List[str]) -> List[Tuple[bool, str]]:
+    """FIGURE LEGENDS 页里的 Figure 编号；用于题注页和文末图页分离的投稿稿格式。"""
+    in_legend = False
+    out: List[Tuple[bool, str]] = []
+    seen = set()
+    for raw in lines:
+        text = (raw or "").strip()
+        if _LEGEND_HEADING_RE.search(text):
+            in_legend = True
+            continue
+        if not in_legend:
+            continue
+        m = _LEGEND_CAP_RE.match(text)
+        if not m:
+            continue
+        key = (bool(re.search(r"extended|sup", m.group(1) or "", re.I)), m.group(2))
+        if key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
+def _legend_page_pairs(prof: List[Dict], legend_idx: int, used_pages: set) -> List[Tuple[Tuple[bool, str], int]]:
+    """把 FIGURE LEGENDS 中的 Figure N 顺序配到后续连续图页。"""
+    caps = list(prof[legend_idx].get("legend_caps") or [])
+    pairs: List[Tuple[Tuple[bool, str], int]] = []
+    for fp in range(legend_idx + 1, len(prof)):
+        if len(pairs) >= len(caps):
+            break
+        if prof[fp].get("legend_caps"):
+            break
+        if fp in used_pages:
+            continue
+        if prof[fp].get("is_fig"):
+            pairs.append((caps[len(pairs)], fp))
+            continue
+        if pairs:
+            break
+    return pairs
 
 
 def _gfx_elements(page) -> list:
@@ -130,6 +173,81 @@ def _figure_region_on_page(page, gfx: list, words: list) -> Optional[Tuple[float
     top = fig_bands[0] * band
     bottom = (fig_bands[-1] + 1) * band
     return _union(gfx, top, bottom)
+
+
+def _legend_page_region(gfx: list) -> Optional[Tuple[float, float, float, float]]:
+    """文末整页图没有题注边界，直接取图形并集，避免密度带截掉稀疏底部面板。"""
+    return _union(gfx)
+
+
+def extract_figures_from_legend_pages(
+    pdf_path: str, out_dir: str, *,
+    max_pages: Optional[int] = None, dpi: int = _DPI, use_cache: bool = True,
+) -> List[Figure]:
+    """支持 FIGURE LEGENDS 与文末图页分离的 PDF：按图例顺序配后续连续图页。"""
+    out = Path(out_dir)
+    manifest_path = out / "legend_figures_manifest.json"
+    if use_cache and manifest_path.exists():
+        try:
+            return [Figure(**d) for d in json.loads(manifest_path.read_text(encoding="utf-8"))]
+        except Exception:  # noqa: BLE001
+            pass
+
+    out.mkdir(parents=True, exist_ok=True)
+    scale = dpi / 72.0
+    figures: List[Figure] = []
+    doc = pdfium.PdfDocument(pdf_path)
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            total = len(pdf.pages)
+            limit = min(max_pages, total) if max_pages else total
+            prof: List[Dict] = []
+            for i in range(limit):
+                pg = pdf.pages[i]
+                words = pg.extract_words() or []
+                gfx = _gfx_elements(pg)
+                lines = [(ln.get("text") or "").strip() for ln in pg.extract_text_lines()]
+                prof.append({
+                    "pg": pg,
+                    "words": words,
+                    "gfx": gfx,
+                    "legend_caps": _legend_caption_numbers(lines),
+                    "is_fig": _is_figure_page(len(words), len(gfx)),
+                })
+
+            used_pages: set = set()
+            for i in range(limit):
+                if not prof[i]["legend_caps"]:
+                    continue
+                for (is_ext, num), fp in _legend_page_pairs(prof, i, used_pages):
+                    region = _legend_page_region(prof[fp]["gfx"])
+                    if region is None:
+                        continue
+                    rx0, rt, rx1, rb = region
+                    if (rx1 - rx0) < _MIN_REGION or (rb - rt) < _MIN_REGION:
+                        continue
+                    rendered = doc[fp].render(scale=scale).to_pil()
+                    box = (max(0, int(rx0 * scale)), max(0, int(rt * scale)),
+                           int(rx1 * scale), int(rb * scale))
+                    crop = rendered.crop(box)
+                    fname = f"{'legend_ed' if is_ext else 'legend_fig'}{num}_p{fp + 1}.png"
+                    crop.save(str(out / fname))
+                    figures.append(Figure(
+                        label=num, is_extended=is_ext, caption="",
+                        page=fp + 1, image_path=str(out / fname),
+                        width=crop.width, height=crop.height,
+                    ))
+                    used_pages.add(fp)
+    finally:
+        doc.close()
+
+    manifest_path.write_text(
+        json.dumps([asdict(f) for f in figures], ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    if figures:
+        logger.info("legend pages extracted %d figure(s) from %s: %s",
+                    len(figures), Path(pdf_path).name, sorted(f.label for f in figures))
+    return figures
 
 
 def extract_figures(

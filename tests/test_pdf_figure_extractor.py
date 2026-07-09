@@ -4,7 +4,12 @@ extract_figures 依赖真实 PDF，不在单测覆盖；这里测可纯函数化
 """
 import unittest
 
+from utils import pdf_figure_extractor as pe
 from utils.pdf_figure_extractor import Figure, figure_number, match_figure
+
+
+def _el(x0, top, x1, bottom):
+    return {"x0": x0, "top": top, "x1": x1, "bottom": bottom}
 
 
 def _fig(label, ext):
@@ -46,6 +51,35 @@ class TestFigureNumber(unittest.TestCase):
         self.assertEqual(figure_number("see text"), "")
         self.assertEqual(figure_number("结尾段落"), "")
         self.assertEqual(figure_number(""), "")
+
+
+class TestLegendFigurePairing(unittest.TestCase):
+    def test_figure_legends_pair_with_following_figure_pages(self):
+        caps = pe._legend_caption_numbers([
+            "256 FIGURE LEGENDS",
+            "257 Figure 1. Differences in AAV-derived FVIII activity.",
+            "284 Figure 2. AAV-derived FVIIIa-SQ demonstrates expected function.",
+        ])
+        self.assertEqual(caps, [(False, "1"), (False, "2")])
+
+        prof = [
+            {"legend_caps": caps, "is_fig": False},
+            {"legend_caps": [], "is_fig": True},
+            {"legend_caps": [], "is_fig": True},
+            {"legend_caps": [], "is_fig": False},
+        ]
+        self.assertEqual(
+            pe._legend_page_pairs(prof, 0, used_pages=set()),
+            [((False, "1"), 1), ((False, "2"), 2)],
+        )
+
+    def test_legend_page_region_uses_full_graphics_union(self):
+        # 文末整页图没有题注边界，按密度带裁剪会把下方稀疏面板截掉；应取整页图形并集。
+        region = pe._legend_page_region([
+            _el(100, 80, 300, 220),
+            _el(120, 650, 280, 760),
+        ])
+        self.assertEqual(region, (100, 80, 300, 760))
 
 
 if __name__ == "__main__":

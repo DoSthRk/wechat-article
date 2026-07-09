@@ -4,11 +4,13 @@
 对应图传永久素材当封面）、_upload_cover_cached 的 sha 去重缓存。
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from utils.job_loader import Job
+from utils.pdf_figure_extractor import Figure
 import batch_processor as bp
 
 
@@ -95,6 +97,42 @@ class TestAutoCoverFromPool(unittest.TestCase):
         mid2 = bp._auto_cover_media_id(client, "immune", self.job, html)
         self.assertEqual(mid2, "thumb-media-XYZ")
         self.assertEqual(len(client.uploaded), 1)
+
+    def test_resolve_job_figures_uses_legend_pages_before_vision(self):
+        pdf = self.base / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        legend_fig = Figure(
+            label="1", is_extended=False, caption="", page=10,
+            image_path=str(self.base / "inputs" / "image_pools" / "poolX" / "fig00.jpg"),
+            width=100, height=80,
+        )
+        saved = {
+            "load_pool": bp._load_pool_figures,
+            "legend": bp.extract_figures_from_legend_pages,
+            "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
+            "env_vision": os.environ.get("VISION_API_KEY"),
+        }
+        bp._load_pool_figures = lambda job: []
+        bp.extract_figures_from_legend_pages = lambda pdf_path, out_dir, max_pages=None: [legend_fig]
+        os.environ["CAPTION_FIGURES_ENABLED"] = "0"
+        os.environ["VISION_API_KEY"] = "would-fail-if-called"
+        try:
+            figs, _ = bp._resolve_job_figures(Job(
+                job_id="legend", pdf=str(pdf), template="t", product="p",
+                line="aav", image_pool=None,
+            ))
+        finally:
+            bp._load_pool_figures = saved["load_pool"]
+            bp.extract_figures_from_legend_pages = saved["legend"]
+            if saved["env_caption"] is None:
+                os.environ.pop("CAPTION_FIGURES_ENABLED", None)
+            else:
+                os.environ["CAPTION_FIGURES_ENABLED"] = saved["env_caption"]
+            if saved["env_vision"] is None:
+                os.environ.pop("VISION_API_KEY", None)
+            else:
+                os.environ["VISION_API_KEY"] = saved["env_vision"]
+        self.assertEqual([f.label for f in figs], ["1"])
 
 
 if __name__ == "__main__":

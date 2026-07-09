@@ -41,7 +41,13 @@ from utils.logger import setup_logger
 from utils.product_loader import load_product_by_id
 from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
-from utils.pdf_figure_extractor import Figure, extract_figures, figure_number, match_figure
+from utils.pdf_figure_extractor import (
+    Figure,
+    extract_figures,
+    extract_figures_from_legend_pages,
+    figure_number,
+    match_figure,
+)
 from utils.wechat_html import (
     extract_title_and_digest,
     find_image_placeholders,
@@ -559,6 +565,15 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
                 return cfigs, figures_dir
     except Exception as exc:  # noqa: BLE001 - 题注抽图失败回落 VLM
         logger.warning("[%s] 题注抽图失败，回落 VLM：%s", job.job_id, exc)
+    # 投稿稿 / early-view PDF 常见：Figure legends 在正文末尾，真正图页在后面且页内无 Figure 编号。
+    # 只在明确识别到 FIGURE LEGENDS 时按顺序配后续连续图页，避免 VLM 把无编号图页误标。
+    if job.pdf and Path(job.pdf).exists():
+        try:
+            lfigs = extract_figures_from_legend_pages(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            if lfigs:
+                return lfigs, figures_dir
+        except Exception as exc:  # noqa: BLE001 - 文末图例配对失败回落 VLM
+            logger.warning("[%s] 文末图例抽图失败，回落 VLM：%s", job.job_id, exc)
     # VLM 视觉抽图：渲染含图页 → 模型给图号+整图 bbox（密集多面板图也能按图号抽，启发式做不到）
     try:
         from utils.vision_figures import extract_figures_via_vision, vision_enabled
