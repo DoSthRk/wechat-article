@@ -340,7 +340,13 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
     generated = sum(1 for ln in lines if " generated:" in ln)
     drafted = sum(1 for ln in lines if " POST wechat/" in ln)
     blocked = sum(1 for ln in lines if "BLOCKED" in ln or " publish_blocked" in ln)
-    failed = sum(1 for ln in lines if " failed:" in ln.lower() or " - error - " in ln.lower())
+    error_lines = [ln for ln in lines if " failed:" in ln.lower() or " - error - " in ln.lower()]
+    failed_jobs = {
+        m.group(1)
+        for ln in error_lines
+        if (m := re.search(r"\[([^\]]+)\]", ln))
+    }
+    failed = len(failed_jobs) if failed_jobs else len(error_lines)
     last_problem = ""
     for ln in reversed(lines):
         low = ln.lower()
@@ -348,8 +354,17 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
             last_problem = ln
             break
 
+    invalid_ip = ""
+    for ln in error_lines:
+        m = re.search(r"invalid ip ([0-9a-fA-F:.]+)", ln)
+        if m and "not in whitelist" in ln.lower():
+            invalid_ip = m.group(1)
+            break
+
     if status == "cancelled":
         message = "任务已停止，已保留已有日志"
+    elif invalid_ip:
+        message = f"公众号接口拒绝服务器 IP：{invalid_ip} 未在白名单，请先在公众号后台加入 IP 白名单"
     elif failed:
         message = f"发现 {failed} 个失败，建议先看摘要下方最后一条错误"
     elif blocked:

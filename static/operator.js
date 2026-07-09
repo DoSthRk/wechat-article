@@ -153,6 +153,8 @@ function uploadMessage(results) {
 async function startRun(lineId, pdfs) {
   if (busy) return;
   if (!pdfs.length) return;
+  busy = true;
+  applyBusy();
   setStatus("启动中", "running");
   let body;
   try {
@@ -162,15 +164,17 @@ async function startRun(lineId, pdfs) {
       body: JSON.stringify({ line_id: lineId, pdfs }),
     })).json();
   } catch {
+    busy = false;
+    applyBusy();
     setStatus("启动失败", "failed");
     return;
   }
   if (!body.ok) {
+    busy = false;
+    applyBusy();
     setStatus(body.error || "启动失败", "failed");
     return;
   }
-  busy = true;
-  applyBusy();
   poll();
 }
 

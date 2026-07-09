@@ -77,6 +77,8 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("needs_action", js)
         self.assertNotIn("confirm(", js)
         self.assertIn("/api/pdf/delete", js)
+        start_run = js[js.index("async function startRun"):]
+        self.assertLess(start_run.index("busy = true;"), start_run.index('fetch("/api/run"'))
 
     def test_admin_page_keeps_full_dashboard(self):
         r = self.client.get("/admin")

@@ -303,6 +303,18 @@ class TestRunSummary(unittest.TestCase):
         self.assertEqual(summary["total"], 3)
         self.assertIn("失败", summary["message"])
 
+    def test_summary_deduplicates_wechat_ip_whitelist_errors(self):
+        lines = [
+            "2026 - INFO - [a] generated: title=A len=100 tokens=20 health=90 tonal=80",
+            "2026 - ERROR - [a] 自动封面：上传永久素材失败 refresh access_token failed: {'errcode': 40164, 'errmsg': 'invalid ip 47.102.223.198 ipv6 ::ffff:47.102.223.198, not in whitelist'}",
+            "2026 - ERROR - [a] distribute: 账户 aav 缺封面（设 WECHAT_AAV_THUMB_MEDIA_ID；或确保原草稿在以复用其封面）",
+        ]
+        summary = pr._summarize_log(lines, "failed", 1)
+
+        self.assertEqual(summary["failed"], 1)
+        self.assertIn("IP 白名单", summary["message"])
+        self.assertIn("47.102.223.198", summary["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
