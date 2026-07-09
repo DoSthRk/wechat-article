@@ -28,6 +28,10 @@ body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--
 .stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
 .stats b { color: var(--text); font-size: 15px; }
 .stats .warn b { color: var(--warn); }
+.topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+.gm-lab-home { flex: 0 0 auto; color: var(--text); text-decoration: none; font-size: 13px; padding: 7px 11px;
+  border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.035); }
+.gm-lab-home:hover { color: var(--accent-2); border-color: var(--accent-2); }
 
 main { max-width: 1180px; margin: 22px auto; padding: 0 18px; display: flex; flex-direction: column; gap: 18px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }

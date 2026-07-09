@@ -17,6 +17,8 @@ header { max-width: 860px; margin: 0 auto; padding: 26px 18px 12px; display: fle
 h1 { margin: 0; font-size: 24px; font-weight: 700; }
 a { color: var(--muted); text-decoration: none; font-size: 13px; }
 a:hover { color: var(--accent); }
+.gm-lab-home { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.gm-lab-home:hover { border-color: var(--accent); }
 main { max-width: 860px; margin: 0 auto; padding: 0 18px 32px; }
 .status { margin: 10px 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); }
 .status.running { color: var(--accent); border-color: rgba(171,25,66,.3); }

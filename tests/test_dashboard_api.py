@@ -57,6 +57,8 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         html = r.get_data(as_text=True)
         self.assertIn("operator.js", html)
+        self.assertIn('href="https://lab.genemedi.cn/"', html)
+        self.assertIn("返回 GM-LAB", html)
         self.assertNotIn("/admin", html)
         self.assertNotIn("管理员版", html)
         self.assertNotIn("文章 × 投放", html)
@@ -80,6 +82,8 @@ class TestDashboardApi(unittest.TestCase):
         r = self.client.get("/admin")
         self.assertEqual(r.status_code, 200)
         html = r.get_data(as_text=True)
+        self.assertIn('href="https://lab.genemedi.cn/"', html)
+        self.assertIn("返回 GM-LAB", html)
         self.assertIn("文章 × 投放", html)
         self.assertIn("成本", html)
 
