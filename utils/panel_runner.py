@@ -335,6 +335,113 @@ def _tail(path: str, n: int) -> List[str]:
     return lines[-n:]
 
 
+def _run_state_path(run_id: str) -> Path:
+    return RUN_DIR / f"{run_id}.state.json"
+
+
+def _run_to_state(run: _Run) -> dict:
+    return {
+        "run_id": run.run_id,
+        "task": run.task,
+        "line_id": run.line_id,
+        "jobs": run.jobs,
+        "log_path": run.log_path,
+        "pid": getattr(run.proc, "pid", None),
+        "status": run.status,
+        "started": run.started,
+    }
+
+
+def _write_run_state(state: dict) -> None:
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    path = _run_state_path(str(state.get("run_id") or ""))
+    tmp = path.with_suffix(".state.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _pid_is_running(pid: Any) -> bool:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid_int)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            try:
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(pid_int, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _infer_finished_status_from_log(log_path: str) -> str:
+    lines = _tail(log_path, 200)
+    if any("用户停止了当前任务" in ln for ln in lines):
+        return "cancelled"
+    for ln in reversed(lines):
+        m = re.search(r"done\. total=\d+ success=\d+ failed=(\d+)", ln)
+        if m:
+            return "done" if int(m.group(1)) == 0 else "failed"
+    if any(" failed:" in ln.lower() or " - error - " in ln.lower() for ln in lines):
+        return "failed"
+    return "failed"
+
+
+def _read_run_states() -> List[dict]:
+    states: List[dict] = []
+    for path in RUN_DIR.glob("*.state.json"):
+        try:
+            state = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(state, dict) or not state.get("run_id"):
+            continue
+        if state.get("status") == "running" and not _pid_is_running(state.get("pid")):
+            state["status"] = _infer_finished_status_from_log(str(state.get("log_path") or ""))
+            _write_run_state(state)
+        states.append(state)
+    return sorted(states, key=lambda s: float(s.get("started") or 0), reverse=True)
+
+
+def _active_state() -> Optional[dict]:
+    for state in _read_run_states():
+        if state.get("status") == "running":
+            return state
+    return None
+
+
+def _serialize_state(state: dict, tail: int = 60) -> dict:
+    log_path = str(state.get("log_path") or "")
+    log_lines = _tail(log_path, tail)
+    started = float(state.get("started") or 0)
+    return {
+        "run_id": state.get("run_id"),
+        "task": state.get("task") or "",
+        "line_id": state.get("line_id") or "",
+        "jobs": list(state.get("jobs") or []),
+        "status": state.get("status") or "failed",
+        "started": time.strftime("%H:%M:%S", time.localtime(started)) if started else "",
+        "summary": _summarize_log(log_lines, str(state.get("status") or "failed"), len(state.get("jobs") or [])),
+        "log": log_lines,
+    }
+
+
 def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
     """从原始日志尾部抽一个业务摘要；原始日志仍原样返回供排查。"""
     generated = sum(1 for ln in lines if " generated:" in ln)
@@ -394,10 +501,13 @@ def _reap() -> Optional[_Run]:
     if _current and _current.proc is not None and _current.proc.poll() is not None:
         rc = _current.proc.returncode
         _current.status = "done" if rc == 0 else "failed"
+        _write_run_state(_run_to_state(_current))
         logger.info("panel run %s finished rc=%s", _current.run_id, rc)
         _history.insert(0, _current)
         del _history[6:]
         _current = None
+    elif _current:
+        _write_run_state(_run_to_state(_current))
     return _current
 
 
@@ -419,6 +529,7 @@ def cancel_run() -> dict:
                 fh.write("\n[panel] 用户停止了当前任务\n")
         except OSError:
             pass
+        _write_run_state(_run_to_state(cur))
         logger.info("panel run %s cancelled", cur.run_id)
         _history.insert(0, cur)
         del _history[6:]
@@ -430,7 +541,7 @@ def start_run(line_id: str, pdfs: List[str]) -> dict:
     """为选中的 PDF 起一个后台流水线子进程（generate + distribute）。单活跃任务。"""
     global _current
     with _lock:
-        if _reap() is not None:
+        if _reap() is not None or _active_state() is not None:
             return {"ok": False, "error": "已有任务在跑，等它结束再开"}
         line_id = (line_id or "").strip()
         pdfs = [p for p in (pdfs or []) if str(p).strip()]
@@ -469,15 +580,19 @@ def start_run(line_id: str, pdfs: List[str]) -> dict:
             run_id=run_id, task=task, line_id=line_id,
             jobs=[j["job_id"] for j in jobs], log_path=str(log_path), proc=proc,
         )
+        _write_run_state(_run_to_state(_current))
         logger.info("panel run %s started: line=%s jobs=%s", run_id, line_id, _current.jobs)
         return {"ok": True, "run_id": run_id, "jobs": _current.jobs}
 
 
 def runs_status() -> dict:
     with _lock:
-        cur = _reap()
+        _reap()
+        states = _read_run_states()
+        active = next((s for s in states if s.get("status") == "running"), None)
+        history = [s for s in states if s.get("status") != "running"][:6]
         return {
-            "busy": cur is not None,
-            "current": cur.serialize() if cur else None,
-            "history": [r.serialize(tail=12) for r in _history],
+            "busy": active is not None,
+            "current": _serialize_state(active) if active else None,
+            "history": [_serialize_state(s, tail=12) for s in history],
         }

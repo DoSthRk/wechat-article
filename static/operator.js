@@ -35,6 +35,20 @@ async function loadSources() {
   }
 }
 
+function renderIdleStatus(lines = lastSources) {
+  const totals = (lines || []).reduce((acc, line) => {
+    const counts = line.counts || {};
+    acc.pending += counts.pending || 0;
+    acc.drafts += counts.published || 0;
+    acc.processed += counts.processed || 0;
+    return acc;
+  }, { pending: 0, drafts: 0, processed: 0 });
+  if (totals.pending) return `待处理 ${totals.pending} 篇，请选择文件后生成`;
+  if (totals.drafts) return `当前无待处理 PDF；公众号草稿 ${totals.drafts} 篇`;
+  if (totals.processed) return `当前无待处理 PDF；已生成 ${totals.processed} 篇`;
+  return "暂无待处理 PDF";
+}
+
 function renderLine(line) {
   const counts = line.counts || {};
   const pendingFiles = (line.pdfs || []).filter(needsAction);
@@ -232,13 +246,13 @@ async function poll() {
     return;
   }
   const last = (data.history || [])[0];
-  if (last) {
-    const cls = last.status === "done" ? "done" : (last.status === "failed" ? "failed" : "");
-    setStatus((last.summary && last.summary.message) || "空闲", cls);
-  } else {
-    setStatus("空闲", "");
+  await loadSources();
+  if (last && (last.status === "failed" || last.status === "cancelled")) {
+    const cls = last.status === "failed" ? "failed" : "";
+    setStatus((last.summary && last.summary.message) || "任务未完成", cls);
+    return;
   }
-  loadSources();
+  setStatus(renderIdleStatus(), "");
 }
 
 function setStatus(text, cls) {

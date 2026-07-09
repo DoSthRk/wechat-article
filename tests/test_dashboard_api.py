@@ -79,6 +79,8 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("/api/pdf/delete", js)
         start_run = js[js.index("async function startRun"):]
         self.assertLess(start_run.index("busy = true;"), start_run.index('fetch("/api/run"'))
+        self.assertIn("function renderIdleStatus", js)
+        self.assertIn("setStatus(renderIdleStatus()", js)
 
     def test_admin_page_keeps_full_dashboard(self):
         r = self.client.get("/admin")

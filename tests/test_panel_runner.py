@@ -11,6 +11,8 @@ from utils import panel_runner as pr
 
 class _FakeProc:
     def __init__(self):
+        import os
+        self.pid = os.getpid()
         self.returncode = None
         self.terminated = False
 
@@ -60,6 +62,49 @@ class TestRunStateMachine(unittest.TestCase):
         self.assertFalse(st2["busy"])
         self.assertEqual(len(st2["history"]), 1)
         self.assertEqual(st2["history"][0]["status"], "done")
+
+    def test_run_state_visible_without_worker_memory(self):
+        r1 = pr.start_run("solidex", ["inputs/pdfs/免疫客/x.pdf"])
+        self.assertTrue(r1["ok"], r1)
+        pr._current = None  # 模拟下一次轮询命中另一个 gunicorn worker
+
+        st = pr.runs_status()
+
+        self.assertTrue(st["busy"])
+        self.assertEqual(st["current"]["run_id"], r1["run_id"])
+        self.assertEqual(st["current"]["line_id"], "solidex")
+
+    def test_stale_running_state_infers_done_from_log(self):
+        run_id = "staleok"
+        log = pr.RUN_DIR / f"{run_id}.log"
+        log.write_text("2026 - INFO - [a] POST wechat/aav media_id=m1\n"
+                       "2026 - INFO - done. total=1 success=1 failed=0\n",
+                       encoding="utf-8")
+        pr._write_run_state({
+            "run_id": run_id,
+            "task": "panel-aav-test",
+            "line_id": "aav",
+            "jobs": ["a"],
+            "log_path": str(log),
+            "pid": 99999999,
+            "status": "running",
+            "started": 1.0,
+        })
+
+        st = pr.runs_status()
+
+        self.assertFalse(st["busy"])
+        self.assertEqual(st["history"][0]["status"], "done")
+        self.assertIn("公众号草稿箱", st["history"][0]["summary"]["message"])
+
+    def test_start_rejects_running_state_from_other_worker(self):
+        pr.start_run("solidex", ["inputs/pdfs/免疫客/x.pdf"])
+        pr._current = None
+
+        r2 = pr.start_run("solidex", ["inputs/pdfs/免疫客/y.pdf"])
+
+        self.assertFalse(r2["ok"])
+        self.assertIn("已有任务", r2["error"])
 
     def test_failed_run_marked(self):
         pr.start_run("solidex", ["inputs/pdfs/免疫客/x.pdf"])
