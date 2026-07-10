@@ -453,6 +453,11 @@ def _fig_max_pages(job: Job) -> Optional[int]:
         return None
 
 
+def _auto_pdf_figures_enabled() -> bool:
+    """是否允许从 PDF 自动裁剪配图；关闭后仍保留 image_pool/人工 figN 文件。"""
+    return os.getenv("PDF_AUTO_FIGURES_ENABLED", "1").strip() not in ("0", "false", "False")
+
+
 def _resolve_figure_path(description: str, figures_dir: Path, extracted) -> Optional[str]:
     """占位符 → 图片本地路径：优先人工放的 figures/fig{N}.{png,jpg}，否则自动抽取的匹配图。"""
     num = figure_number(description)
@@ -555,6 +560,9 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     pool_figs = _load_pool_figures(job)
     if any(f.label for f in pool_figs):  # pool 里至少有一张能按图号匹配才用 pool
         return pool_figs, figures_dir
+    if not _auto_pdf_figures_enabled():
+        logger.warning("[%s] PDF 自动配图已关闭，跳过 PDF 裁剪；仅使用人工/预置配图", job.job_id)
+        return [], figures_dir
     # 题注锚定抽图（移植 pdffigures2 思路）：最稳、纯 Python 不耗 VLM；题注定图号+边界，多面板算一张、
     # 正文/页脚天然在框外。找不到题注（如 Cell 图文摘要无 Figure N 题注）→ 回落 VLM。
     try:

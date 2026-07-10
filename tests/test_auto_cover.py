@@ -134,6 +134,57 @@ class TestAutoCoverFromPool(unittest.TestCase):
                 os.environ["VISION_API_KEY"] = saved["env_vision"]
         self.assertEqual([f.label for f in figs], ["1"])
 
+    def test_pdf_auto_figures_can_be_disabled(self):
+        pdf = self.base / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        called = {"legend": 0, "extract": 0}
+        saved = {
+            "load_pool": bp._load_pool_figures,
+            "legend": bp.extract_figures_from_legend_pages,
+            "extract": bp.extract_figures,
+            "env_pdf": os.environ.get("PDF_AUTO_FIGURES_ENABLED"),
+            "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
+            "env_vision": os.environ.get("VISION_API_KEY"),
+        }
+        bp._load_pool_figures = lambda job: []
+
+        def fail_legend(*args, **kwargs):
+            called["legend"] += 1
+            raise AssertionError("legend extraction should be skipped")
+
+        def fail_extract(*args, **kwargs):
+            called["extract"] += 1
+            raise AssertionError("heuristic extraction should be skipped")
+
+        bp.extract_figures_from_legend_pages = fail_legend
+        bp.extract_figures = fail_extract
+        os.environ["PDF_AUTO_FIGURES_ENABLED"] = "0"
+        os.environ["CAPTION_FIGURES_ENABLED"] = "0"
+        os.environ["VISION_API_KEY"] = "would-fail-if-called"
+        try:
+            figs, figures_dir = bp._resolve_job_figures(Job(
+                job_id="skip-pdf", pdf=str(pdf), template="t", product="p",
+                line="solidex", image_pool=None,
+            ))
+        finally:
+            bp._load_pool_figures = saved["load_pool"]
+            bp.extract_figures_from_legend_pages = saved["legend"]
+            bp.extract_figures = saved["extract"]
+            for key, env_name in (
+                ("env_pdf", "PDF_AUTO_FIGURES_ENABLED"),
+                ("env_caption", "CAPTION_FIGURES_ENABLED"),
+                ("env_vision", "VISION_API_KEY"),
+            ):
+                value = saved[key]
+                if value is None:
+                    os.environ.pop(env_name, None)
+                else:
+                    os.environ[env_name] = value
+        self.assertEqual(figs, [])
+        self.assertEqual(figures_dir.name, "figures")
+        self.assertEqual(figures_dir.parent.name, "skip-pdf")
+        self.assertEqual(called, {"legend": 0, "extract": 0})
+
 
 if __name__ == "__main__":
     unittest.main()
