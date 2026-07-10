@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -458,6 +459,82 @@ def _auto_pdf_figures_enabled() -> bool:
     return os.getenv("PDF_AUTO_FIGURES_ENABLED", "1").strip() not in ("0", "false", "False")
 
 
+def _figure_extract_timeout_seconds() -> float:
+    raw = os.getenv("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS", "75").strip()
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = 75.0
+    return max(1.0, timeout)
+
+
+def _run_pdf_figure_worker(kind: str, job: Job, figures_dir: Path) -> List[Figure]:
+    """在独立 Python 进程里抽 PDF 图，避免复杂 PDF 把面板任务拖死。"""
+    if not (job.pdf and Path(job.pdf).exists()):
+        return []
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    result_path = figures_dir / f".{kind}_worker_result.json"
+    try:
+        result_path.unlink()
+    except FileNotFoundError:
+        pass
+    timeout = _figure_extract_timeout_seconds()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = (
+        str(PROJECT_ROOT)
+        if not env.get("PYTHONPATH")
+        else str(PROJECT_ROOT) + os.pathsep + str(env["PYTHONPATH"])
+    )
+    cmd = [
+        sys.executable,
+        "-m",
+        "utils.figure_extract_worker",
+        kind,
+        str(job.pdf),
+        str(figures_dir),
+        str(_fig_max_pages(job) or ""),
+        str(result_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[%s] %s 抽图超时 %.0fs，跳过该抽图方式", job.job_id, kind, timeout)
+        return []
+    if proc.returncode != 0:
+        detail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-3:]).strip()
+        logger.warning("[%s] %s 抽图子进程失败 rc=%s：%s", job.job_id, kind, proc.returncode, detail)
+        return []
+    try:
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("[%s] %s 抽图结果读取失败：%s", job.job_id, kind, exc)
+        return []
+    figs: List[Figure] = []
+    for item in data if isinstance(data, list) else []:
+        try:
+            figs.append(Figure(
+                label=str(item.get("label") or ""),
+                is_extended=bool(item.get("is_extended")),
+                caption=str(item.get("caption") or ""),
+                page=int(item.get("page") or 0),
+                image_path=str(item.get("image_path") or ""),
+                width=int(item.get("width") or 0),
+                height=int(item.get("height") or 0),
+            ))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return figs
+
+
 def _resolve_figure_path(description: str, figures_dir: Path, extracted) -> Optional[str]:
     """占位符 → 图片本地路径：优先人工放的 figures/fig{N}.{png,jpg}，否则自动抽取的匹配图。"""
     num = figure_number(description)
@@ -566,9 +643,9 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     # 题注锚定抽图（移植 pdffigures2 思路）：最稳、纯 Python 不耗 VLM；题注定图号+边界，多面板算一张、
     # 正文/页脚天然在框外。找不到题注（如 Cell 图文摘要无 Figure N 题注）→ 回落 VLM。
     try:
-        from utils.caption_figures import caption_enabled, extract_figures_by_caption
+        from utils.caption_figures import caption_enabled
         if caption_enabled() and job.pdf and Path(job.pdf).exists():
-            cfigs = extract_figures_by_caption(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            cfigs = _run_pdf_figure_worker("caption", job, figures_dir)
             if cfigs:
                 return cfigs, figures_dir
     except Exception as exc:  # noqa: BLE001 - 题注抽图失败回落 VLM
@@ -577,7 +654,7 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     # 只在明确识别到 FIGURE LEGENDS 时按顺序配后续连续图页，避免 VLM 把无编号图页误标。
     if job.pdf and Path(job.pdf).exists():
         try:
-            lfigs = extract_figures_from_legend_pages(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            lfigs = _run_pdf_figure_worker("legend", job, figures_dir)
             if lfigs:
                 return lfigs, figures_dir
         except Exception as exc:  # noqa: BLE001 - 文末图例配对失败回落 VLM
@@ -586,14 +663,14 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     try:
         from utils.vision_figures import extract_figures_via_vision, vision_enabled
         if vision_enabled() and job.pdf and Path(job.pdf).exists():
-            vfigs = extract_figures_via_vision(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job))
+            vfigs = _run_pdf_figure_worker("vision", job, figures_dir)
             if vfigs:
                 return vfigs, figures_dir
     except Exception as exc:  # noqa: BLE001 - VLM 失败回落启发式
         logger.warning("[%s] VLM 抽图失败，回落启发式：%s", job.job_id, exc)
     if job.pdf and Path(job.pdf).exists():
         try:
-            return extract_figures(job.pdf, str(figures_dir), max_pages=_fig_max_pages(job)), figures_dir
+            return _run_pdf_figure_worker("heuristic", job, figures_dir), figures_dir
         except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
             logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
     return [], figures_dir
@@ -658,12 +735,14 @@ def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> T
         return html, 0
     extracted, figures_dir = _resolve_job_figures(job)
     used = 0
+    missing = 0
     used_paths: set = set()
     for desc in placeholders:
         path = _resolve_figure_path(desc, figures_dir, extracted)
         if not path:
             # 配不到图：删掉占位符，不在草稿里留 [图片:…] 方括号文字
             html = html.replace(f"[图片:{desc}]", "", 1)
+            missing += 1
             continue
         if path in used_paths:
             # 同一张图已用过（如 Figure 1 与 Figure 1e 都指向 Fig 1）→ 删掉重复占位符，不重复插图
@@ -673,10 +752,14 @@ def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> T
             url = _upload_cached(client, account, path)
         except WeChatAPIError as exc:
             logger.warning("[%s] 配图上传失败 %s：%s", job.job_id, path, exc)
+            html = html.replace(f"[图片:{desc}]", "", 1)
+            missing += 1
             continue
         html = replace_image_placeholder(html, desc, url)
         used_paths.add(path)
         used += 1
+    if missing:
+        logger.warning("[%s] 配图：%d 个图片占位符未配到图片，已从草稿正文移除", job.job_id, missing)
     return html, used
 
 

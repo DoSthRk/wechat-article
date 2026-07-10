@@ -447,6 +447,13 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
     generated = sum(1 for ln in lines if " generated:" in ln)
     drafted = sum(1 for ln in lines if " POST wechat/" in ln)
     blocked = sum(1 for ln in lines if "BLOCKED" in ln or " publish_blocked" in ln)
+    missing_figures = 0
+    for ln in lines:
+        if m := re.search(r"配图：(\d+) 个图片占位符未配到图片", ln):
+            missing_figures += int(m.group(1))
+            continue
+        if m := re.search(r"剩\s*(\d+)\s*个占位符未配", ln):
+            missing_figures += int(m.group(1))
     error_lines = [ln for ln in lines if " failed:" in ln.lower() or " - error - " in ln.lower()]
     failed_jobs = {
         m.group(1)
@@ -484,12 +491,16 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
     else:
         message = f"运行中：{generated}/{total_jobs} 篇已生成，{drafted}/{total_jobs} 篇已提交草稿"
 
+    if missing_figures and not (failed or blocked or invalid_ip):
+        message = f"{message}；未配图 {missing_figures} 张"
+
     return {
         "total": int(total_jobs or 0),
         "generated": generated,
         "drafted": drafted,
         "blocked": blocked,
         "failed": failed,
+        "missing_figures": missing_figures,
         "message": message,
         "last_problem": last_problem,
     }

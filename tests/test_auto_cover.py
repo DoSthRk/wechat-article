@@ -5,6 +5,7 @@
 """
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -98,7 +99,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
         self.assertEqual(mid2, "thumb-media-XYZ")
         self.assertEqual(len(client.uploaded), 1)
 
-    def test_resolve_job_figures_uses_legend_pages_before_vision(self):
+    def test_resolve_job_figures_uses_legend_worker_before_vision(self):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-1.4\n")
         legend_fig = Figure(
@@ -108,12 +109,20 @@ class TestAutoCoverFromPool(unittest.TestCase):
         )
         saved = {
             "load_pool": bp._load_pool_figures,
-            "legend": bp.extract_figures_from_legend_pages,
+            "worker": bp._run_pdf_figure_worker,
             "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
             "env_vision": os.environ.get("VISION_API_KEY"),
         }
+        calls = []
         bp._load_pool_figures = lambda job: []
-        bp.extract_figures_from_legend_pages = lambda pdf_path, out_dir, max_pages=None: [legend_fig]
+
+        def fake_worker(kind, job, figures_dir):
+            calls.append(kind)
+            if kind == "legend":
+                return [legend_fig]
+            raise AssertionError(f"unexpected extractor {kind}")
+
+        bp._run_pdf_figure_worker = fake_worker
         os.environ["CAPTION_FIGURES_ENABLED"] = "0"
         os.environ["VISION_API_KEY"] = "would-fail-if-called"
         try:
@@ -123,7 +132,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
             ))
         finally:
             bp._load_pool_figures = saved["load_pool"]
-            bp.extract_figures_from_legend_pages = saved["legend"]
+            bp._run_pdf_figure_worker = saved["worker"]
             if saved["env_caption"] is None:
                 os.environ.pop("CAPTION_FIGURES_ENABLED", None)
             else:
@@ -133,6 +142,53 @@ class TestAutoCoverFromPool(unittest.TestCase):
             else:
                 os.environ["VISION_API_KEY"] = saved["env_vision"]
         self.assertEqual([f.label for f in figs], ["1"])
+        self.assertEqual(calls, ["legend"])
+
+    def test_pdf_figure_worker_timeout_returns_empty(self):
+        pdf = self.base / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        saved = {
+            "run": bp.subprocess.run,
+            "env_timeout": os.environ.get("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"),
+        }
+
+        def timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+        bp.subprocess.run = timeout_run
+        os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = "0.1"
+        try:
+            with self.assertLogs("batch_processor", level="WARNING") as logs:
+                figs = bp._run_pdf_figure_worker(
+                    "legend",
+                    Job(job_id="slow", pdf=str(pdf), template="t", product="p", line="aav"),
+                    self.base / "outputs" / "jobs" / "slow" / "figures",
+                )
+        finally:
+            bp.subprocess.run = saved["run"]
+            if saved["env_timeout"] is None:
+                os.environ.pop("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = saved["env_timeout"]
+        self.assertEqual(figs, [])
+        self.assertIn("抽图超时", "\n".join(logs.output))
+
+    def test_apply_figures_logs_missing_placeholders(self):
+        saved = bp._resolve_job_figures
+        bp._resolve_job_figures = lambda job: ([], self.base / "figures")
+        try:
+            with self.assertLogs("batch_processor", level="WARNING") as logs:
+                html, used = bp._apply_figures(
+                    "<p>[图片:Figure 1 机制图]</p><p>[图片:Figure 2 统计图]</p>",
+                    Job(job_id="nofig", pdf="missing.pdf", template="t", product="p", line="aav"),
+                    object(),
+                    "immune",
+                )
+        finally:
+            bp._resolve_job_figures = saved
+        self.assertEqual(used, 0)
+        self.assertNotIn("[图片:", html)
+        self.assertIn("2 个图片占位符未配到图片", "\n".join(logs.output))
 
     def test_pdf_auto_figures_can_be_disabled(self):
         pdf = self.base / "paper.pdf"

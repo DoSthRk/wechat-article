@@ -360,6 +360,18 @@ class TestRunSummary(unittest.TestCase):
         self.assertIn("IP 白名单", summary["message"])
         self.assertIn("47.102.223.198", summary["message"])
 
+    def test_summary_reports_missing_figures_without_counting_failure(self):
+        lines = [
+            "2026 - INFO - [a] generated: title=A len=100 tokens=20 health=90 tonal=80",
+            "2026 - WARNING - [a] 配图：2 个图片占位符未配到图片，已从草稿正文移除",
+            "2026 - INFO - [a] POST wechat/aav media_id=m1",
+        ]
+        summary = pr._summarize_log(lines, "done", 1)
+
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["missing_figures"], 2)
+        self.assertIn("未配图 2 张", summary["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
