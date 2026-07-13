@@ -775,6 +775,7 @@ def _build_article_payload(
         "content": content_html,
         "content_source_url": "",
         "thumb_media_id": thumb_media_id,
+        "show_cover_pic": 1,
         "need_open_comment": 0,
         "only_fans_can_comment": 0,
     }

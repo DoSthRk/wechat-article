@@ -126,6 +126,17 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(len(fake.created), 0)
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
 
+    def test_payload_shows_cover_in_article_body(self):
+        payload = bp._build_article_payload(
+            title="测试标题",
+            digest="测试摘要",
+            content_html="<p>正文</p>",
+            author="免疫客",
+            thumb_media_id="thumb-1",
+        )
+        self.assertEqual(payload["thumb_media_id"], "thumb-1")
+        self.assertEqual(payload["show_cover_pic"], 1)
+
 
 class TestLoadProductModule(unittest.TestCase):
     """_load_product_module：读 inputs/product_modules/{line}-{platform}.html，无则空串。"""
