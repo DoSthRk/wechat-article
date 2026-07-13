@@ -776,6 +776,8 @@ def _build_article_payload(
         "content_source_url": "",
         "thumb_media_id": thumb_media_id,
         "show_cover_pic": 1,
+        "pic_crop_235_1": "0_0.287_1_0.713",
+        "pic_crop_1_1": "0_0_1_1",
         "need_open_comment": 0,
         "only_fans_can_comment": 0,
     }

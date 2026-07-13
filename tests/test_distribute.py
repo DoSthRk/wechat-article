@@ -136,6 +136,8 @@ class TestDistributeOne(unittest.TestCase):
         )
         self.assertEqual(payload["thumb_media_id"], "thumb-1")
         self.assertEqual(payload["show_cover_pic"], 1)
+        self.assertEqual(payload["pic_crop_235_1"], "0_0.287_1_0.713")
+        self.assertEqual(payload["pic_crop_1_1"], "0_0_1_1")
 
 
 class TestLoadProductModule(unittest.TestCase):
