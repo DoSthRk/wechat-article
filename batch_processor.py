@@ -297,13 +297,13 @@ def _distribute_one(
         logger.error("[%s] distribute: 账户 %s 凭据未配置：%s", job.job_id, account, exc)
         return False
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
-    thumb_media_id = _resolve_thumb_media_id(account, args)
+    # 优先取该篇文章的首张可用配图作封面；账户固定素材只用于无图时兜底。
+    thumb_media_id = _auto_cover_media_id(client, account, job, html)
+    if not thumb_media_id:
+        thumb_media_id = _resolve_thumb_media_id(account, args)
     if not thumb_media_id and existing and existing.wechat_media_id:
         # 重投 PATCH：复用原草稿现有封面，省去手动配 thumb_media_id
         thumb_media_id = _existing_draft_thumb(client, existing.wechat_media_id)
-    if not thumb_media_id:
-        # 既没配封面也没旧草稿可借（首次发该账户草稿）→ 用文章首图传永久素材自动当封面
-        thumb_media_id = _auto_cover_media_id(client, account, job, html)
     if not thumb_media_id:
         db.update_job_status(
             job_pk, JobStatus.FAILED,

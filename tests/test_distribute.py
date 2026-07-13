@@ -3,9 +3,11 @@
 用 fake WeChatClient + 临时 sqlite，不触网。
 """
 import argparse
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from db.database import DatabaseManager, JobStatus
 from utils.job_loader import Job
@@ -138,6 +140,19 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(payload["show_cover_pic"], 1)
         self.assertEqual(payload["pic_crop_235_1"], "0_0.287_1_0.713")
         self.assertEqual(payload["pic_crop_1_1"], "0_0_1_1")
+
+    def test_article_image_cover_precedes_configured_fallback(self):
+        """正文有可用配图时，不应被账户固定占位封面覆盖。"""
+        job = Job(
+            job_id="j1", pdf="p", template="t", product="pr", line="solidex",
+        )
+        fake = FakeWeChat()
+        with patch.dict(os.environ, {"WECHAT_IMMUNE_THUMB_MEDIA_ID": "fixed-thumb"}):
+            with patch.object(bp, "_auto_cover_media_id", return_value="article-image-thumb") as auto_cover:
+                self.assertTrue(bp._distribute_one(self.db, self.job_pk, job, _get(fake), _args()))
+
+        self.assertEqual(fake.created[0][0]["thumb_media_id"], "article-image-thumb")
+        auto_cover.assert_called_once()
 
 
 class TestLoadProductModule(unittest.TestCase):
