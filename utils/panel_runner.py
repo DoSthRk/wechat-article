@@ -221,7 +221,18 @@ def _line_ids() -> List[str]:
 
 def _norm_pdf_key(path: str) -> str:
     """把 PDF 路径统一成「项目内相对 posix 小写」做匹配键（吃绝对/相对、正反斜杠、大小写）。"""
-    pp = Path(path)
+    raw_path = str(path).replace("\\", "/")
+    pp = Path(raw_path)
+    try:
+        return pp.relative_to(PROJECT_ROOT).as_posix().lower()
+    except ValueError:
+        pass
+    if re.match(r"^[A-Za-z]:/", raw_path):
+        return pp.name.lower()
+    if not pp.is_absolute():
+        normalized = Path(os.path.normpath(raw_path))
+        if normalized.parts and normalized.parts[0] != "..":
+            return normalized.as_posix().lower()
     try:
         return pp.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix().lower()
     except (ValueError, OSError):
