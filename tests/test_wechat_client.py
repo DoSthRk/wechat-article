@@ -61,6 +61,18 @@ class TestWeChatClientAccounts(unittest.TestCase):
         self.assertEqual(c.app_id, "x")
         self.assertTrue(str(c.token_cache_path).endswith("wechat_token_custom.json"))
 
+    @patch("utils.wechat_client.os.chmod")
+    def test_token_cache_is_owner_only(self, chmod):
+        os.environ["WECHAT_IMMUNE_APP_ID"] = "i"
+        os.environ["WECHAT_IMMUNE_APP_SECRET"] = "s"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_path = os.path.join(temp_dir, "token.json")
+            client = WeChatClient(account="immune", token_cache_path=token_path)
+
+            client._write_token_file("secret-token", 123.0)
+
+        chmod.assert_called_once_with(client.token_cache_path, 0o600)
+
     @patch("utils.wechat_client.urllib_request.build_opener")
     def test_wechat_https_proxy_builds_dedicated_opener(self, build_opener):
         os.environ["WECHAT_IMMUNE_APP_ID"] = "i"

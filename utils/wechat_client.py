@@ -157,6 +157,7 @@ class WeChatClient:
         try:
             with self.token_cache_path.open("w", encoding="utf-8") as f:
                 json.dump({"access_token": token, "expires_at": expires_at}, f)
+            os.chmod(self.token_cache_path, 0o600)
         except OSError as exc:
             logger.warning("write token cache failed: %s", exc)
 
