@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from utils.job_loader import Job
 from utils.pdf_figure_extractor import Figure
 import batch_processor as bp
@@ -86,6 +88,18 @@ class TestAutoCoverFromPool(unittest.TestCase):
         job = Job(job_id="j", pdf="does-not-exist.pdf", template="t", product="p",
                   line="x", image_pool=None)
         self.assertIsNone(bp._render_pdf_cover(job, self.base / "figs"))
+
+    def test_render_pdf_cover_uses_wechat_headline_dimensions(self):
+        pdf = self.base / "portrait.pdf"
+        Image.new("RGB", (600, 800), "white").save(pdf, "PDF")
+        job = Job(job_id="j", pdf=str(pdf), template="t", product="p",
+                  line="x", image_pool=None)
+
+        cover_path = bp._render_pdf_cover(job, self.base / "figs")
+
+        self.assertIsNotNone(cover_path)
+        with Image.open(cover_path) as cover:
+            self.assertEqual(cover.size, (900, 383))
 
     def test_auto_cover_uploads_first_figure_then_caches(self):
         client = FakeMaterialClient()

@@ -686,6 +686,8 @@ def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
         return None
     try:
         import pypdfium2 as pdfium  # 已是依赖（pdf_figure_extractor 用）
+        from PIL import Image, ImageOps
+
         doc = pdfium.PdfDocument(job.pdf)
         try:
             pil = doc[0].render(scale=2.0).to_pil()
@@ -693,7 +695,13 @@ def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
             doc.close()
         figures_dir.mkdir(parents=True, exist_ok=True)
         out = figures_dir / "_cover_page1.png"
-        pil.save(str(out))
+        cover = ImageOps.fit(
+            pil.convert("RGB"),
+            (900, 383),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.15),
+        )
+        cover.save(str(out))
         return str(out)
     except Exception as exc:  # noqa: BLE001 - 兜底失败不阻断（回落空串→上层报缺封面）
         logger.warning("[%s] 兜底封面（PDF 首页）渲染失败：%s", job.job_id, exc)
