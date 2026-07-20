@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from utils.logger import setup_logger
 
@@ -55,6 +55,7 @@ class WeChatClient:
         account: str = "default",
         token_cache_path: Optional[str] = None,
         timeout: float = 20.0,
+        proxy_url: Optional[str] = None,
     ):
         self.account = (account or "default").strip() or "default"
         acc = self.account.upper()
@@ -74,6 +75,19 @@ class WeChatClient:
                 f"账户 '{self.account}' 凭据未配置（WECHAT_{acc}_APP_ID / WECHAT_{acc}_APP_SECRET）"
             )
         self.timeout = float(timeout)
+        self.proxy_url = (
+            proxy_url if proxy_url is not None else os.getenv("WECHAT_HTTPS_PROXY", "")
+        ).strip()
+        if self.proxy_url:
+            parsed_proxy = urlsplit(self.proxy_url)
+            if parsed_proxy.scheme not in {"http", "https"} or not parsed_proxy.hostname:
+                raise WeChatAPIError(
+                    "WECHAT_HTTPS_PROXY must be a complete http or https URL"
+                )
+            proxy_handler = urllib_request.ProxyHandler({"https": self.proxy_url})
+        else:
+            proxy_handler = urllib_request.ProxyHandler({})
+        self._opener = urllib_request.build_opener(proxy_handler)
         # token 按账户隔离：微信每个账户同一时刻只允许一个有效 token，多账户各用各的文件
         default_cache = (
             Path(__file__).resolve().parent.parent / "runtime" / f"wechat_token_{self.account}.json"
@@ -285,7 +299,7 @@ class WeChatClient:
 
     def _send(self, req: urllib_request.Request) -> Tuple[int, str]:
         try:
-            with urllib_request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             try:

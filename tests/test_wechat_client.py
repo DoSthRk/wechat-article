@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from utils.wechat_client import WeChatAPIError, WeChatClient
 
@@ -9,6 +10,7 @@ _VARS = [
     "WECHAT_IMMUNE_APP_ID", "WECHAT_IMMUNE_APP_SECRET",
     "WECHAT_AAV_APP_ID", "WECHAT_AAV_APP_SECRET",
     "WECHAT_APP_ID", "WECHAT_APP_SECRET",
+    "WECHAT_HTTPS_PROXY",
 ]
 
 
@@ -58,6 +60,59 @@ class TestWeChatClientAccounts(unittest.TestCase):
         c = WeChatClient(app_id="x", app_secret="y", account="custom")
         self.assertEqual(c.app_id, "x")
         self.assertTrue(str(c.token_cache_path).endswith("wechat_token_custom.json"))
+
+    @patch("utils.wechat_client.urllib_request.build_opener")
+    def test_wechat_https_proxy_builds_dedicated_opener(self, build_opener):
+        os.environ["WECHAT_IMMUNE_APP_ID"] = "i"
+        os.environ["WECHAT_IMMUNE_APP_SECRET"] = "s"
+        os.environ["WECHAT_HTTPS_PROXY"] = "http://127.0.0.1:18888"
+
+        client = WeChatClient(account="immune")
+
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertEqual(client.proxy_url, "http://127.0.0.1:18888")
+        self.assertEqual(proxy_handler.proxies, {"https": "http://127.0.0.1:18888"})
+
+    @patch("utils.wechat_client.urllib_request.build_opener")
+    def test_wechat_client_ignores_ambient_global_proxy(self, build_opener):
+        os.environ["WECHAT_IMMUNE_APP_ID"] = "i"
+        os.environ["WECHAT_IMMUNE_APP_SECRET"] = "s"
+
+        with patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "http://ambient-proxy.example:8080"},
+        ):
+            WeChatClient(account="immune")
+
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertEqual(proxy_handler.proxies, {})
+
+    def test_wechat_https_proxy_rejects_non_http_scheme(self):
+        os.environ["WECHAT_IMMUNE_APP_ID"] = "i"
+        os.environ["WECHAT_IMMUNE_APP_SECRET"] = "s"
+        os.environ["WECHAT_HTTPS_PROXY"] = "socks5://127.0.0.1:1080"
+
+        with self.assertRaisesRegex(WeChatAPIError, "WECHAT_HTTPS_PROXY"):
+            WeChatClient(account="immune")
+
+    @patch("utils.wechat_client.urllib_request.build_opener")
+    def test_send_uses_dedicated_opener(self, build_opener):
+        os.environ["WECHAT_IMMUNE_APP_ID"] = "i"
+        os.environ["WECHAT_IMMUNE_APP_SECRET"] = "s"
+        opener = MagicMock()
+        response = MagicMock()
+        response.__enter__.return_value.status = 200
+        response.__enter__.return_value.read.return_value = b'{"ok":true}'
+        opener.open.return_value = response
+        build_opener.return_value = opener
+        client = WeChatClient(account="immune")
+        request = object()
+
+        status, body = client._send(request)
+
+        opener.open.assert_called_once_with(request, timeout=20.0)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, '{"ok":true}')
 
 
 class TestAddPermanentMaterial(unittest.TestCase):

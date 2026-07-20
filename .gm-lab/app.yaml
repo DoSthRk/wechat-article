@@ -8,6 +8,7 @@ start_command: ".venv/bin/gunicorn --workers 2 --bind 127.0.0.1:${PORT} --access
 health_path: /api/health
 required_env:
   - DEEPSEEK_API_KEY
+  - WECHAT_HTTPS_PROXY
   - WECHAT_IMMUNE_APP_ID
   - WECHAT_IMMUNE_APP_SECRET
   - WECHAT_AAV_APP_ID
