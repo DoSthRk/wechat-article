@@ -138,8 +138,8 @@ class TestDistributeOne(unittest.TestCase):
         )
         self.assertEqual(payload["thumb_media_id"], "thumb-1")
         self.assertEqual(payload["show_cover_pic"], 1)
-        self.assertEqual(payload["pic_crop_235_1"], "0_0.287_1_0.713")
-        self.assertEqual(payload["pic_crop_1_1"], "0_0_1_1")
+        self.assertEqual(payload["pic_crop_235_1"], "0_0_1_1")
+        self.assertEqual(payload["pic_crop_1_1"], "0.287222_0_0.712778_1")
 
     def test_article_image_cover_precedes_configured_fallback(self):
         """正文有可用配图时，不应被账户固定占位封面覆盖。"""
