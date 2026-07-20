@@ -689,8 +689,6 @@ def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
         return None
     try:
         import pypdfium2 as pdfium  # 已是依赖（pdf_figure_extractor 用）
-        from PIL import Image, ImageOps
-
         doc = pdfium.PdfDocument(job.pdf)
         try:
             pil = doc[0].render(scale=2.0).to_pil()
@@ -698,17 +696,37 @@ def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
             doc.close()
         figures_dir.mkdir(parents=True, exist_ok=True)
         out = figures_dir / "_cover_page1.png"
-        cover = ImageOps.fit(
-            pil.convert("RGB"),
-            (900, 383),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.15),
-        )
-        cover.save(str(out))
-        return str(out)
+        pil.save(str(out))
+        return _fit_wechat_cover(out, figures_dir)
     except Exception as exc:  # noqa: BLE001 - 兜底失败不阻断（回落空串→上层报缺封面）
         logger.warning("[%s] 兜底封面（PDF 首页）渲染失败：%s", job.job_id, exc)
         return None
+
+
+def _fit_wechat_cover(source_path: str | Path, figures_dir: Path) -> Optional[str]:
+    """生成公众号所需 900x383 封面副本，不改变正文使用的原始图片。"""
+    try:
+        from PIL import Image, ImageOps
+
+        source = Path(source_path)
+        with Image.open(source) as image:
+            if image.size == (900, 383):
+                return str(source)
+            cover = ImageOps.fit(
+                image.convert("RGB"),
+                (900, 383),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.15),
+            )
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        out = figures_dir / "_wechat_cover.jpg"
+        cover.save(str(out), quality=92)
+        return str(out)
+    except Exception as exc:  # noqa: BLE001 - 由上层回落缺封面处理
+        logger.warning("公众号封面适配失败 %s：%s", source_path, exc)
+        # 保持历史图片池的直传兼容：少数旧素材无法被 Pillow 解码，
+        # 交由公众号接口继续按原逻辑校验，不能因此阻断整篇草稿。
+        return str(source_path)
 
 
 def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str) -> str:
@@ -729,6 +747,9 @@ def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str
         cover_path = _render_pdf_cover(job, figures_dir)  # 兜底：渲染 PDF 首页当封面
     if not cover_path:
         logger.warning("[%s] 自动封面：没抽到可用图、PDF 首页也渲染失败", job.job_id)
+        return ""
+    cover_path = _fit_wechat_cover(cover_path, figures_dir)
+    if not cover_path:
         return ""
     try:
         media_id = _upload_cover_cached(client, account, cover_path)

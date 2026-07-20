@@ -126,6 +126,30 @@ class TestAutoCoverFromPool(unittest.TestCase):
         self.assertEqual(mid2, "thumb-media-XYZ")
         self.assertEqual(len(client.uploaded), 1)
 
+    def test_auto_cover_fits_article_figure_to_wechat_headline_dimensions(self):
+        source = self.base / "source-figure.jpg"
+        Image.new("RGB", (879, 827), "white").save(source)
+        figures_dir = self.base / "outputs" / "jobs" / self.job.job_id / "figures"
+        figure = Figure(
+            label="1", is_extended=False, caption="", page=4,
+            image_path=str(source), width=879, height=827,
+        )
+        saved = bp._resolve_job_figures
+        bp._resolve_job_figures = lambda job: ([figure], figures_dir)
+        try:
+            client = FakeMaterialClient()
+            media_id = bp._auto_cover_media_id(
+                client, "immune", self.job, "<p>[图片:Figure 1 机制图]</p>",
+            )
+        finally:
+            bp._resolve_job_figures = saved
+
+        self.assertEqual(media_id, "thumb-media-XYZ")
+        uploaded_path = Path(client.uploaded[0][0])
+        self.assertNotEqual(uploaded_path, source)
+        with Image.open(uploaded_path) as cover:
+            self.assertEqual(cover.size, (900, 383))
+
     def test_resolve_job_figures_uses_legend_worker_before_vision(self):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-1.4\n")
