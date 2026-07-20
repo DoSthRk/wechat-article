@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -35,6 +36,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
+from utils.figure_strategy import (
+    FigureKey,
+    figure_key_from_description,
+    inspect_pdf_figure_signals as _inspect_pdf_figure_signals,
+    merge_preferred_figures,
+    missing_figure_keys,
+    planned_figure_strategies,
+)
 from utils.health_check import markdown_health_score
 from utils.job_loader import Job, load_jobs
 from utils.line_loader import LineLoadError, load_line_by_id
@@ -297,8 +306,9 @@ def _distribute_one(
         logger.error("[%s] distribute: 账户 %s 凭据未配置：%s", job.job_id, account, exc)
         return False
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
+    resolved_figures = _resolve_job_figures(job, _required_figure_keys(html))
     # 优先取该篇文章的首张可用配图作封面；账户固定素材只用于无图时兜底。
-    thumb_media_id = _auto_cover_media_id(client, account, job, html)
+    thumb_media_id = _auto_cover_media_id(client, account, job, html, resolved=resolved_figures)
     if not thumb_media_id:
         thumb_media_id = _resolve_thumb_media_id(account, args)
     if not thumb_media_id and existing and existing.wechat_media_id:
@@ -315,7 +325,7 @@ def _distribute_one(
         )
         return False
 
-    html, n_figs = _apply_figures(html, job, client, account)
+    html, n_figs = _apply_figures(html, job, client, account, resolved=resolved_figures)
     leftover = len(find_image_placeholders(html))
     if n_figs or leftover:
         logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
@@ -460,6 +470,9 @@ def _auto_pdf_figures_enabled() -> bool:
 
 
 _MIN_PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS = 75.0
+_MIN_FIGURE_FALLBACK_BUDGET_SECONDS = 20.0
+_DEFAULT_FIGURE_TOTAL_BUDGET_SECONDS = 180.0
+_DEFAULT_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS = 180.0
 
 
 def _figure_extract_timeout_seconds() -> float:
@@ -471,7 +484,34 @@ def _figure_extract_timeout_seconds() -> float:
     return max(_MIN_PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS, timeout)
 
 
-def _run_pdf_figure_worker(kind: str, job: Job, figures_dir: Path) -> List[Figure]:
+def _figure_total_budget_seconds() -> float:
+    raw = os.getenv("PDF_FIGURE_TOTAL_BUDGET_SECONDS", str(int(_DEFAULT_FIGURE_TOTAL_BUDGET_SECONDS))).strip()
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_FIGURE_TOTAL_BUDGET_SECONDS
+    return max(_figure_extract_timeout_seconds(), timeout)
+
+
+def _figure_strategy_timeout_seconds(kind: str) -> float:
+    """VLM 需要覆盖渲染和多页请求，不能与本地确定性抽图共用短上限。"""
+    base_timeout = _figure_extract_timeout_seconds()
+    if kind != "vision":
+        return base_timeout
+    raw = os.getenv(
+        "PDF_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS",
+        str(int(_DEFAULT_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS)),
+    ).strip()
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS
+    return max(base_timeout, timeout)
+
+
+def _run_pdf_figure_worker(
+    kind: str, job: Job, figures_dir: Path, timeout_seconds: Optional[float] = None,
+) -> List[Figure]:
     """在独立 Python 进程里抽 PDF 图，避免复杂 PDF 把面板任务拖死。"""
     if not (job.pdf and Path(job.pdf).exists()):
         return []
@@ -481,7 +521,7 @@ def _run_pdf_figure_worker(kind: str, job: Job, figures_dir: Path) -> List[Figur
         result_path.unlink()
     except FileNotFoundError:
         pass
-    timeout = _figure_extract_timeout_seconds()
+    timeout = _figure_extract_timeout_seconds() if timeout_seconds is None else max(1.0, timeout_seconds)
     env = os.environ.copy()
     env["PYTHONPATH"] = (
         str(PROJECT_ROOT)
@@ -629,7 +669,89 @@ def _load_pool_figures(job: Job) -> List[Figure]:
     return figs
 
 
-def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
+def _figure_source_fingerprint(job: Job) -> dict:
+    """内容哈希用于避免同名 PDF 重传时误用旧抽图缓存。"""
+    if not (job.pdf and Path(job.pdf).exists()):
+        return {}
+    path = Path(job.pdf)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path.resolve()),
+        "sha256": digest.hexdigest(),
+        "size": path.stat().st_size,
+        "max_pages": _fig_max_pages(job),
+    }
+
+
+def _prepare_figure_cache(job: Job, figures_dir: Path) -> dict:
+    """PDF 内容变动时清理自动生成物，但保留人工 ``figN.*`` 配图。"""
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    source = _figure_source_fingerprint(job)
+    if not source:
+        return source
+    manifest = figures_dir / "figure_source_manifest.json"
+    try:
+        previous = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = None
+    if previous != source:
+        names = (
+            "caption_figures_manifest.json", "legend_figures_manifest.json",
+            "vision_figures_manifest.json", "figures_manifest.json",
+            ".caption_version", ".crop_version", "figure_resolution_report.json",
+            "_cover_page1.png", "_wechat_cover.jpg",
+        )
+        patterns = ("cap*_p*.jpg", "figvis*_p*.jpg", "legend_*_p*.png", "fig*_p*.png")
+        for name in names:
+            (figures_dir / name).unlink(missing_ok=True)
+        for pattern in patterns:
+            for artifact in figures_dir.glob(pattern):
+                artifact.unlink(missing_ok=True)
+        if previous:
+            logger.info("[%s] PDF 内容已变化，已失效旧的自动抽图缓存", job.job_id)
+    manifest.write_text(json.dumps(source, ensure_ascii=False, indent=2), encoding="utf-8")
+    return source
+
+
+def _resolution_complete(figures: List[Figure], required_keys: set[FigureKey]) -> bool:
+    return bool(figures) if not required_keys else not missing_figure_keys(required_keys, figures)
+
+
+def _write_figure_resolution_report(
+    figures_dir: Path, job: Job, source: dict, required_keys: set[FigureKey], signals, attempts: list[dict], figures: List[Figure],
+) -> None:
+    """保留机器报告，面板和排障可区分空结果、超时与覆盖不足。"""
+    report = {
+        "job_id": job.job_id,
+        "pdf": str(job.pdf or ""),
+        "source": source,
+        "required": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(required_keys)],
+        "signals": {
+            "caption": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(signals.caption_keys)],
+            "has_legend_section": bool(signals.has_legend_section),
+            "page_count": signals.page_count,
+            "scan_error": signals.scan_error,
+        },
+        "attempts": attempts,
+        "selected": [
+            {"label": figure.label, "extended": figure.is_extended, "page": figure.page,
+             "path": figure.image_path, "width": figure.width, "height": figure.height}
+            for figure in figures
+        ],
+        "missing": [
+            f"{'extended:' if ext else ''}{label}"
+            for label, ext in sorted(missing_figure_keys(required_keys, figures))
+        ],
+    }
+    (figures_dir / "figure_resolution_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+
+
+def _legacy_resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
     """该 job 的配图来源：image_pool 能按图号匹配则优先，否则回落 PDF 自动抽取。
 
     关键：pool 的 figures_manifest 若 caption 没有 FIG{N}（图号解析为空，如 AAV 池
@@ -677,6 +799,78 @@ def _resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
         except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
             logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
     return [], figures_dir
+
+
+def _resolve_job_figures(
+    job: Job, required_keys: Optional[set[FigureKey]] = None,
+) -> Tuple[List[Figure], Path]:
+    """按文章实际所需图号选择抽图器，合并回退结果并保留策略报告。"""
+    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
+    required_keys = set(required_keys or set())
+    figures = merge_preferred_figures([], _load_pool_figures(job))
+    source = _prepare_figure_cache(job, figures_dir)
+    if _resolution_complete(figures, required_keys):
+        return figures, figures_dir
+    if not _auto_pdf_figures_enabled():
+        logger.warning("[%s] PDF 自动配图已关闭，跳过 PDF 裁剪；仅使用人工/预置配图", job.job_id)
+        return figures, figures_dir
+    if not (job.pdf and Path(job.pdf).exists()):
+        return figures, figures_dir
+    try:
+        from utils.caption_figures import caption_enabled
+        from utils.vision_figures import vision_enabled
+
+        caption_available = caption_enabled()
+        vision_available = vision_enabled()
+    except Exception as exc:  # noqa: BLE001 - 导入异常仍保留确定性抽图兜底
+        logger.warning("[%s] 抽图能力配置读取失败：%s", job.job_id, exc)
+        caption_available = True
+        vision_available = False
+
+    signals = _inspect_pdf_figure_signals(job.pdf, _fig_max_pages(job))
+    strategies = [
+        kind for kind in planned_figure_strategies(signals, vision_available)
+        if kind != "caption" or caption_available
+    ]
+    attempts: list[dict] = []
+    budget = _figure_total_budget_seconds()
+    started = time.monotonic()
+    for kind in strategies:
+        if _resolution_complete(figures, required_keys):
+            break
+        remaining = budget - (time.monotonic() - started)
+        if remaining < _MIN_FIGURE_FALLBACK_BUDGET_SECONDS:
+            attempts.append({"strategy": kind, "status": "skipped_budget", "remaining_seconds": round(max(0, remaining), 3)})
+            break
+        strategy_timeout = _figure_strategy_timeout_seconds(kind)
+        timeout = min(strategy_timeout, remaining)
+        attempt_started = time.monotonic()
+        try:
+            extracted = (
+                _run_pdf_figure_worker(kind, job, figures_dir)
+                if timeout >= strategy_timeout
+                else _run_pdf_figure_worker(kind, job, figures_dir, timeout)
+            )
+        except Exception as exc:  # noqa: BLE001 - 单个策略异常必须继续回退
+            logger.warning("[%s] %s 抽图异常：%s", job.job_id, kind, exc)
+            extracted = []
+        figures = merge_preferred_figures(figures, extracted)
+        missing = missing_figure_keys(required_keys, figures)
+        attempts.append({
+            "strategy": kind,
+            "status": "success" if extracted else "empty",
+            "seconds": round(time.monotonic() - attempt_started, 3),
+            "result_count": len(extracted),
+            "labels": [f"{'extended:' if figure.is_extended else ''}{figure.label}" for figure in extracted],
+            "missing": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(missing)],
+        })
+    _write_figure_resolution_report(figures_dir, job, source, required_keys, signals, attempts, figures)
+    logger.info(
+        "[%s] 配图策略完成：图=%d，缺=%d，策略=%s",
+        job.job_id, len(figures), len(missing_figure_keys(required_keys, figures)),
+        ",".join(item["strategy"] for item in attempts) or "none",
+    )
+    return figures, figures_dir
 
 
 def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
@@ -729,13 +923,23 @@ def _fit_wechat_cover(source_path: str | Path, figures_dir: Path) -> Optional[st
         return str(source_path)
 
 
-def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str) -> str:
+def _required_figure_keys(html: str) -> set[FigureKey]:
+    return {
+        key for description in find_image_placeholders(html)
+        if (key := figure_key_from_description(description)) is not None
+    }
+
+
+def _auto_cover_media_id(
+    client: WeChatClient, account: str, job: Job, html: str,
+    resolved: Optional[Tuple[List[Figure], Path]] = None,
+) -> str:
     """首次发该账户草稿、又没配封面时：用文章首图自动当封面（image_pool 优先，PDF 抽取兜底）。
 
     取 html 里第一个 ``[图片:…]`` 占位符对应的图；取不到回落到首张可用配图。
     传永久素材拿 thumb media_id（sha 缓存）。任何环节取不到图就回空串，由上层报"缺封面"。
     """
-    extracted, figures_dir = _resolve_job_figures(job)
+    extracted, figures_dir = resolved or _resolve_job_figures(job)
     cover_path: Optional[str] = None
     for desc in find_image_placeholders(html):
         cover_path = _resolve_figure_path(desc, figures_dir, extracted)
@@ -760,12 +964,15 @@ def _auto_cover_media_id(client: WeChatClient, account: str, job: Job, html: str
     return media_id
 
 
-def _apply_figures(html: str, job: Job, client: WeChatClient, account: str) -> Tuple[str, int]:
+def _apply_figures(
+    html: str, job: Job, client: WeChatClient, account: str,
+    resolved: Optional[Tuple[List[Figure], Path]] = None,
+) -> Tuple[str, int]:
     """把 [图片:Figure N …] 占位符替换为真实公众号图（人工放的 fig{N}.png 优先，自动抽取兜底）。"""
     placeholders = find_image_placeholders(html)
     if not placeholders:
         return html, 0
-    extracted, figures_dir = _resolve_job_figures(job)
+    extracted, figures_dir = resolved or _resolve_job_figures(job)
     used = 0
     missing = 0
     used_paths: set = set()

@@ -3,6 +3,7 @@
 覆盖：_load_pool_figures（按 caption 图号载入）、_auto_cover_media_id（取首图占位符
 对应图传永久素材当封面）、_upload_cover_cached 的 sha 去重缓存。
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -39,6 +40,18 @@ class TestFigureExtractionTimeout(unittest.TestCase):
                 os.environ.pop("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS", None)
             else:
                 os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = saved
+
+    def test_vision_strategy_has_a_larger_budget_than_deterministic_extractors(self):
+        saved = os.environ.get("PDF_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS")
+        os.environ.pop("PDF_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS", None)
+        try:
+            self.assertEqual(bp._figure_strategy_timeout_seconds("caption"), 75.0)
+            self.assertEqual(bp._figure_strategy_timeout_seconds("vision"), 180.0)
+        finally:
+            if saved is None:
+                os.environ.pop("PDF_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["PDF_VISION_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = saved
 
 
 class TestAutoCoverFromPool(unittest.TestCase):
@@ -150,6 +163,27 @@ class TestAutoCoverFromPool(unittest.TestCase):
         with Image.open(uploaded_path) as cover:
             self.assertEqual(cover.size, (900, 383))
 
+    def test_auto_cover_uses_pre_resolved_figures_without_second_extraction(self):
+        source = self.base / "pre-resolved.jpg"
+        Image.new("RGB", (640, 480), "white").save(source)
+        figure = Figure(
+            label="1", is_extended=False, caption="", page=4,
+            image_path=str(source), width=640, height=480,
+        )
+        saved = bp._resolve_job_figures
+        bp._resolve_job_figures = lambda job: self.fail("should reuse resolved figures")
+        try:
+            client = FakeMaterialClient()
+            media_id = bp._auto_cover_media_id(
+                client, "immune", self.job, "<p>[图片:Figure 1 机制图]</p>",
+                resolved=([figure], self.base / "figures"),
+            )
+        finally:
+            bp._resolve_job_figures = saved
+
+        self.assertEqual(media_id, "thumb-media-XYZ")
+        self.assertEqual(len(client.uploaded), 1)
+
     def test_resolve_job_figures_uses_legend_worker_before_vision(self):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-1.4\n")
@@ -194,6 +228,81 @@ class TestAutoCoverFromPool(unittest.TestCase):
                 os.environ["VISION_API_KEY"] = saved["env_vision"]
         self.assertEqual([f.label for f in figs], ["1"])
         self.assertEqual(calls, ["legend"])
+
+    def test_resolve_job_figures_uses_fallback_only_for_missing_labels(self):
+        pdf = self.base / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        fig1 = Figure(
+            label="1", is_extended=False, caption="", page=4,
+            image_path=str(self.base / "fig1.jpg"), width=300, height=200,
+        )
+        fig2 = Figure(
+            label="2", is_extended=False, caption="", page=5,
+            image_path=str(self.base / "fig2.jpg"), width=300, height=200,
+        )
+        saved = {
+            "load_pool": bp._load_pool_figures,
+            "worker": bp._run_pdf_figure_worker,
+            "signals": getattr(bp, "_inspect_pdf_figure_signals", None),
+            "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
+            "env_vision": os.environ.get("VISION_API_KEY"),
+        }
+        calls = []
+        bp._load_pool_figures = lambda job: []
+        bp._inspect_pdf_figure_signals = lambda pdf, max_pages=None: type(
+            "Signals", (), {"caption_keys": frozenset({("1", False)}),
+                              "has_legend_section": False, "page_count": 5,
+                              "scan_error": ""},
+        )()
+
+        def fake_worker(kind, job, figures_dir):
+            calls.append(kind)
+            return {"caption": [fig1], "vision": [fig2]}[kind]
+
+        bp._run_pdf_figure_worker = fake_worker
+        os.environ["CAPTION_FIGURES_ENABLED"] = "1"
+        os.environ["VISION_API_KEY"] = "would-fail-if-called"
+        try:
+            figs, _ = bp._resolve_job_figures(
+                Job(job_id="coverage", pdf=str(pdf), template="t", product="p", line="aav"),
+                required_keys={("1", False), ("2", False)},
+            )
+        finally:
+            bp._load_pool_figures = saved["load_pool"]
+            bp._run_pdf_figure_worker = saved["worker"]
+            if saved["signals"] is None:
+                delattr(bp, "_inspect_pdf_figure_signals")
+            else:
+                bp._inspect_pdf_figure_signals = saved["signals"]
+            if saved["env_caption"] is None:
+                os.environ.pop("CAPTION_FIGURES_ENABLED", None)
+            else:
+                os.environ["CAPTION_FIGURES_ENABLED"] = saved["env_caption"]
+            if saved["env_vision"] is None:
+                os.environ.pop("VISION_API_KEY", None)
+            else:
+                os.environ["VISION_API_KEY"] = saved["env_vision"]
+
+        self.assertEqual([f.label for f in figs], ["1", "2"])
+        self.assertEqual(calls, ["caption", "vision"])
+
+    def test_figure_cache_invalidates_generated_files_when_pdf_content_changes(self):
+        pdf = self.base / "reuploaded.pdf"
+        pdf.write_bytes(b"first version")
+        job = Job(job_id="cache", pdf=str(pdf), template="t", product="p", line="aav")
+        figures_dir = self.base / "outputs" / "jobs" / job.job_id / "figures"
+        bp._prepare_figure_cache(job, figures_dir)
+        generated = figures_dir / "cap1_p4.jpg"
+        manual = figures_dir / "fig1.jpg"
+        generated.write_bytes(b"generated")
+        manual.write_bytes(b"manual")
+
+        pdf.write_bytes(b"second version")
+        source = bp._prepare_figure_cache(job, figures_dir)
+
+        self.assertFalse(generated.exists())
+        self.assertTrue(manual.exists())
+        self.assertEqual(source["sha256"], hashlib.sha256(b"second version").hexdigest())
 
     def test_pdf_figure_worker_timeout_returns_empty(self):
         pdf = self.base / "paper.pdf"
