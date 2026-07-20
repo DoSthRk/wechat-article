@@ -459,13 +459,16 @@ def _auto_pdf_figures_enabled() -> bool:
     return os.getenv("PDF_AUTO_FIGURES_ENABLED", "1").strip() not in ("0", "false", "False")
 
 
+_MIN_PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS = 75.0
+
+
 def _figure_extract_timeout_seconds() -> float:
     raw = os.getenv("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS", "75").strip()
     try:
         timeout = float(raw)
     except (TypeError, ValueError):
         timeout = 75.0
-    return max(1.0, timeout)
+    return max(_MIN_PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS, timeout)
 
 
 def _run_pdf_figure_worker(kind: str, job: Job, figures_dir: Path) -> List[Figure]:

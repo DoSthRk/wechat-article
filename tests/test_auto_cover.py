@@ -28,6 +28,19 @@ class FakeMaterialClient:
         return "thumb-media-XYZ"
 
 
+class TestFigureExtractionTimeout(unittest.TestCase):
+    def test_clamps_legacy_timeout_below_caption_runtime_floor(self):
+        saved = os.environ.get("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS")
+        os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = "45"
+        try:
+            self.assertEqual(bp._figure_extract_timeout_seconds(), 75.0)
+        finally:
+            if saved is None:
+                os.environ.pop("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = saved
+
+
 class TestAutoCoverFromPool(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
