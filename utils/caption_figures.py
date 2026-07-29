@@ -20,6 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands
 from utils.logger import setup_logger
 from utils.pdf_figure_extractor import Figure
 
@@ -34,7 +35,7 @@ _CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 1     # 算法版本：变更时 +1，缓存据此失效
+_CAPTION_VERSION = 2     # v2: 统一剔除与主图分离的杂志页眉/Logo 带
 
 
 def caption_enabled() -> bool:
@@ -102,17 +103,22 @@ def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
     再判别正文行（图内流程框/示意图文字会被误判成正文，正是 PARK/GBM 翻车的原因）。
     先剔除贯穿大半页的规则线（分栏/页眉脚横线），避免撑大并集。
     """
-    from utils.vision_figures import _is_rule_line  # 复用规则线判定
+    clean = [e for e in gfx if not is_rule_line(e, page_w, page_h)]
 
-    clean = [e for e in gfx if not _is_rule_line(e, page_w, page_h)]
+    def sanitized_union(elements: list) -> Optional[Tuple[float, float, float, float]]:
+        box = _union_box(elements)
+        if box is None:
+            return None
+        return trim_detached_edge_bands(elements, box, page_w, page_h)
+
     # 上方：上一题注以下、本题注以上
     lo = max([b for b in cap_bottoms if b < cap_top - _MIN_FIG_PT], default=0.0)
-    above = _union_box([e for e in clean if lo < _cy(e) < cap_top])
+    above = sanitized_union([e for e in clean if lo < _cy(e) < cap_top])
     if above:
         return above
     # 下方兜底（题注在图上方的版式）：本题注以下、下一题注以上
     hi = min([t for t in cap_tops if t > cap_bottom + _MIN_FIG_PT], default=page_h)
-    return _union_box([e for e in clean if cap_bottom < _cy(e) < hi])
+    return sanitized_union([e for e in clean if cap_bottom < _cy(e) < hi])
 
 
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):

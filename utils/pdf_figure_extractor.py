@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import pdfplumber
 import pypdfium2 as pdfium
 
+from utils.figure_crop_geometry import trim_detached_edge_bands
 from utils.logger import setup_logger
 
 logger = setup_logger("pdf_figure_extractor")
@@ -39,6 +40,7 @@ _MIN_REGION = 120     # 区域最小边长（点）
 _FIGPAGE_MIN_GFX = 300   # 图页：图形元素数下限
 _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
+_CROP_VERSION = 1         # v1: 剔除与主图分离的杂志页眉/Logo 带
 
 
 @dataclass
@@ -50,6 +52,21 @@ class Figure:
     image_path: str
     width: int
     height: int
+
+
+def _manifest_version_path(manifest: Path) -> Path:
+    return manifest.with_name(f".{manifest.stem}_crop_version")
+
+
+def _manifest_version_is_current(manifest: Path) -> bool:
+    try:
+        return int(_manifest_version_path(manifest).read_text(encoding="utf-8").strip()) == _CROP_VERSION
+    except (OSError, ValueError):
+        return False
+
+
+def _write_manifest_version(manifest: Path) -> None:
+    _manifest_version_path(manifest).write_text(str(_CROP_VERSION), encoding="utf-8")
 
 
 def figure_number(text: str) -> str:
@@ -175,9 +192,16 @@ def _figure_region_on_page(page, gfx: list, words: list) -> Optional[Tuple[float
     return _union(gfx, top, bottom)
 
 
-def _legend_page_region(gfx: list) -> Optional[Tuple[float, float, float, float]]:
+def _legend_page_region(
+    gfx: list,
+    page_w: Optional[float] = None,
+    page_h: Optional[float] = None,
+) -> Optional[Tuple[float, float, float, float]]:
     """文末整页图没有题注边界，直接取图形并集，避免密度带截掉稀疏底部面板。"""
-    return _union(gfx)
+    region = _union(gfx)
+    if region is not None and page_w is not None and page_h is not None:
+        region = trim_detached_edge_bands(gfx, region, page_w, page_h)
+    return region
 
 
 def extract_figures_from_legend_pages(
@@ -187,7 +211,7 @@ def extract_figures_from_legend_pages(
     """支持 FIGURE LEGENDS 与文末图页分离的 PDF：按图例顺序配后续连续图页。"""
     out = Path(out_dir)
     manifest_path = out / "legend_figures_manifest.json"
-    if use_cache and manifest_path.exists():
+    if use_cache and manifest_path.exists() and _manifest_version_is_current(manifest_path):
         try:
             return [Figure(**d) for d in json.loads(manifest_path.read_text(encoding="utf-8"))]
         except Exception:  # noqa: BLE001
@@ -220,7 +244,10 @@ def extract_figures_from_legend_pages(
                 if not prof[i]["legend_caps"]:
                     continue
                 for (is_ext, num), fp in _legend_page_pairs(prof, i, used_pages):
-                    region = _legend_page_region(prof[fp]["gfx"])
+                    figure_page = prof[fp]["pg"]
+                    region = _legend_page_region(
+                        prof[fp]["gfx"], float(figure_page.width), float(figure_page.height),
+                    )
                     if region is None:
                         continue
                     rx0, rt, rx1, rb = region
@@ -244,6 +271,7 @@ def extract_figures_from_legend_pages(
     manifest_path.write_text(
         json.dumps([asdict(f) for f in figures], ensure_ascii=False, indent=2), encoding="utf-8",
     )
+    _write_manifest_version(manifest_path)
     if figures:
         logger.info("legend pages extracted %d figure(s) from %s: %s",
                     len(figures), Path(pdf_path).name, sorted(f.label for f in figures))
@@ -257,7 +285,7 @@ def extract_figures(
     """抽图到 out_dir，写 figures_manifest.json。use_cache=True 且 manifest 在则直接读。"""
     out = Path(out_dir)
     manifest_path = out / "figures_manifest.json"
-    if use_cache and manifest_path.exists():
+    if use_cache and manifest_path.exists() and _manifest_version_is_current(manifest_path):
         try:
             return [Figure(**d) for d in json.loads(manifest_path.read_text(encoding="utf-8"))]
         except Exception:  # noqa: BLE001
@@ -311,6 +339,11 @@ def extract_figures(
                             region = None  # 文字密集 → 是正文，跳过
                     if region is None or fp is None:
                         continue
+                    figure_page = prof[fp]["pg"]
+                    region = trim_detached_edge_bands(
+                        prof[fp]["gfx"], region,
+                        float(figure_page.width), float(figure_page.height),
+                    )
                     rx0, rt, rx1, rb = region
                     if (rx1 - rx0) < _MIN_REGION or (rb - rt) < _MIN_REGION:
                         continue
@@ -331,5 +364,6 @@ def extract_figures(
     manifest_path.write_text(
         json.dumps([asdict(f) for f in figures], ensure_ascii=False, indent=2), encoding="utf-8",
     )
+    _write_manifest_version(manifest_path)
     logger.info("extracted %d figure(s) from %s", len(figures), Path(pdf_path).name)
     return figures

@@ -46,6 +46,15 @@ class TestBoxForCaption(unittest.TestCase):
         box = cf._box_for_caption(400, 415, gfx, [400], [415], self.W, self.H)
         self.assertEqual(box, (100, 450, 500, 750))
 
+    def test_detached_journal_header_is_trimmed(self):
+        gfx = [
+            _el(0, 42, 126, 76),                 # CellPress / OPEN ACCESS
+            _el(500, 52, 598, 82),               # Immunity / Article
+            _el(48, 104, 550, 501),              # 主图
+        ]
+        box = cf._box_for_caption(540, 555, gfx, [540], [555], self.W, self.H)
+        self.assertEqual(box, (0, 104.0, 598, 501))
+
     def test_prev_caption_bounds_region(self):
         # 上一题注 bottom=300：题注上方只取 300 以下的图，不吃上一张图（top=100 那块）
         gfx = [_el(100, 100, 500, 250),         # 上一张图（应被上一题注隔开）

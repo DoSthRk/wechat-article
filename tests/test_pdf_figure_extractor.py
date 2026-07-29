@@ -2,7 +2,9 @@
 
 extract_figures 依赖真实 PDF，不在单测覆盖；这里测可纯函数化的 figure_number。
 """
+import tempfile
 import unittest
+from pathlib import Path
 
 from utils import pdf_figure_extractor as pe
 from utils.pdf_figure_extractor import Figure, figure_number, match_figure
@@ -80,6 +82,28 @@ class TestLegendFigurePairing(unittest.TestCase):
             _el(120, 650, 280, 760),
         ])
         self.assertEqual(region, (100, 80, 300, 760))
+
+    def test_legend_page_region_trims_detached_journal_header(self):
+        region = pe._legend_page_region([
+            _el(0, 42, 126, 76),
+            _el(500, 52, 598, 82),
+            _el(48, 104, 550, 650),
+        ], page_w=600, page_h=800)
+        self.assertEqual(region, (0, 104.0, 598, 650))
+
+
+class TestCropCacheVersion(unittest.TestCase):
+    def test_missing_or_stale_version_invalidates_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "legend_figures_manifest.json"
+            manifest.write_text("[]", encoding="utf-8")
+
+            self.assertFalse(pe._manifest_version_is_current(manifest))
+            pe._write_manifest_version(manifest)
+            self.assertTrue(pe._manifest_version_is_current(manifest))
+
+            pe._manifest_version_path(manifest).write_text("0", encoding="utf-8")
+            self.assertFalse(pe._manifest_version_is_current(manifest))
 
 
 if __name__ == "__main__":

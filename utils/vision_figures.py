@@ -21,6 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
+from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands
 from utils.logger import setup_logger
 from utils.pdf_figure_extractor import Figure  # 复用 Figure 数据类（喂给 match_figure）
 
@@ -151,24 +152,11 @@ def _crop_bbox(pil, bbox) -> "Optional[object]":
     return pil.crop(box)
 
 
-# 确定性裁剪参数（pdfplumber 图形元素，单位 pt）
-_BIN_PT = 4.0           # 纵向占用直方图 bin 大小
-_HEADER_MAX_PT = 60.0   # 顶部"小块"高度 < 此值 → 疑似期刊 Logo/页眉
-_HEADER_GAP_PT = 18.0   # 该小块与正图之间的空隙 ≥ 此值 → 确认是页眉，剪掉
-_LOGO_TOP_FRAC = 0.20   # 仅当小块落在页面顶部这一比例内才剪（避免误伤正图）
-
 # 主导大图参数：图文摘要 / 整版单图常是「一张大 raster」，四周散落 Logo/图例/Highlights 圆点
 # 会把图形并集撑到整页 → 直接裁到这张主导图本身。
 _DOMINANT_IMG_FRAC = 0.10   # 最大内嵌图 ≥ 页面此比例 → 候选主导
 _DOMINANT_IMG_RATIO = 4.0   # 且 ≥ 次大图的此倍数 → 确认主导（排除多面板拼图）
 _HUG_PAD_PT = 8.0           # 紧贴主导图这一 pt 范围内的元素（边框/标注）并入裁剪框
-
-# 全宽/全高细线剪除：Nature 等版式正文有分栏线、页眉/页脚横线（贯穿大半页、极细），
-# 它们离正图很远却会把图形并集撑到整页（裁进正文）。算并集前先剔除这类「细规则线」。
-# 注意：只剔「贯穿大半页的细线」，正图内部的轴线/连接线（短）不受影响 → 不伤稀疏矢量图。
-_RULE_SPAN_FRAC = 0.70  # 线长 ≥ 页宽/页高此比例
-_RULE_THICK_PT = 3.0    # 且厚度 ≤ 此值 → 判为规则线（分栏/页眉页脚横线）
-
 
 def _dominant_image_box(pg, page_area: float):
     """单张内嵌大图主导整版时（图文摘要 / 整版单图），裁到该图本身（含紧贴它的边框/标注），
@@ -198,16 +186,8 @@ def _dominant_image_box(pg, page_area: float):
 
 
 def _is_rule_line(e, page_w: float, page_h: float) -> bool:
-    """是否为「贯穿大半页的细规则线」（分栏线 / 页眉页脚横线 / 竖分隔线）。
-
-    只认又长又细的：横向 width ≥ 页宽×_RULE_SPAN_FRAC 且 height ≤ _RULE_THICK_PT（或纵向对称）。
-    正图内部的轴线、箭头、连接线都短，命中不了 → 不会误伤图。
-    """
-    w = float(e["x1"]) - float(e["x0"])
-    h = float(e["bottom"]) - float(e["top"])
-    horiz = w >= _RULE_SPAN_FRAC * page_w and h <= _RULE_THICK_PT
-    vert = h >= _RULE_SPAN_FRAC * page_h and w <= _RULE_THICK_PT
-    return horiz or vert
+    """Compatibility wrapper for the shared long-rule detector."""
+    return is_rule_line(e, page_w, page_h)
 
 
 def _graphics_crop_box(pdf_path: str, idx: int):
@@ -227,36 +207,17 @@ def _graphics_crop_box(pdf_path: str, idx: int):
         els = []
         for kind in ("images", "rects", "curves", "lines"):
             els.extend(getattr(pg, kind, None) or [])
-        # 先剔除贯穿大半页的细规则线（分栏线/页眉页脚横线）——它们离正图远却撑大并集、裁进正文
+        # 先剔除贯穿大半页的细规则线（分栏线/页眉页脚横线）。
         w = float(pg.width)
-        els = [e for e in els if not _is_rule_line(e, w, h)]
+        els = [e for e in els if not is_rule_line(e, w, h)]
         if not els:
             return None
         x0 = min(float(e["x0"]) for e in els)
         x1 = max(float(e["x1"]) for e in els)
         y0 = min(float(e["top"]) for e in els)
         y1 = max(float(e["bottom"]) for e in els)
-        # 顶部 Logo/页眉剪除：纵向占用直方图找"顶部短带 + 空隙"
-        nb = int(h // _BIN_PT) + 1
-        occ = [0] * nb
-        for e in els:
-            for k in range(int(float(e["top"]) // _BIN_PT), int(float(e["bottom"]) // _BIN_PT) + 1):
-                if 0 <= k < nb:
-                    occ[k] += 1
-        cov = [occ[k] >= 1 for k in range(nb)]  # 任意图形元素都算"有内容"
-        i = int(y0 // _BIN_PT)
-        run_start = i
-        while i < nb and cov[i]:                 # 顶部第一块内容（疑似 Logo/页眉）
-            i += 1
-        block_h = (i - run_start) * _BIN_PT
-        gap_start = i
-        while i < nb and not cov[i]:             # 其后的空隙
-            i += 1
-        gap_h = (i - gap_start) * _BIN_PT
-        if (block_h < _HEADER_MAX_PT and gap_h >= _HEADER_GAP_PT
-                and (run_start * _BIN_PT) < _LOGO_TOP_FRAC * h and i < nb):
-            y0 = i * _BIN_PT  # 跳过页眉小块，从正图开始
-    return (max(0.0, x0), max(0.0, y0), x1, y1)
+        region = trim_detached_edge_bands(els, (x0, y0, x1, y1), w, h)
+    return (max(0.0, region[0]), max(0.0, region[1]), region[2], region[3])
 
 
 def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
@@ -277,7 +238,8 @@ def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
 
 # 裁剪逻辑版本：升级裁剪算法时 +1。缓存命中但版本陈旧 → 按缓存的 page 就地重切（不重调 VLM）。
 # v3: 算并集前剔除「贯穿大半页的细规则线」（分栏线/页眉页脚横线），避免裁进正文
-_CROP_VERSION = 3
+# v4: 四条抽图路径共用边缘杂志页眉/Logo 清理器
+_CROP_VERSION = 4
 
 
 def _crop_version_path(out: Path) -> Path:
