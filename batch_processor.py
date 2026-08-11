@@ -265,6 +265,9 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
         publish_blocked=publish_blocked,
         block_reason=block_reason,
     )
+    # Generation only creates Blog queue records. Translation and Blog publishing
+    # remain explicit administrator actions and never affect WeChat drafting.
+    db.ensure_blog_versions(job_pk, str(out_dir))
     db.update_job_status(job_pk, JobStatus.GENERATED)
     if publish_blocked:
         logger.warning("[%s] generated but BLOCKED: %s", job.job_id, block_reason)

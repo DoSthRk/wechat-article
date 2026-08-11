@@ -119,15 +119,20 @@ class TranslateMarkdownTests(unittest.TestCase):
 
 class AssetInjectionTests(unittest.TestCase):
     def test_glossary_block_en_has_known_term(self):
-        block = _glossary_block("en")
+        block = _glossary_block("en", "药诺生物生产腺相关病毒")
         self.assertIn("药诺生物 => GeneMedi", block)
 
+    def test_unmentioned_product_terms_are_not_sent_to_model(self):
+        msg = _build_user_message("en", "# 标题\n\n这是一篇关于腺相关病毒的科普文章。")
+        self.assertNotIn("PurProX", msg)
+        self.assertIn("腺相关病毒 => adeno-associated virus (AAV)", msg)
+
     def test_user_message_contains_glossary_dnt_and_source(self):
-        msg = _build_user_message("en", "# 标题\n\n独一无二的源文标记。")
+        msg = _build_user_message("en", "# 标题\n\nGeneMedi 的独一无二源文标记。")
         self.assertIn("English", msg)
         self.assertIn("GeneMedi", msg)              # glossary 注入
-        self.assertIn("PurProX", msg)               # do-not-translate 注入
-        self.assertIn("独一无二的源文标记。", msg)    # 源文注入
+        self.assertNotIn("PurProX", msg)            # unrelated product names stay out
+        self.assertIn("GeneMedi 的独一无二源文标记。", msg)    # 源文注入
 
     def test_supported_langs(self):
         self.assertEqual(set(translator.SUPPORTED_LANGS), {"en", "ja", "ko", "ru"})

@@ -81,6 +81,24 @@ def create_app(testing: bool = False) -> Flask:
             "total": total, "stats": stats, "rates": rate_card(),
         })
 
+    @app.post("/api/blog/translate")
+    def api_blog_translate():
+        from utils.blog_pipeline import BlogWorkflow, run_batch
+        data = request.get_json(silent=True) or {}
+        selections = data.get("selections")
+        if not isinstance(selections, list) or not selections:
+            return jsonify({"ok": False, "error": "请至少选择一篇英文文章"}), 400
+        return jsonify(run_batch(BlogWorkflow(get_db_manager()), selections, "translate"))
+
+    @app.post("/api/blog/publish")
+    def api_blog_publish():
+        from utils.blog_pipeline import BlogWorkflow, run_batch
+        data = request.get_json(silent=True) or {}
+        selections = data.get("selections")
+        if not isinstance(selections, list) or not selections:
+            return jsonify({"ok": False, "error": "请至少选择一篇待发布文章"}), 400
+        return jsonify(run_batch(BlogWorkflow(get_db_manager()), selections, "publish"))
+
     @app.get("/api/sources")
     def api_sources():
         from utils.panel_runner import list_sources

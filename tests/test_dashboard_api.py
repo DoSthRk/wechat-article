@@ -109,6 +109,12 @@ class TestDashboardApi(unittest.TestCase):
         self.assertAlmostEqual(data["stats"]["cost_cny"], 2.0, places=2)
         self.assertIn("deepseek-chat", data["rates"])
 
+    def test_blog_actions_reject_empty_selection(self):
+        for path in ("/api/blog/translate", "/api/blog/publish"):
+            response = self.client.post(path, json={"selections": []})
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(response.get_json()["ok"])
+
 
 class TestUploadApi(unittest.TestCase):
     def setUp(self):

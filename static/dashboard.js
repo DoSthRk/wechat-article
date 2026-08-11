@@ -261,8 +261,95 @@ function renderArticle(a) {
   return tr;
 }
 
+// ---------- Blog queue (admin only) ----------
+function blogDistribution(a, lang) {
+  return (a.distributions || []).find((d) => d.platform === "blog" && d.account === "genemedi" && d.lang === lang);
+}
+
+function renderBlogQueue(articles) {
+  const tb = $("#blog-rows");
+  tb.innerHTML = "";
+  const rows = [];
+  for (const article of articles || []) {
+    for (const version of article.versions || []) {
+      const dist = blogDistribution(article, version.lang);
+      if (!dist) continue;
+      rows.push({ article, version, dist });
+    }
+  }
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="muted">暂无 Blog 队列。新生成文章会自动进入这里。</td></tr>';
+    return;
+  }
+  for (const item of rows) {
+    const tr = el("tr");
+    const canTranslate = item.version.lang === "en" && ["pending", "failed"].includes(item.version.translation_status);
+    const canPublish = item.dist.publish_status === "pending" && (item.version.lang === "zh" || item.version.translation_status === "translated");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.className = "blog-pick";
+    cb.dataset.jobId = item.article.job_id;
+    cb.dataset.lang = item.version.lang;
+    cb.dataset.translate = canTranslate ? "1" : "0";
+    cb.dataset.publish = canPublish ? "1" : "0";
+    cb.disabled = !(canTranslate || canPublish);
+    const checkCell = el("td"); checkCell.appendChild(cb);
+    const error = item.dist.publish_error || item.version.translation_error || "";
+    const result = item.dist.external_url
+      ? `<a class="link" target="_blank" href="${esc(item.dist.external_url)}">打开文章</a>`
+      : (error ? `<span class="err" title="${esc(error)}">${esc(error.slice(0, 80))}</span>` : '<span class="muted">-</span>');
+    tr.innerHTML =
+      `<td class="mono">${esc(item.article.job_id)}</td>` +
+      `<td>${esc(item.article.title || "-")}</td>` +
+      `<td>${item.version.lang === "zh" ? "中文" : "English"}</td>` +
+      `<td><span class="badge ${item.version.translation_status === "translated" || item.version.translation_status === "ready" ? "ok" : item.version.translation_status === "failed" ? "warn" : "gen"}">${esc(item.version.translation_status)}</span></td>` +
+      `<td><span class="badge ${item.dist.publish_status === "published" ? "ok" : item.dist.publish_status === "failed" ? "warn" : "gen"}">${esc(item.dist.publish_status)}</span></td>` +
+      `<td>${result}</td>`;
+    tr.prepend(checkCell);
+    tb.appendChild(tr);
+  }
+}
+
+async function loadBlogQueue() {
+  try {
+    const data = await (await fetch("/api/articles")).json();
+    renderBlogQueue(data.articles || []);
+  } catch (e) {
+    $("#blog-rows").innerHTML = `<tr><td colspan="7" class="err">加载失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+function blogSelections(kind) {
+  return [...document.querySelectorAll(".blog-pick:checked")]
+    .filter((node) => node.dataset[kind] === "1")
+    .map((node) => ({ job_id: node.dataset.jobId, lang: node.dataset.lang }));
+}
+
+async function runBlogAction(action) {
+  const selections = blogSelections(action === "translate" ? "translate" : "publish");
+  if (!selections.length) {
+    $("#blog-message").textContent = action === "translate" ? "请选择待翻译的英文文章。" : "请选择可发布的中文或英文版本。";
+    return;
+  }
+  if (!confirm(`${action === "translate" ? "翻译" : "发布"} ${selections.length} 个选中版本？`)) return;
+  const response = await fetch(`/api/blog/${action}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selections }),
+  });
+  const data = await response.json();
+  const results = data.results || [];
+  const failures = results.filter((item) => !item.ok);
+  $("#blog-message").className = failures.length ? "blog-message err" : "blog-message ok-text";
+  $("#blog-message").textContent = failures.length
+    ? `完成，但有 ${failures.length} 项失败：${failures[0].error}`
+    : `完成：${results.length} 项已处理。`;
+  loadArticles(); loadBlogQueue();
+}
+
 // ---------- init ----------
 $("#refresh-src").onclick = loadSources;
 $("#refresh-art").onclick = loadArticles;
+$("#refresh-blog").onclick = loadBlogQueue;
+$("#blog-translate").onclick = () => runBlogAction("translate");
+$("#blog-publish").onclick = () => runBlogAction("publish");
 $("#cancel-run").onclick = cancelRun;
-loadSources(); loadArticles(); poll();
+loadSources(); loadArticles(); loadBlogQueue(); poll();

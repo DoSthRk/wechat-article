@@ -87,6 +87,7 @@ class Job(Base):
 
     task = relationship("Task", back_populates="jobs")
     article = relationship("Article", back_populates="job", uselist=False, cascade="all, delete-orphan")
+    versions = relationship("ArticleVersion", back_populates="job", cascade="all, delete-orphan")
     draft = relationship("ArticleDraft", back_populates="job", uselist=False, cascade="all, delete-orphan")
     distributions = relationship("Distribution", back_populates="job", cascade="all, delete-orphan")
 
@@ -160,6 +161,46 @@ class Article(Base):
         }
 
 
+class ArticleVersion(Base):
+    """A language-specific local Markdown version of a generated article."""
+    __tablename__ = "article_versions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_pk = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    lang = Column(String(16), nullable=False)
+    content_path = Column(String(512), nullable=False)
+    translation_status = Column(String(16), default="pending", nullable=False)
+    translation_error = Column(Text)
+    translation_model = Column(String(64))
+    total_tokens = Column(Integer, default=0)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    job = relationship("Job", back_populates="versions")
+
+    __table_args__ = (
+        UniqueConstraint("job_pk", "lang", name="uq_article_version_language"),
+        Index("ix_article_versions_translation_status", "translation_status"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "job_pk": self.job_pk,
+            "lang": self.lang,
+            "content_path": self.content_path,
+            "translation_status": self.translation_status,
+            "translation_error": self.translation_error,
+            "translation_model": self.translation_model,
+            "total_tokens": int(self.total_tokens or 0),
+            "prompt_tokens": int(self.prompt_tokens or 0),
+            "completion_tokens": int(self.completion_tokens or 0),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class ArticleDraft(Base):
     """公众号草稿。media_id 是重发时 PATCH 用的关键（沿用 target-running 思路）。"""
     __tablename__ = "article_drafts"
@@ -206,6 +247,8 @@ class Distribution(Base):
     )
     wechat_media_id = Column(String(128), comment="公众号草稿 media_id（重发 PATCH 用）")
     wechat_url = Column(String(512), comment="公众号草稿预览 URL")
+    external_id = Column(String(128), comment="external platform resource UUID")
+    external_node_id = Column(String(128), comment="external platform node ID")
     external_url = Column(String(512), comment="blog / 外链投放 URL")
     publish_error = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -229,6 +272,8 @@ class Distribution(Base):
             "publish_status": self.publish_status,
             "wechat_media_id": self.wechat_media_id,
             "wechat_url": self.wechat_url,
+            "external_id": self.external_id,
+            "external_node_id": self.external_node_id,
             "external_url": self.external_url,
             "publish_error": self.publish_error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -246,6 +291,7 @@ class DatabaseManager:
         Path(DEFAULT_SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(bind=self.engine)
         self._ensure_sqlite_columns()
+        self._backfill_blog_versions()
         logger.info("DB initialized: %s", self.engine.url)
 
     def get_session(self) -> Session:
@@ -266,6 +312,10 @@ class DatabaseManager:
                 "publish_blocked": "BOOLEAN DEFAULT 0",
                 "block_reason": "TEXT",
             },
+            "distributions": {
+                "external_id": "VARCHAR(128)",
+                "external_node_id": "VARCHAR(128)",
+            },
         }
         with self.engine.begin() as conn:
             for table, cols in additions.items():
@@ -274,6 +324,20 @@ class DatabaseManager:
                     if col not in existing:
                         conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
                         logger.info("migrated: added %s.%s", table, col)
+
+    def _backfill_blog_versions(self) -> None:
+        """Make pre-feature generated Markdown visible in the Blog admin queue."""
+        session = self.get_session()
+        try:
+            rows = [
+                (article.job_pk, article.content_dir)
+                for article in session.query(Article).all()
+                if article.content_dir and (Path(article.content_dir) / "article.md").is_file()
+            ]
+        finally:
+            session.close()
+        for job_pk, content_dir in rows:
+            self.ensure_blog_versions(job_pk, content_dir)
 
     # ---- task / job ----
 
@@ -358,6 +422,79 @@ class DatabaseManager:
         session = self.get_session()
         try:
             return session.query(Article).filter(Article.job_pk == job_pk).first()
+        finally:
+            session.close()
+
+    # ---- article language versions ----
+
+    def upsert_article_version(self, job_pk: int, lang: str, **fields: Any) -> ArticleVersion:
+        session = self.get_session()
+        try:
+            version = (
+                session.query(ArticleVersion)
+                .filter(ArticleVersion.job_pk == job_pk, ArticleVersion.lang == lang)
+                .first()
+            )
+            if not version:
+                version = ArticleVersion(job_pk=job_pk, lang=lang, **fields)
+                session.add(version)
+            else:
+                for key, value in fields.items():
+                    if hasattr(version, key):
+                        setattr(version, key, value)
+            session.commit()
+            session.refresh(version)
+            return version
+        finally:
+            session.close()
+
+    def get_article_version(self, job_pk: int, lang: str) -> Optional[ArticleVersion]:
+        session = self.get_session()
+        try:
+            return (
+                session.query(ArticleVersion)
+                .filter(ArticleVersion.job_pk == job_pk, ArticleVersion.lang == lang)
+                .first()
+            )
+        finally:
+            session.close()
+
+    def ensure_blog_versions(self, job_pk: int, content_dir: str) -> None:
+        """Create the Chinese source and the pending English Blog version."""
+        source_path = str(Path(content_dir) / "article.md")
+        english_path = str(Path(content_dir) / "article.en.md")
+        if self.get_article_version(job_pk, "zh") is None:
+            self.upsert_article_version(
+                job_pk, "zh", content_path=source_path,
+                translation_status="ready", translation_error=None,
+            )
+        if self.get_article_version(job_pk, "en") is None:
+            self.upsert_article_version(
+                job_pk, "en", content_path=english_path,
+                translation_status="pending", translation_error=None,
+            )
+        if self.get_distribution(job_pk, "blog", account="genemedi", lang="zh") is None:
+            self.upsert_distribution(
+                job_pk, "blog", account="genemedi", lang="zh", publish_status="pending",
+            )
+        if self.get_distribution(job_pk, "blog", account="genemedi", lang="en") is None:
+            self.upsert_distribution(
+                job_pk, "blog", account="genemedi", lang="en",
+                publish_status="waiting_translation",
+            )
+
+    def find_job_pk(self, job_id: str) -> Optional[int]:
+        session = self.get_session()
+        try:
+            row = session.query(Job).filter(Job.job_id == job_id).order_by(Job.id.desc()).first()
+            return row.id if row else None
+        finally:
+            session.close()
+
+    def get_job(self, job_pk: int) -> Optional[Job]:
+        session = self.get_session()
+        try:
+            return session.query(Job).filter(Job.id == job_pk).first()
         finally:
             session.close()
 
@@ -479,10 +616,15 @@ class DatabaseManager:
                         {
                             "platform": d.platform, "account": d.account, "lang": d.lang,
                             "publish_status": d.publish_status,
-                            "wechat_media_id": d.wechat_media_id, "external_url": d.external_url,
+                            "wechat_media_id": d.wechat_media_id,
+                            "external_id": d.external_id,
+                            "external_node_id": d.external_node_id,
+                            "external_url": d.external_url,
+                            "publish_error": d.publish_error,
                         }
                         for d in j.distributions
                     ],
+                    "versions": [v.to_dict() for v in j.versions],
                 })
             return items, total
         finally:

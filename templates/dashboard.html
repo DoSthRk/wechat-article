@@ -64,6 +64,25 @@
         </table>
       </div>
     </section>
+    <section class="card">
+      <div class="card-head">
+        <h2>④ Blog 发布队列</h2>
+        <div class="run-actions">
+          <button id="blog-translate" class="btn ghost">翻译选中英文</button>
+          <button id="blog-publish" class="btn">发布选中版本</button>
+          <button id="refresh-blog" class="btn ghost">刷新</button>
+        </div>
+      </div>
+      <div id="blog-message" class="blog-message muted"></div>
+      <div class="table-wrap">
+        <table class="grid">
+          <thead>
+            <tr><th></th><th>Job</th><th>文章</th><th>语言</th><th>翻译</th><th>Blog 状态</th><th>结果</th></tr>
+          </thead>
+          <tbody id="blog-rows"><tr><td colspan="7" class="muted">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>

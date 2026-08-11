@@ -1,0 +1,9 @@
+{
+  "title": "Example GeneMedi Product Article",
+  "body": "<p>This is the article body.</p>",
+  "body_format": "full_html",
+  "langcode": "en",
+  "product_series": "AAV Vector Production",
+  "cover_url": "https://cdn.example.com/images/example-cover.jpg",
+  "slug": "example-genemedi-product-article"
+}

@@ -58,6 +58,8 @@ class TranslationResult:
     translated_markdown: str = ""
     model: str = ""
     total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     error: str = ""
 
 
@@ -99,22 +101,27 @@ def _load_do_not_translate() -> List[str]:
     return _dnt_cache
 
 
-def _glossary_block(lang: str) -> str:
+def _glossary_block(lang: str, source_markdown: str = "") -> str:
     """为目标语言构造 ``中文 => target`` 术语行。"""
     _name, column = SUPPORTED_LANGS[lang]
     lines: List[str] = []
     for row in _load_glossary():
         source = (row.get(_SOURCE_COLUMN) or "").strip()
         target = (row.get(column) or "").strip()
-        if source and target:
+        if source and target and (not source_markdown or source in source_markdown):
             lines.append(f"{source} => {target}")
     return "\n".join(lines)
 
 
+def _matching_do_not_translate(source_markdown: str) -> List[str]:
+    """Only send protected names that occur in the source article to the model."""
+    return [term for term in _load_do_not_translate() if term in source_markdown]
+
+
 def _build_user_message(lang: str, markdown: str) -> str:
     language_name, _column = SUPPORTED_LANGS[lang]
-    glossary = _glossary_block(lang) or "(none)"
-    dnt = "\n".join(_load_do_not_translate()) or "(none)"
+    glossary = _glossary_block(lang, markdown) or "(none)"
+    dnt = "\n".join(_matching_do_not_translate(markdown)) or "(none)"
     return (
         f"Translate the following Simplified Chinese Markdown into {language_name}.\n\n"
         f"## GLOSSARY (Chinese => {language_name}) — use these exact target terms\n"
@@ -211,12 +218,16 @@ def translate_markdown(
                 continue
             usage = getattr(response, "usage", None)
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
             return TranslationResult(
                 True,
                 lang,
                 translated_markdown=text,
                 model=model,
                 total_tokens=total_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
         except Exception as exc:
             last_error = str(exc)
