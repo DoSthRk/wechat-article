@@ -1,26 +1,26 @@
-# wechat-article Phase 0 依赖
-# 装：python3.11 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+# wechat-article dependencies
+# Setup: python3.11 -m venv .venv && pip install -r requirements.txt
 
-# LLM 调用
+# LLM client
 openai==2.29.0
 
-# 环境 / 配置
+# Environment and configuration
 python-dotenv==1.0.1
 PyYAML==6.0.3
 
-# PDF 抽取（文本）+ 图（渲染裁剪：pypdfium2 渲染 + Pillow 裁剪）
+# PDF text and image extraction
 pdfplumber==0.11.9
 pypdfium2==4.30.0
 Pillow==12.2.0
 
-# Markdown 转 HTML
+# Markdown to HTML
 markdown==3.10.2
 
-# DB（继承自 target-running 的栈，方便后续 dashboard 复用）
+# Database
 SQLAlchemy==2.0.36
-PyMySQL==1.1.2          # 若用 MySQL；用 SQLite 可不装但留着方便
+PyMySQL==1.1.2          # Optional when SQLite is used
 
-# Dashboard（Phase 7，服务端渲染，无前端构建）
+# Server-rendered dashboard
 Flask==3.1.3
 gunicorn==26.0.0
 
