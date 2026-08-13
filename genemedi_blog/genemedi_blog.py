@@ -78,7 +78,7 @@ class BlogConfig:
     ) -> "BlogConfig":
         values = os.environ if env is None else env
         base_url = _validate_base_url(
-            values.get("GENEMEDI_BLOG_BASE_URL", "https://hub.genemedi.net")
+            values.get("GENEMEDI_BLOG_BASE_URL", "https://blog.genemedi.com")
         )
         username = values.get("GENEMEDI_BLOG_USER", "").strip()
         password = values.get("GENEMEDI_BLOG_PASSWORD", "")
