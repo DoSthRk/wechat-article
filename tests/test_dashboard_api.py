@@ -88,8 +88,8 @@ class TestDashboardApi(unittest.TestCase):
         html = r.get_data(as_text=True)
         self.assertIn('href="https://lab.genemedi.cn/"', html)
         self.assertIn("返回 GM-LAB", html)
-        self.assertIn("文章 × 投放", html)
-        self.assertIn("成本", html)
+        self.assertIn("内容发布流水线", html)
+        self.assertIn("CMS 发布", html)
 
     def test_articles_overview(self):
         r = self.client.get("/api/articles")
