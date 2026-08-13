@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from db.database import DatabaseManager, JobStatus
-from utils.blog_pipeline import BlogPipelineError, BlogWorkflow, run_batch
+from utils.blog_pipeline import BlogPipelineError, BlogWorkflow, _product_series, run_batch
 from utils.translator import TranslationResult
 
 
@@ -54,6 +54,14 @@ class BlogPipelineTests(unittest.TestCase):
         def translator(_source, lang):
             return TranslationResult(True, lang, translated, model="fake", total_tokens=42)
         return BlogWorkflow(self.db, translator=translator, blog_client_factory=lambda: self.client)
+
+    def test_product_series_defaults_to_business_line(self):
+        with patch.dict(os.environ, {
+            "GENEMEDI_BLOG_PRODUCT_SERIES_AAV": "",
+            "GENEMEDI_BLOG_PRODUCT_SERIES_SOLIDEX": "",
+        }):
+            self.assertEqual(_product_series("purprox_aaveasy_spin_columns"), "AAV")
+            self.assertEqual(_product_series("solidex_pan_t_cell_iso_kit"), "Solidex")
 
     def test_generation_initializes_multilingual_blog_rows(self):
         zh = self.db.get_article_version(self.job_pk, "zh")

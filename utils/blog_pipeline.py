@@ -89,7 +89,10 @@ def _slug(job_id: str, lang: str) -> str:
 def _product_series(product_id: str) -> str:
     normalized = (product_id or "").lower()
     key = "AAV" if "aav" in normalized or "purprox" in normalized else "SOLIDEX" if "solidex" in normalized or "pan_t" in normalized else ""
-    return os.getenv(f"GENEMEDI_BLOG_PRODUCT_SERIES_{key}", "").strip() if key else ""
+    if not key:
+        return ""
+    configured = os.getenv(f"GENEMEDI_BLOG_PRODUCT_SERIES_{key}", "").strip()
+    return configured or {"AAV": "AAV", "SOLIDEX": "Solidex"}[key]
 
 
 def _build_source_job(db_job: Any) -> SourceJob:
