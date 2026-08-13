@@ -199,8 +199,10 @@ def create_app(testing: bool = False) -> Flask:
         try:
             from utils.blog_pipeline import OssImageStore
             store = OssImageStore.from_env()
-            info = store.bucket.get_bucket_info()
-            oss = {"ok": True, "bucket": info.bucket_info.name}
+            probe_key = f"{store.prefix}/.connectivity-probe"
+            store.bucket.put_object(probe_key, b"gm-blog-probe")
+            store.bucket.delete_object(probe_key)
+            oss = {"ok": True, "write_delete": True}
         except Exception as exc:
             oss = {"ok": False, "error": str(exc)}
         return jsonify({"cms": cms, "oss": oss})
