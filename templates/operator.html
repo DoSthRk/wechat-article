@@ -8,15 +8,18 @@
 </head>
 <body>
   <header>
-    <h1>公众号文章生成</h1>
+    <div><p class="eyebrow">GM-LAB / 内容平台</p><h1>公众号文章生成</h1></div>
     <a class="gm-lab-home" href="https://lab.genemedi.cn/">返回 GM-LAB</a>
   </header>
-
   <main>
+    <section class="stage-bar" aria-label="内容流程状态">
+      <div class="stage"><span>1</span><div><strong>选择 PDF</strong><small id="stage-pdf">加载中</small></div></div>
+      <i></i>
+      <div class="stage"><span>2</span><div><strong>生成草稿</strong><small id="stage-drafts">加载中</small></div></div>
+    </section>
     <section id="status" class="status">空闲</section>
     <section id="lines" class="lines"></section>
   </main>
-
   <script src="{{ url_for('static', filename='operator.js') }}"></script>
 </body>
 </html>

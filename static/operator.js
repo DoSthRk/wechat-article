@@ -29,6 +29,7 @@ async function loadSources() {
     box.innerHTML = "";
     for (const line of lastSources) box.appendChild(renderLine(line));
     applyBusy();
+    renderStages(lastSources);
   } catch (e) {
     box.innerHTML = "";
     box.appendChild(el("p", "empty", "加载失败"));
@@ -47,6 +48,17 @@ function renderIdleStatus(lines = lastSources) {
   if (totals.drafts) return `当前无待处理 PDF；公众号草稿 ${totals.drafts} 篇`;
   if (totals.processed) return `当前无待处理 PDF；已生成 ${totals.processed} 篇`;
   return "暂无待处理 PDF";
+}
+
+function renderStages(lines = lastSources) {
+  const totals = (lines || []).reduce((acc, line) => {
+    const counts = line.counts || {};
+    acc.pending += counts.pending || 0;
+    acc.drafts += counts.published || 0;
+    return acc;
+  }, { pending: 0, drafts: 0 });
+  $("#stage-pdf").textContent = totals.pending ? `${totals.pending} 篇待处理` : "暂无待处理文件";
+  $("#stage-drafts").textContent = `${totals.drafts} 篇已入草稿箱`;
 }
 
 function renderLine(line) {
