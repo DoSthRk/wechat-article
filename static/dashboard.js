@@ -331,7 +331,10 @@ async function runBlogAction(action) {
     $("#blog-message").textContent = action === "translate" ? "请选择待翻译的英文文章。" : "请选择可发布的中文或英文版本。";
     return;
   }
-  if (!confirm(`${action === "translate" ? "翻译" : "发布"} ${selections.length} 个选中版本？`)) return;
+  const prompt = action === "translate"
+    ? `翻译 ${selections.length} 个选中英文版本？`
+    : `自动公开发布 ${selections.length} 个选中版本到 GeneMedi CMS？`;
+  if (!confirm(prompt)) return;
   const response = await fetch(`/api/blog/${action}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selections }),
   });

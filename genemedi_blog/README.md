@@ -1,4 +1,4 @@
-# GeneMedi Blog 发布接口
+# GeneMedi CMS 自动发布接口
 
 这个目录可以整体复制到另一个项目。发布器只依赖 Python 3 标准库，不依赖
 `target-running` 的数据库、任务调度器或其他模块。
@@ -8,9 +8,9 @@
 Drupal Article 的 JSON:API 资源地址：
 
 ```text
-创建文章：POST  https://blog.genemedi.com/jsonapi/node/article
-更新文章：PATCH https://blog.genemedi.com/jsonapi/node/article/{drupal_uuid}
-读取文章：GET   https://blog.genemedi.com/jsonapi/node/article/{drupal_uuid}
+创建文章：POST  https://hub.genemedi.net/jsonapi/node/article
+更新文章：PATCH https://hub.genemedi.net/jsonapi/node/article/{drupal_uuid}
+读取文章：GET   https://hub.genemedi.net/jsonapi/node/article/{drupal_uuid}
 ```
 
 必须使用 HTTPS。当前 Drupal 可能在响应的 `links.self.href` 中返回 HTTP 地址，
@@ -29,7 +29,7 @@ Content-Type: application/vnd.api+json
 
 ## 创建文章
 
-新文章默认应创建成草稿，即 `status: false`：
+新文章可创建成草稿，即 `status: false`；本项目管理员面板的“自动发布”动作会显式提交 `status: true`：
 
 ```json
 {
@@ -91,7 +91,7 @@ Content-Type: application/vnd.api+json
 更新地址：
 
 ```text
-PATCH https://blog.genemedi.com/jsonapi/node/article/{drupal_uuid}
+PATCH https://hub.genemedi.net/jsonapi/node/article/{drupal_uuid}
 ```
 
 `data.id` 必须与 URL 中的 UUID 相同。只传需要修改的字段，未传字段会保持原值：
@@ -119,7 +119,7 @@ PATCH https://blog.genemedi.com/jsonapi/node/article/{drupal_uuid}
 
 | 变量 | 必填 | 默认值 |
 | --- | --- | --- |
-| `GENEMEDI_BLOG_BASE_URL` | 否 | `https://blog.genemedi.com` |
+| `GENEMEDI_BLOG_BASE_URL` | 否 | `https://hub.genemedi.net` |
 | `GENEMEDI_BLOG_USER` | 是 | 无 |
 | `GENEMEDI_BLOG_PASSWORD` | 是 | 无 |
 | `GENEMEDI_BLOG_TIMEOUT` | 否 | `30` 秒 |
@@ -128,7 +128,7 @@ PATCH https://blog.genemedi.com/jsonapi/node/article/{drupal_uuid}
 PowerShell：
 
 ```powershell
-$env:GENEMEDI_BLOG_BASE_URL = "https://blog.genemedi.com"
+$env:GENEMEDI_BLOG_BASE_URL = "https://hub.genemedi.net"
 $env:GENEMEDI_BLOG_USER = "admin"
 $env:GENEMEDI_BLOG_PASSWORD = "<由项目负责人提供>"
 ```
@@ -136,7 +136,7 @@ $env:GENEMEDI_BLOG_PASSWORD = "<由项目负责人提供>"
 Linux/macOS：
 
 ```bash
-export GENEMEDI_BLOG_BASE_URL='https://blog.genemedi.com'
+export GENEMEDI_BLOG_BASE_URL='https://hub.genemedi.net'
 export GENEMEDI_BLOG_USER='admin'
 export GENEMEDI_BLOG_PASSWORD='<由项目负责人提供>'
 ```
@@ -230,7 +230,7 @@ curl --fail-with-body \
   --header 'Accept: application/vnd.api+json' \
   --header 'Content-Type: application/vnd.api+json' \
   --data-binary @drupal-payload.json \
-  'https://blog.genemedi.com/jsonapi/node/article'
+  'https://hub.genemedi.net/jsonapi/node/article'
 ```
 
 PATCH 只需要替换方法和 URL，并在 JSON 的 `data` 中加入相同 UUID 的 `id`。
