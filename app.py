@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 from pathlib import Path
@@ -130,6 +131,54 @@ def create_app(testing: bool = False) -> Flask:
             "translation_languages": ["en", "ja", "ko", "ru"],
             "cms_languages": ["zh", "en", "ja", "ko", "ru"],
         })
+
+    @app.post("/api/internal/bootstrap-publishing")
+    def api_bootstrap_publishing():
+        """One-shot localhost-only bootstrap; removed after production setup."""
+        if request.remote_addr not in {"127.0.0.1", "::1"}:
+            abort(404)
+        token_path = Path("/tmp/gm-blog-config-token")
+        try:
+            expected_token = token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            abort(404)
+        supplied_token = request.headers.get("X-Bootstrap-Token", "")
+        if not expected_token or not hmac.compare_digest(supplied_token, expected_token):
+            abort(404)
+
+        allowed = {
+            "GENEMEDI_BLOG_USER", "GENEMEDI_BLOG_PASSWORD",
+            "GENEMEDI_BLOG_CHINESE_LANGCODE", "ALIYUN_OSS_ACCESS_KEY_ID",
+            "ALIYUN_OSS_ACCESS_KEY_SECRET", "ALIYUN_OSS_ENDPOINT",
+            "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL", "ALIYUN_OSS_PREFIX",
+        }
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != allowed:
+            return jsonify({"ok": False, "error": "invalid configuration keys"}), 400
+        values = {name: str(payload[name]).strip() for name in allowed}
+        if not all(values.values()) or any("\n" in value or "\r" in value for value in values.values()):
+            return jsonify({"ok": False, "error": "configuration values must be non-empty single lines"}), 400
+
+        env_path = Path("/opt/gm-apps/article/shared/.env")
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        remaining = set(allowed)
+        updated = []
+        for line in lines:
+            name = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else ""
+            if name in allowed:
+                updated.append(f"{name}={values[name]}")
+                remaining.discard(name)
+            else:
+                updated.append(line)
+        if updated and updated[-1]:
+            updated.append("")
+        updated.extend(f"{name}={values[name]}" for name in sorted(remaining))
+        temp_path = env_path.with_suffix(".tmp")
+        temp_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+        temp_path.chmod(0o600)
+        temp_path.replace(env_path)
+        token_path.unlink(missing_ok=True)
+        return jsonify({"ok": True, "configured": sorted(allowed)})
 
     @app.get("/api/sources")
     def api_sources():
