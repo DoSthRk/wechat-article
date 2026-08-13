@@ -77,9 +77,12 @@ class BlogConfig:
         require_credentials: bool = True,
     ) -> "BlogConfig":
         values = os.environ if env is None else env
-        base_url = _validate_base_url(
-            values.get("GENEMEDI_BLOG_BASE_URL", "https://blog.genemedi.com")
+        configured_base_url = values.get(
+            "GENEMEDI_BLOG_BASE_URL", "https://blog.genemedi.com"
         )
+        if configured_base_url.rstrip("/") == "https://hub.genemedi.net":
+            configured_base_url = "https://blog.genemedi.com"
+        base_url = _validate_base_url(configured_base_url)
         username = values.get("GENEMEDI_BLOG_USER", "").strip()
         password = values.get("GENEMEDI_BLOG_PASSWORD", "")
         if require_credentials and (not username or not password):
