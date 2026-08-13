@@ -118,7 +118,7 @@ def create_app(testing: bool = False) -> Flask:
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
         cms_required = (
-            "GENEMEDI_BLOG_USERNAME", "GENEMEDI_BLOG_PASSWORD",
+            "GENEMEDI_BLOG_USER", "GENEMEDI_BLOG_PASSWORD",
             "GENEMEDI_BLOG_CHINESE_LANGCODE", "ALIYUN_OSS_ACCESS_KEY_ID",
             "ALIYUN_OSS_ACCESS_KEY_SECRET", "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL",

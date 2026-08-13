@@ -3,9 +3,11 @@
 用临时库注入 db.database 单例 + Flask test client。
 """
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import db.database as dbmod
 from db.database import DatabaseManager, JobStatus
@@ -122,13 +124,28 @@ class TestDashboardApi(unittest.TestCase):
             self.assertFalse(response.get_json()["ok"])
 
     def test_workflow_preflight_does_not_expose_secrets(self):
-        response = self.client.get("/api/workflow/preflight")
+        configured = {
+            "DEEPSEEK_API_KEY": "translation-secret",
+            "GENEMEDI_BLOG_USER": "cms-user",
+            "GENEMEDI_BLOG_PASSWORD": "cms-secret",
+            "GENEMEDI_BLOG_CHINESE_LANGCODE": "zh-hans",
+            "ALIYUN_OSS_ACCESS_KEY_ID": "oss-key",
+            "ALIYUN_OSS_ACCESS_KEY_SECRET": "oss-secret",
+            "ALIYUN_OSS_ENDPOINT": "oss-cn-shanghai.aliyuncs.com",
+            "ALIYUN_OSS_BUCKET": "bucket",
+            "ALIYUN_OSS_CDN_BASE_URL": "https://img.example.com",
+        }
+        with patch.dict(os.environ, configured, clear=True):
+            response = self.client.get("/api/workflow/preflight")
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
-        self.assertIn("configured", data["translation"])
-        self.assertIn("configured", data["cms"])
+        self.assertTrue(data["translation"]["configured"])
+        self.assertTrue(data["cms"]["configured"])
         self.assertEqual(data["translation_languages"], ["en", "ja", "ko", "ru"])
-        self.assertNotIn("DEEPSEEK_API_KEY", response.get_data(as_text=True))
+        body = response.get_data(as_text=True)
+        self.assertNotIn("translation-secret", body)
+        self.assertNotIn("cms-secret", body)
+        self.assertNotIn("oss-secret", body)
 
 
 class TestUploadApi(unittest.TestCase):
