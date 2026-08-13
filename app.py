@@ -137,7 +137,7 @@ def create_app(testing: bool = False) -> Flask:
         """One-shot localhost-only bootstrap; removed after production setup."""
         if request.remote_addr not in {"127.0.0.1", "::1"}:
             abort(404)
-        token_path = Path("/tmp/gm-blog-config-token")
+        token_path = Path("/tmp/gm-blog-bootstrap/token")
         try:
             expected_token = token_path.read_text(encoding="utf-8").strip()
         except OSError:
