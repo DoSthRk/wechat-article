@@ -180,6 +180,31 @@ def create_app(testing: bool = False) -> Flask:
         token_path.unlink(missing_ok=True)
         return jsonify({"ok": True, "configured": sorted(allowed)})
 
+    @app.get("/api/internal/probe-publishing")
+    def api_probe_publishing():
+        if request.remote_addr not in {"127.0.0.1", "::1"}:
+            abort(404)
+        try:
+            from genemedi_blog.genemedi_blog import BlogConfig, GeneMediBlogClient
+            probe = GeneMediBlogClient(BlogConfig.from_env()).probe()
+            cms = {
+                "ok": True,
+                "jsonapi_status": probe["jsonapi_status"],
+                "article_status": probe["article_status"],
+                "options_status": probe["options_status"],
+                "allowed_methods": probe["allowed_methods"],
+            }
+        except Exception as exc:
+            cms = {"ok": False, "error": str(exc)}
+        try:
+            from utils.blog_pipeline import OssImageStore
+            store = OssImageStore.from_env()
+            info = store.bucket.get_bucket_info()
+            oss = {"ok": True, "bucket": info.bucket_info.name}
+        except Exception as exc:
+            oss = {"ok": False, "error": str(exc)}
+        return jsonify({"cms": cms, "oss": oss})
+
     @app.get("/api/sources")
     def api_sources():
         from utils.panel_runner import list_sources
