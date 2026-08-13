@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from urllib.parse import urlparse
 
 import markdown as md_lib
 
@@ -169,7 +170,11 @@ class BlogWorkflow:
             raise BlogPipelineError("Blog queue state is incomplete")
         if article.publish_blocked:
             raise BlogPipelineError(f"Article is blocked by quality gate: {article.block_reason or 'unknown'}")
-        if distribution.publish_status == "published":
+        legacy_hub_publication = (
+            distribution.publish_status == "published"
+            and urlparse(distribution.external_url or "").netloc == "hub.genemedi.net"
+        )
+        if distribution.publish_status == "published" and not legacy_hub_publication:
             return {"job_id": job_id, "lang": lang, "status": "already_published", "url": distribution.external_url}
         if lang in BLOG_TARGET_LANGS and version.translation_status != "translated":
             raise BlogPipelineError(f"{lang} article must be translated before publishing")
@@ -197,7 +202,11 @@ class BlogWorkflow:
             if cover_url:
                 payload["cover_url"] = cover_url
             client = self.blog_client_factory()
-            result = client.update(distribution.external_id, payload, publish=True) if distribution.external_id else client.create(payload, publish=True)
+            result = (
+                client.update(distribution.external_id, payload, publish=True)
+                if distribution.external_id and not legacy_hub_publication
+                else client.create(payload, publish=True)
+            )
         except Exception as exc:
             error = str(exc)
             self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="failed", publish_error=error)

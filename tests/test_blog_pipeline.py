@@ -100,6 +100,30 @@ class BlogPipelineTests(unittest.TestCase):
         self.assertEqual(len(self.client.created), 1)
         self.assertEqual(len(self.client.updated), 0)
 
+    def test_legacy_hub_publication_is_recreated_in_blog_cms(self):
+        self.db.upsert_distribution(
+            self.job_pk,
+            "blog",
+            account="genemedi",
+            lang="zh",
+            publish_status="published",
+            external_id="old-hub-uuid",
+            external_url="https://hub.genemedi.net/zh-hans/node/7",
+        )
+
+        result = self._workflow().publish("paper-1", "zh")
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(self.client.created), 1)
+        self.assertEqual(len(self.client.updated), 0)
+        distribution = self.db.get_distribution(
+            self.job_pk, "blog", "genemedi", "zh"
+        )
+        self.assertEqual(
+            distribution.external_id,
+            "00000000-0000-0000-0000-000000000123",
+        )
+
     def test_failed_translation_is_recorded_and_batch_continues(self):
         def failing(_source, lang):
             return TranslationResult(False, lang, error="fake provider unavailable")
