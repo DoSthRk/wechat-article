@@ -1,6 +1,6 @@
 import unittest
 
-from genemedi_blog.genemedi_blog import BlogConfig, build_payload
+from genemedi_blog.genemedi_blog import BlogConfig, GeneMediBlogClient, build_payload
 
 
 class GeneMediCmsConfigTests(unittest.TestCase):
@@ -22,6 +22,29 @@ class GeneMediCmsConfigTests(unittest.TestCase):
             status_override=True,
         )
         self.assertTrue(payload["data"]["attributes"]["status"])
+
+    def test_chinese_public_url_includes_drupal_language_prefix(self):
+        client = GeneMediBlogClient(
+            BlogConfig("https://blog.genemedi.com", "", "")
+        )
+        result = client._normalize_write_result(
+            "create",
+            201,
+            {
+                "data": {
+                    "id": "article-uuid",
+                    "attributes": {
+                        "drupal_internal__nid": 93,
+                        "langcode": "zh-hans",
+                        "path": {"alias": "/blog/93-example"},
+                    },
+                }
+            },
+        )
+        self.assertEqual(
+            result["public_url"],
+            "https://blog.genemedi.com/zh-hans/blog/93-example",
+        )
 
 
 if __name__ == "__main__":

@@ -438,12 +438,23 @@ class GeneMediBlogClient:
             attributes = {}
         path = attributes.get("path")
         alias = path.get("alias") if isinstance(path, dict) else None
+        langcode = attributes.get("langcode")
         node_id = attributes.get("drupal_internal__nid")
         public_url = None
         if isinstance(alias, str) and alias.startswith("/"):
-            public_url = self.config.base_url + alias
+            language_prefix = (
+                f"/{langcode}"
+                if isinstance(langcode, str) and langcode and langcode != "en"
+                else ""
+            )
+            public_url = self.config.base_url + language_prefix + alias
         elif node_id is not None:
-            public_url = f"{self.config.base_url}/node/{node_id}"
+            language_prefix = (
+                f"/{langcode}"
+                if isinstance(langcode, str) and langcode and langcode != "en"
+                else ""
+            )
+            public_url = f"{self.config.base_url}{language_prefix}/node/{node_id}"
         return {
             "operation": operation,
             "http_status": status,

@@ -174,7 +174,19 @@ class BlogWorkflow:
             distribution.publish_status == "published"
             and urlparse(distribution.external_url or "").netloc == "hub.genemedi.net"
         )
-        if distribution.publish_status == "published" and not legacy_hub_publication:
+        legacy_unprefixed_publication = (
+            distribution.publish_status == "published"
+            and lang != "en"
+            and urlparse(distribution.external_url or "").netloc == "blog.genemedi.com"
+            and not urlparse(distribution.external_url or "").path.startswith(
+                f"/{self._drupal_language(lang)}/"
+            )
+        )
+        if (
+            distribution.publish_status == "published"
+            and not legacy_hub_publication
+            and not legacy_unprefixed_publication
+        ):
             return {"job_id": job_id, "lang": lang, "status": "already_published", "url": distribution.external_url}
         if lang in BLOG_TARGET_LANGS and version.translation_status != "translated":
             raise BlogPipelineError(f"{lang} article must be translated before publishing")

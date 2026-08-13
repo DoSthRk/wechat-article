@@ -124,6 +124,23 @@ class BlogPipelineTests(unittest.TestCase):
             "00000000-0000-0000-0000-000000000123",
         )
 
+    def test_unprefixed_chinese_blog_url_is_refreshed(self):
+        self.db.upsert_distribution(
+            self.job_pk,
+            "blog",
+            account="genemedi",
+            lang="zh",
+            publish_status="published",
+            external_id="blog-uuid",
+            external_url="https://blog.genemedi.com/node/93",
+        )
+
+        result = self._workflow().publish("paper-1", "zh")
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(self.client.created), 0)
+        self.assertEqual(len(self.client.updated), 1)
+
     def test_failed_translation_is_recorded_and_batch_continues(self):
         def failing(_source, lang):
             return TranslationResult(False, lang, error="fake provider unavailable")
