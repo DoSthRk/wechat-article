@@ -69,18 +69,18 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn('solidex: "Solidex"', js)
         self.assertIn("上传 PDF", js)
         self.assertIn("生成选中文件", js)
-        self.assertIn("pending-pick", js)
-        self.assertIn("覆盖同名", js)
-        self.assertIn("此文件已生成过", js)
-        self.assertNotIn("未进草稿箱", js)
-        self.assertIn("待处理文件", js)
-        self.assertIn("needs_action", js)
+        self.assertIn("row-pick", js)
+        self.assertIn("已生成过", js)
+        self.assertIn("needsAction", js)
         self.assertNotIn("confirm(", js)
         self.assertIn("/api/pdf/delete", js)
-        start_run = js[js.index("async function startRun"):]
-        self.assertLess(start_run.index("busy = true;"), start_run.index('fetch("/api/run"'))
-        self.assertIn("function renderIdleStatus", js)
-        self.assertIn("setStatus(renderIdleStatus()", js)
+        self.assertIn("/api/workflow/${stage}/run", js)
+        self.assertIn("TRANSLATION_LANGS", js)
+        self.assertIn("CMS_LANGS", js)
+
+        self.assertIn("PDF → 公众号草稿", html)
+        self.assertIn("多语言翻译", html)
+        self.assertIn("多语言 CMS 发布", html)
 
     def test_admin_page_keeps_full_dashboard(self):
         r = self.client.get("/admin")
@@ -111,6 +111,12 @@ class TestDashboardApi(unittest.TestCase):
 
     def test_blog_actions_reject_empty_selection(self):
         for path in ("/api/blog/translate", "/api/blog/publish"):
+            response = self.client.post(path, json={"selections": []})
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(response.get_json()["ok"])
+
+    def test_workflow_actions_reject_empty_selection(self):
+        for path in ("/api/workflow/translate/run", "/api/workflow/publish/run"):
             response = self.client.post(path, json={"selections": []})
             self.assertEqual(response.status_code, 400)
             self.assertFalse(response.get_json()["ok"])

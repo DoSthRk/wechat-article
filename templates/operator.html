@@ -3,22 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>公众号文章生成</title>
+  <title>内容生产流水线</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='operator.css') }}">
 </head>
 <body>
-  <header>
-    <div><p class="eyebrow">GM-LAB / 内容平台</p><h1>公众号文章生成</h1></div>
-    <a class="gm-lab-home" href="https://lab.genemedi.cn/">返回 GM-LAB</a>
+  <header class="page-header">
+    <div>
+      <p class="eyebrow">GM-LAB / 内容平台</p>
+      <h1>内容生产流水线</h1>
+    </div>
+    <div class="header-actions">
+      <button id="refresh" class="btn secondary">刷新</button>
+      <a class="gm-lab-home" href="https://lab.genemedi.cn/">返回 GM-LAB</a>
+    </div>
   </header>
+
   <main>
-    <section class="stage-bar" aria-label="内容流程状态">
-      <div class="stage"><span>1</span><div><strong>选择 PDF</strong><small id="stage-pdf">加载中</small></div></div>
-      <i></i>
-      <div class="stage"><span>2</span><div><strong>生成草稿</strong><small id="stage-drafts">加载中</small></div></div>
+    <section class="stage-bar" aria-label="内容生产流程">
+      <div class="stage">
+        <span class="stage-index">1</span>
+        <div><strong>PDF → 公众号草稿</strong><small id="stage-generate">加载中</small></div>
+        <span id="stage-generate-state" class="stage-pill idle">空闲</span>
+      </div>
+      <div class="stage-arrow">›</div>
+      <div class="stage">
+        <span class="stage-index">2</span>
+        <div><strong>多语言翻译</strong><small id="stage-translate">EN · JA · KO · RU</small></div>
+        <span id="stage-translate-state" class="stage-pill idle">空闲</span>
+      </div>
+      <div class="stage-arrow">›</div>
+      <div class="stage">
+        <span class="stage-index">3</span>
+        <div><strong>多语言 CMS 发布</strong><small id="stage-publish">ZH · EN · JA · KO · RU</small></div>
+        <span id="stage-publish-state" class="stage-pill idle">空闲</span>
+      </div>
     </section>
-    <section id="status" class="status">空闲</section>
+
+    <section class="toolbar-panel">
+      <span>已选 <strong id="selected-count">0</strong> 篇</span>
+      <div class="toolbar-actions">
+        <button id="translate-selected" class="btn secondary">翻译选中内容</button>
+        <button id="publish-selected" class="btn primary">发布选中内容</button>
+      </div>
+    </section>
+
+    <section id="status" class="status">正在加载流水线</section>
     <section id="lines" class="lines"></section>
+
+    <section class="legend" aria-label="状态说明">
+      <span><i class="dot pending"></i>待处理</span>
+      <span><i class="dot running"></i>处理中</span>
+      <span><i class="dot done"></i>已完成</span>
+      <span><i class="dot failed"></i>失败</span>
+    </section>
   </main>
   <script src="{{ url_for('static', filename='operator.js') }}"></script>
 </body>

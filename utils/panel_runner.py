@@ -275,7 +275,12 @@ def list_sources() -> List[dict]:
             dists = info.get("distributions", []) if info else []
             op_pending = _norm_pdf_key(display_pdf) in operator_pending
             already_generated = bool(info and info.get("title"))
-            drafted = any(x.get("publish_status") == "published" for x in dists)
+            drafted = any(
+                x.get("platform") == "wechat"
+                and x.get("lang") == "zh"
+                and x.get("publish_status") == "published"
+                for x in dists
+            )
             needs_action = (not already_generated) or op_pending
             files.append({
                 "pdf": display_pdf,
@@ -290,6 +295,9 @@ def list_sources() -> List[dict]:
                 "title": (info.get("title") if info else None),
                 "published": drafted,
                 "blocked": bool(info.get("publish_blocked")) if info else False,
+                "job_status": (info.get("status") if info else "pending"),
+                "versions": (info.get("versions", []) if info else []),
+                "distributions": dists,
             })
         counts = {
             "total": len(files),

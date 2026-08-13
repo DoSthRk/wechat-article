@@ -55,13 +55,16 @@ class BlogPipelineTests(unittest.TestCase):
             return TranslationResult(True, lang, translated, model="fake", total_tokens=42)
         return BlogWorkflow(self.db, translator=translator, blog_client_factory=lambda: self.client)
 
-    def test_generation_initializes_two_independent_blog_rows(self):
+    def test_generation_initializes_multilingual_blog_rows(self):
         zh = self.db.get_article_version(self.job_pk, "zh")
-        en = self.db.get_article_version(self.job_pk, "en")
         self.assertEqual(zh.translation_status, "ready")
-        self.assertEqual(en.translation_status, "pending")
         self.assertEqual(self.db.get_distribution(self.job_pk, "blog", "genemedi", "zh").publish_status, "pending")
-        self.assertEqual(self.db.get_distribution(self.job_pk, "blog", "genemedi", "en").publish_status, "waiting_translation")
+        for lang in ("en", "ja", "ko", "ru"):
+            self.assertEqual(self.db.get_article_version(self.job_pk, lang).translation_status, "pending")
+            self.assertEqual(
+                self.db.get_distribution(self.job_pk, "blog", "genemedi", lang).publish_status,
+                "waiting_translation",
+            )
 
     def test_translate_then_publish_english(self):
         workflow = self._workflow()
@@ -79,6 +82,15 @@ class BlogPipelineTests(unittest.TestCase):
         dist = self.db.get_distribution(self.job_pk, "blog", "genemedi", "en")
         self.assertEqual(dist.publish_status, "published")
         self.assertEqual(dist.external_id, "00000000-0000-0000-0000-000000000123")
+
+    def test_translate_then_publish_other_supported_languages(self):
+        workflow = self._workflow("# Translated title\n\nTranslated body.")
+        for lang in ("ja", "ko", "ru"):
+            self.assertEqual(workflow.translate("paper-1", lang)["status"], "translated")
+            self.assertEqual(workflow.publish("paper-1", lang)["status"], "published")
+            payload, public = self.client.created[-1]
+            self.assertTrue(public)
+            self.assertEqual(payload["langcode"], lang)
 
     def test_published_article_is_not_overwritten(self):
         workflow = self._workflow()

@@ -99,6 +99,21 @@ def create_app(testing: bool = False) -> Flask:
             return jsonify({"ok": False, "error": "请至少选择一篇待发布文章"}), 400
         return jsonify(run_batch(BlogWorkflow(get_db_manager()), selections, "publish"))
 
+    @app.post("/api/workflow/<stage>/run")
+    def api_workflow_run(stage: str):
+        from utils.workflow_runner import start_workflow
+        data = request.get_json(silent=True) or {}
+        selections = data.get("selections")
+        if not isinstance(selections, list) or not selections:
+            return jsonify({"ok": False, "error": "请至少选择一个可处理版本"}), 400
+        result = start_workflow(stage, selections)
+        return jsonify(result), (202 if result.get("ok") else 409)
+
+    @app.get("/api/workflow/status")
+    def api_workflow_status():
+        from utils.workflow_runner import workflow_status
+        return jsonify(workflow_status())
+
     @app.get("/api/sources")
     def api_sources():
         from utils.panel_runner import list_sources

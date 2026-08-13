@@ -44,6 +44,10 @@ ARTICLE_CONTENT_DIR = os.getenv(
     str(Path(__file__).resolve().parent.parent / "outputs" / "jobs"),
 )
 
+BLOG_SOURCE_LANG = "zh"
+BLOG_TARGET_LANGS = ("en", "ja", "ko", "ru")
+BLOG_LANGS = (BLOG_SOURCE_LANG, *BLOG_TARGET_LANGS)
+
 Base = declarative_base()
 
 
@@ -459,29 +463,43 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def ensure_blog_versions(self, job_pk: int, content_dir: str) -> None:
-        """Create the Chinese source and the pending English Blog version."""
+    def ensure_blog_versions(self, job_pk: int, content_dir: str, *, reset: bool = False) -> None:
+        """Ensure the Chinese source and every multilingual CMS queue row exist.
+
+        ``reset`` is used after regenerating the Chinese source. It keeps CMS
+        external IDs for PATCH updates while making all downstream work pending.
+        """
         source_path = str(Path(content_dir) / "article.md")
-        english_path = str(Path(content_dir) / "article.en.md")
-        if self.get_article_version(job_pk, "zh") is None:
+        source = self.get_article_version(job_pk, BLOG_SOURCE_LANG)
+        if source is None or reset:
             self.upsert_article_version(
-                job_pk, "zh", content_path=source_path,
+                job_pk, BLOG_SOURCE_LANG, content_path=source_path,
                 translation_status="ready", translation_error=None,
             )
-        if self.get_article_version(job_pk, "en") is None:
-            self.upsert_article_version(
-                job_pk, "en", content_path=english_path,
-                translation_status="pending", translation_error=None,
-            )
-        if self.get_distribution(job_pk, "blog", account="genemedi", lang="zh") is None:
+        source_distribution = self.get_distribution(
+            job_pk, "blog", account="genemedi", lang=BLOG_SOURCE_LANG,
+        )
+        if source_distribution is None or reset:
             self.upsert_distribution(
-                job_pk, "blog", account="genemedi", lang="zh", publish_status="pending",
+                job_pk, "blog", account="genemedi", lang=BLOG_SOURCE_LANG,
+                publish_status="pending", publish_error=None,
             )
-        if self.get_distribution(job_pk, "blog", account="genemedi", lang="en") is None:
-            self.upsert_distribution(
-                job_pk, "blog", account="genemedi", lang="en",
-                publish_status="waiting_translation",
+        for lang in BLOG_TARGET_LANGS:
+            target_path = str(Path(content_dir) / f"article.{lang}.md")
+            target = self.get_article_version(job_pk, lang)
+            if target is None or reset:
+                self.upsert_article_version(
+                    job_pk, lang, content_path=target_path,
+                    translation_status="pending", translation_error=None,
+                )
+            target_distribution = self.get_distribution(
+                job_pk, "blog", account="genemedi", lang=lang,
             )
+            if target_distribution is None or reset:
+                self.upsert_distribution(
+                    job_pk, "blog", account="genemedi", lang=lang,
+                    publish_status="waiting_translation", publish_error=None,
+                )
 
     def find_job_pk(self, job_id: str) -> Optional[int]:
         session = self.get_session()

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import markdown as md_lib
 
-from db.database import DatabaseManager
+from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
 from utils.job_loader import Job as SourceJob
 from utils.logger import setup_logger
 from utils.translator import TranslationResult, translate_markdown
@@ -121,12 +121,12 @@ class BlogWorkflow:
             raise BlogPipelineError(f"Blog client configuration failed: {exc}") from exc
 
     def translate(self, job_id: str, lang: str = "en") -> Dict[str, Any]:
-        if lang != "en":
-            raise BlogPipelineError("Only English translation is enabled in this phase")
+        if lang not in BLOG_TARGET_LANGS:
+            raise BlogPipelineError(f"Unsupported translation language: {lang}")
         job_pk = self.db.find_job_pk(job_id)
         if job_pk is None:
             raise BlogPipelineError(f"Unknown job: {job_id}")
-        source = self.db.get_article_version(job_pk, "zh")
+        source = self.db.get_article_version(job_pk, BLOG_SOURCE_LANG)
         target = self.db.get_article_version(job_pk, lang)
         if source is None or target is None:
             raise BlogPipelineError("Blog versions have not been initialized for this article")
@@ -171,9 +171,9 @@ class BlogWorkflow:
             raise BlogPipelineError(f"Article is blocked by quality gate: {article.block_reason or 'unknown'}")
         if distribution.publish_status == "published":
             return {"job_id": job_id, "lang": lang, "status": "already_published", "url": distribution.external_url}
-        if lang == "en" and version.translation_status != "translated":
-            raise BlogPipelineError("English article must be translated before publishing")
-        if lang == "zh" and version.translation_status != "ready":
+        if lang in BLOG_TARGET_LANGS and version.translation_status != "translated":
+            raise BlogPipelineError(f"{lang} article must be translated before publishing")
+        if lang == BLOG_SOURCE_LANG and version.translation_status != "ready":
             raise BlogPipelineError("Chinese source is not ready")
         markdown_path = Path(version.content_path)
         if not markdown_path.is_file():
@@ -213,13 +213,13 @@ class BlogWorkflow:
 
     @staticmethod
     def _drupal_language(lang: str) -> str:
-        if lang == "en":
-            return "en"
-        if lang == "zh":
+        if lang == BLOG_SOURCE_LANG:
             value = os.getenv("GENEMEDI_BLOG_CHINESE_LANGCODE", "").strip()
             if not value:
                 raise BlogPipelineError("GENEMEDI_BLOG_CHINESE_LANGCODE must be set after Blog preflight")
             return value
+        if lang in BLOG_TARGET_LANGS:
+            return os.getenv(f"GENEMEDI_BLOG_LANGCODE_{lang.upper()}", lang).strip() or lang
         raise BlogPipelineError(f"Unsupported Blog language: {lang}")
 
     def _render_with_images(self, markdown_text: str, source_job: SourceJob) -> Tuple[str, str]:
