@@ -123,9 +123,10 @@ def create_app(testing: bool = False) -> Flask:
             "ALIYUN_OSS_ACCESS_KEY_SECRET", "ALIYUN_OSS_ENDPOINT",
             "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL",
         )
+        cms_missing = [name for name in cms_required if not os.getenv(name, "").strip()]
         return jsonify({
             "translation": {"configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip())},
-            "cms": {"configured": all(os.getenv(name, "").strip() for name in cms_required)},
+            "cms": {"configured": not cms_missing, "missing": cms_missing},
             "translation_languages": ["en", "ja", "ko", "ru"],
             "cms_languages": ["zh", "en", "ja", "ko", "ru"],
         })

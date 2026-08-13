@@ -141,11 +141,20 @@ class TestDashboardApi(unittest.TestCase):
         data = response.get_json()
         self.assertTrue(data["translation"]["configured"])
         self.assertTrue(data["cms"]["configured"])
+        self.assertEqual(data["cms"]["missing"], [])
         self.assertEqual(data["translation_languages"], ["en", "ja", "ko", "ru"])
         body = response.get_data(as_text=True)
         self.assertNotIn("translation-secret", body)
         self.assertNotIn("cms-secret", body)
         self.assertNotIn("oss-secret", body)
+
+    def test_workflow_preflight_lists_missing_variable_names_only(self):
+        with patch.dict(os.environ, {}, clear=True):
+            response = self.client.get("/api/workflow/preflight")
+        data = response.get_json()
+        self.assertFalse(data["cms"]["configured"])
+        self.assertIn("GENEMEDI_BLOG_USER", data["cms"]["missing"])
+        self.assertNotIn("cms-secret", response.get_data(as_text=True))
 
 
 class TestUploadApi(unittest.TestCase):
