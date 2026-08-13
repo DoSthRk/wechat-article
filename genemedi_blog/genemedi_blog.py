@@ -359,9 +359,15 @@ class GeneMediBlogClient:
             status_override=publish,
         )
         normalized_uuid = payload["data"]["id"]
+        langcode = payload["data"]["attributes"].get("langcode")
+        language_prefix = (
+            f"/{langcode}"
+            if isinstance(langcode, str) and langcode and langcode != "en"
+            else ""
+        )
         status, document, _ = self._request(
             "PATCH",
-            f"{ARTICLE_ENDPOINT}/{normalized_uuid}",
+            f"{language_prefix}{ARTICLE_ENDPOINT}/{normalized_uuid}",
             payload=payload,
             expected_statuses=(200,),
         )
