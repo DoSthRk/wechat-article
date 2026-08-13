@@ -63,12 +63,13 @@ function renderStages(lines = lastSources) {
 
 function renderLine(line) {
   const counts = line.counts || {};
-  const pendingFiles = (line.pdfs || []).filter(needsAction);
+  const files = line.pdfs || [];
+  const pendingFiles = files.filter(needsAction);
   const card = el("section", "line");
   const head = el("div", "line-head");
   const title = el("div");
   title.appendChild(el("h2", "", LINE_TITLES[line.line_id] || line.name || line.line_id));
-  title.appendChild(el("div", "meta", `待处理 ${pendingFiles.length} 篇 · 草稿 ${counts.published || 0} 篇`));
+  title.appendChild(el("div", "meta", `待生成 ${pendingFiles.length} 篇 · 已入草稿箱 ${counts.published || 0} 篇`));
 
   const actions = el("div", "actions");
   const input = el("input");
@@ -89,38 +90,63 @@ function renderLine(line) {
   actions.append(input, upload, run);
   head.append(title, actions);
   card.appendChild(head);
-  if (pendingFiles.length) {
-    card.appendChild(renderPendingFiles(line.line_id, pendingFiles, card, run));
-    updateRunButton(card, run);
-  } else {
-    card.appendChild(el("div", "empty", "暂无待处理 PDF"));
-  }
+  if (files.length) card.appendChild(renderPipelineTable(line.line_id, files, card, run));
+  else card.appendChild(el("div", "empty", "暂无 PDF"));
+  updateRunButton(card, run);
   return card;
 }
 
-function renderPendingFiles(lineId, files, card, runButton) {
-  const wrap = el("div", "pending");
-  wrap.appendChild(el("div", "pending-title", "待处理文件"));
-  const list = el("div", "pending-list");
+function pipelineStatus(kind, file) {
+  if (kind === "generate") {
+    if (file.blocked) return '<span class="flow-state failed"><i></i>需要处理</span>';
+    if (file.has_article) return '<span class="flow-state done"><i></i>已生成</span>';
+    return '<span class="flow-state waiting"><i></i>待生成</span>';
+  }
+  if (file.published) return '<span class="flow-state done"><i></i>已入草稿箱</span>';
+  if (file.has_article) return '<span class="flow-state waiting"><i></i>待入草稿箱</span>';
+  return '<span class="flow-state muted"><i></i>等待生成</span>';
+}
+
+function renderPipelineTable(lineId, files, card, runButton) {
+  const wrap = el("div", "pipeline-wrap");
+  const table = el("table", "file-pipeline");
+  table.innerHTML = "<thead><tr><th class=\"pick-col\"></th><th>PDF 文件</th><th>生成</th><th>公众号草稿</th><th>操作</th></tr></thead>";
+  const list = el("tbody");
   for (const file of files) {
-    const row = el("div", "pending-row");
+    const row = el("tr");
     const pick = el("input", "pending-pick");
     pick.type = "checkbox";
     pick.value = file.pdf;
-    pick.checked = true;
+    pick.checked = needsAction(file);
+    pick.disabled = !needsAction(file);
     pick.onchange = () => updateRunButton(card, runButton);
-    row.appendChild(pick);
-    const name = el("span", "pending-name", file.name);
+    const pickCell = el("td", "pick-col");
+    pickCell.appendChild(pick);
+    const name = el("div", "pending-name", file.name);
     if (file.already_generated) {
       name.appendChild(el("span", "generated-mark", "已生成过"));
     }
-    row.appendChild(name);
-    const del = el("button", "delete", "删除");
-    del.onclick = () => deletePdf(lineId, file.pdf, file.name, del);
-    row.appendChild(del);
+    const nameCell = el("td", "file-name");
+    nameCell.appendChild(name);
+    const operation = el("td", "file-operation");
+    if (needsAction(file)) {
+      const del = el("button", "delete", "删除");
+      del.onclick = () => deletePdf(lineId, file.pdf, file.name, del);
+      operation.appendChild(del);
+    } else if (file.has_article) {
+      const preview = el("a", "preview", "查看草稿");
+      preview.href = `/preview/${encodeURIComponent(file.job_id)}?wechat=1`;
+      preview.target = "_blank";
+      operation.appendChild(preview);
+    }
+    row.append(pickCell, nameCell);
+    const generateCell = el("td"); generateCell.innerHTML = pipelineStatus("generate", file);
+    const draftCell = el("td"); draftCell.innerHTML = pipelineStatus("draft", file);
+    row.append(generateCell, draftCell, operation);
     list.appendChild(row);
   }
-  wrap.appendChild(list);
+  table.appendChild(list);
+  wrap.appendChild(table);
   return wrap;
 }
 
