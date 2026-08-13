@@ -204,7 +204,17 @@ def create_app(testing: bool = False) -> Flask:
             store.bucket.delete_object(probe_key)
             oss = {"ok": True, "write_delete": True}
         except Exception as exc:
-            oss = {"ok": False, "error": str(exc)}
+            try:
+                import oss2
+                auth = oss2.Auth(
+                    os.environ["ALIYUN_OSS_ACCESS_KEY_ID"],
+                    os.environ["ALIYUN_OSS_ACCESS_KEY_SECRET"],
+                )
+                service = oss2.Service(auth, os.environ["ALIYUN_OSS_ENDPOINT"])
+                visible_buckets = [item.name for item in service.list_buckets().buckets]
+            except Exception as list_exc:
+                visible_buckets = [f"bucket list unavailable: {list_exc}"]
+            oss = {"ok": False, "error": str(exc), "visible_buckets": visible_buckets}
         return jsonify({"cms": cms, "oss": oss})
 
     @app.get("/api/sources")
