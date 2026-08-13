@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -113,6 +114,21 @@ def create_app(testing: bool = False) -> Flask:
     def api_workflow_status():
         from utils.workflow_runner import workflow_status
         return jsonify(workflow_status())
+
+    @app.get("/api/workflow/preflight")
+    def api_workflow_preflight():
+        cms_required = (
+            "GENEMEDI_BLOG_USERNAME", "GENEMEDI_BLOG_PASSWORD",
+            "GENEMEDI_BLOG_CHINESE_LANGCODE", "ALIYUN_OSS_ACCESS_KEY_ID",
+            "ALIYUN_OSS_ACCESS_KEY_SECRET", "ALIYUN_OSS_ENDPOINT",
+            "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL",
+        )
+        return jsonify({
+            "translation": {"configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip())},
+            "cms": {"configured": all(os.getenv(name, "").strip() for name in cms_required)},
+            "translation_languages": ["en", "ja", "ko", "ru"],
+            "cms_languages": ["zh", "en", "ja", "ko", "ru"],
+        })
 
     @app.get("/api/sources")
     def api_sources():

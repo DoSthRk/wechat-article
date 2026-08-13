@@ -18,6 +18,7 @@ const LANG_LABELS = { zh: "ZH", en: "EN", ja: "JA", ko: "KO", ru: "RU" };
 
 let generationBusy = false;
 let workflowState = {};
+let preflight = {};
 let sourceLines = [];
 let pollTimer = null;
 
@@ -244,6 +245,7 @@ function updateWorkflowPills() {
     if (state.status === "running") setPill(id, "running", `${state.completed || 0}/${state.total || 0}`);
     else if (state.status === "failed") setPill(id, "failed", `失败 ${state.failed || 0}`);
     else if (state.status === "done") setPill(id, "done", "已完成");
+    else if (preflight[stage === "translate" ? "translation" : "cms"]?.configured === false) setPill(id, "failed", "未配置");
     else setPill(id, "idle", "空闲");
   }
 }
@@ -359,6 +361,10 @@ function describeCurrent(generation, workflows) {
   }
   const failed = [workflows.translate, workflows.publish].find((state) => state?.status === "failed" && state.failed);
   if (failed) return [`最近任务有 ${failed.failed} 个版本失败：${failed.errors?.[0] || "请重试失败项"}`, "failed"];
+  const missing = [];
+  if (preflight.translation?.configured === false) missing.push("翻译服务");
+  if (preflight.cms?.configured === false) missing.push("CMS/图片服务");
+  if (missing.length) return [`${missing.join("、")}尚未配置，生成公众号草稿不受影响`, "failed"];
   return ["流水线空闲，可选择文章执行下一阶段", ""];
 }
 
@@ -382,7 +388,23 @@ async function poll() {
   pollTimer = setTimeout(poll, active ? 2500 : 8000);
 }
 
+async function loadPreflight() {
+  try {
+    preflight = await fetch("/api/workflow/preflight").then((response) => response.json());
+    updateWorkflowPills();
+    if (preflight.translation?.configured === false || preflight.cms?.configured === false) {
+      const missing = [];
+      if (preflight.translation?.configured === false) missing.push("翻译服务");
+      if (preflight.cms?.configured === false) missing.push("CMS/图片服务");
+      setStatus(`${missing.join("、")}尚未配置，生成公众号草稿不受影响`, "failed");
+    }
+  } catch (_error) {
+    /* 预检失败不阻断已存在的流水线状态。 */
+  }
+}
+
 $("#refresh").addEventListener("click", poll);
 $("#translate-selected").addEventListener("click", () => runWorkflow("translate", selectedFiles()));
 $("#publish-selected").addEventListener("click", () => runWorkflow("publish", selectedFiles()));
+loadPreflight();
 poll();

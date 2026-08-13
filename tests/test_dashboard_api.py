@@ -121,6 +121,15 @@ class TestDashboardApi(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertFalse(response.get_json()["ok"])
 
+    def test_workflow_preflight_does_not_expose_secrets(self):
+        response = self.client.get("/api/workflow/preflight")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertIn("configured", data["translation"])
+        self.assertIn("configured", data["cms"])
+        self.assertEqual(data["translation_languages"], ["en", "ja", "ko", "ru"])
+        self.assertNotIn("DEEPSEEK_API_KEY", response.get_data(as_text=True))
+
 
 class TestUploadApi(unittest.TestCase):
     def setUp(self):
