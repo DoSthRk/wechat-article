@@ -56,6 +56,15 @@ class TestFigureNumber(unittest.TestCase):
 
 
 class TestLegendFigurePairing(unittest.TestCase):
+    def test_dense_vector_figure_page_can_contain_many_chart_labels(self):
+        page = type("Page", (), {"width": 612, "height": 792, "images": []})()
+        self.assertTrue(
+            pe._detached_figure_page(page, words=[{}] * 269, gfx=[{}] * 1553)
+        )
+        self.assertTrue(
+            pe._detached_figure_page(page, words=[{}] * 750, gfx=[{}] * 1276)
+        )
+
     def test_figure_legends_pair_with_following_figure_pages(self):
         caps = pe._legend_caption_numbers([
             "256 FIGURE LEGENDS",
@@ -75,6 +84,29 @@ class TestLegendFigurePairing(unittest.TestCase):
             [((False, "1"), 1), ((False, "2"), 2)],
         )
 
+    def test_figure_legends_without_heading_accept_line_numbers_and_colons(self):
+        caps = pe._legend_caption_numbers([
+            "1093 Figure 1: Integration site density.",
+            "1101 Figure 2: Properties of human integration site CIS.",
+        ])
+        self.assertEqual(caps, [(False, "1"), (False, "2")])
+
+    def test_document_pairing_allows_multi_page_legends_and_intervening_tables(self):
+        prof = [
+            {"legend_caps": [], "has_legend_heading": False, "is_detached_fig": False}
+            for _ in range(10)
+        ]
+        prof[5].update({"legend_caps": [(False, "1"), (False, "2")], "has_legend_heading": True})
+        prof[6]["legend_caps"] = [(False, "3")]
+        prof[7]["is_detached_fig"] = False  # 表格页
+        prof[8]["is_detached_fig"] = True
+        prof[9]["is_detached_fig"] = True
+        # 只有两张图页时先配 Figure 1/2；覆盖不足由上层质量闸拦下。
+        self.assertEqual(
+            pe._legend_document_pairs(prof),
+            [((False, "1"), 8), ((False, "2"), 9)],
+        )
+
     def test_legend_page_region_uses_full_graphics_union(self):
         # 文末整页图没有题注边界，按密度带裁剪会把下方稀疏面板截掉；应取整页图形并集。
         region = pe._legend_page_region([
@@ -90,6 +122,24 @@ class TestLegendFigurePairing(unittest.TestCase):
             _el(48, 104, 550, 650),
         ], page_w=600, page_h=800)
         self.assertEqual(region, (0, 104.0, 598, 650))
+
+    def test_legend_content_region_includes_axis_text_but_not_page_header(self):
+        region = pe._legend_page_content_region(
+            [
+                _el(0, 42, 126, 76),
+                _el(500, 52, 598, 82),
+                _el(48, 104, 550, 650),
+            ],
+            [
+                _el(20, 48, 180, 62),   # 独立页眉：应排除
+                _el(26, 96, 140, 110),  # 主图上方标签：应保留
+                _el(18, 660, 590, 676), # 底部图例：应保留
+                dict(_el(588, 210, 594, 790), upright=False), # 右侧下载水印：应排除
+            ],
+            page_w=600,
+            page_h=800,
+        )
+        self.assertEqual(region, (0.0, 90.0, 600, 682.0))
 
 
 class TestCropCacheVersion(unittest.TestCase):

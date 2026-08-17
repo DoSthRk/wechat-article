@@ -20,6 +20,11 @@ _CAPTION_RE = re.compile(
     re.IGNORECASE,
 )
 _LEGEND_HEADING_RE = re.compile(r"\bFIGURE\s+LEGENDS?\b", re.IGNORECASE)
+_DETACHED_LEGEND_CAPTION_RE = re.compile(
+    r"^(?:\d+\s+)?(extended\s+data\s+)?fig(?:ure)?\.?\s*([0-9]+)"
+    r"(?=[\s\.\:\|、。：]|$)",
+    re.IGNORECASE,
+)
 _EXTENDED_RE = re.compile(r"extended\s*data|supplementary|supp\.?|附录|扩展数据", re.IGNORECASE)
 
 
@@ -98,9 +103,12 @@ def inspect_pdf_figure_signals(pdf_path: str, max_pages: int | None = None) -> F
                     if _LEGEND_HEADING_RE.search(text):
                         has_legend_section = True
                     for line in text.splitlines():
-                        match = _CAPTION_RE.match(line.strip())
+                        stripped = line.strip()
+                        match = _CAPTION_RE.match(stripped)
                         if match:
                             caption_keys.add((match.group(2), bool(_EXTENDED_RE.search(match.group(1)))))
+                        if _DETACHED_LEGEND_CAPTION_RE.match(stripped):
+                            has_legend_section = True
             return FigureSignals(frozenset(caption_keys), has_legend_section, limit)
         finally:
             document.close()

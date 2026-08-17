@@ -309,7 +309,18 @@ def _distribute_one(
         logger.error("[%s] distribute: 账户 %s 凭据未配置：%s", job.job_id, account, exc)
         return False
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
-    resolved_figures = _resolve_job_figures(job, _required_figure_keys(html))
+    required_figure_keys = _required_figure_keys(html)
+    resolved_figures = _resolve_job_figures(job, required_figure_keys)
+    missing_required = missing_figure_keys(required_figure_keys, resolved_figures[0])
+    if missing_required:
+        missing_labels = ", ".join(
+            f"{'Extended Data ' if extended else ''}Figure {label}"
+            for label, extended in sorted(missing_required)
+        )
+        error = f"distribute: 必需配图未解析：{missing_labels}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] 配图质量闸拦下，未上传/未更新草稿：%s", job.job_id, missing_labels)
+        return False
     # 优先取该篇文章的首张可用配图作封面；账户固定素材只用于无图时兜底。
     thumb_media_id = _auto_cover_media_id(client, account, job, html, resolved=resolved_figures)
     if not thumb_media_id:
@@ -459,7 +470,15 @@ def _existing_draft_thumb(client: WeChatClient, media_id: str) -> str:
 
 
 def _fig_max_pages(job: Job) -> Optional[int]:
-    raw = (job.extra or {}).get("max_pages")
+    """配图扫描页数上限，与正文 ``max_pages`` 解耦。
+
+    投稿稿常把 Figure Legends 和真正图页放在全文末尾；沿用正文前 N 页上限会把这些页
+    整体截掉。默认扫描完整 PDF，只在 job.extra.figure_max_pages 或环境变量
+    PDF_FIGURE_MAX_PAGES 明确配置时限页。
+    """
+    raw = (job.extra or {}).get("figure_max_pages")
+    if raw in (None, ""):
+        raw = os.getenv("PDF_FIGURE_MAX_PAGES", "").strip()
     try:
         n = int(raw)
         return n if n > 0 else None

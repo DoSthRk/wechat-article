@@ -30,6 +30,23 @@ class FakeMaterialClient:
 
 
 class TestFigureExtractionTimeout(unittest.TestCase):
+    def test_figure_page_limit_is_independent_from_text_limit(self):
+        saved = os.environ.get("PDF_FIGURE_MAX_PAGES")
+        os.environ.pop("PDF_FIGURE_MAX_PAGES", None)
+        try:
+            job = Job(
+                job_id="tail-figures", pdf="paper.pdf", template="t", product="p", line="aav",
+                extra={"max_pages": 20},
+            )
+            self.assertIsNone(bp._fig_max_pages(job))
+            job.extra["figure_max_pages"] = 80
+            self.assertEqual(bp._fig_max_pages(job), 80)
+        finally:
+            if saved is None:
+                os.environ.pop("PDF_FIGURE_MAX_PAGES", None)
+            else:
+                os.environ["PDF_FIGURE_MAX_PAGES"] = saved
+
     def test_clamps_legacy_timeout_below_caption_runtime_floor(self):
         saved = os.environ.get("PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS")
         os.environ["PDF_FIGURE_EXTRACT_TIMEOUT_SECONDS"] = "45"

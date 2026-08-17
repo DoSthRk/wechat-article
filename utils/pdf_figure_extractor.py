@@ -32,15 +32,20 @@ logger = setup_logger("pdf_figure_extractor")
 
 _CAP_RE = re.compile(r"^(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[|｜]", re.I)
 _LEGEND_HEADING_RE = re.compile(r"\bFIGURE\s+LEGENDS?\b", re.I)
-_LEGEND_CAP_RE = re.compile(r"^(?:\d+\s+)?(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[\.\|｜]", re.I)
+_LEGEND_CAP_RE = re.compile(
+    r"^(?:\d+\s+)?(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[\.\:\|｜：]",
+    re.I,
+)
 _NUM_RE = re.compile(r"(?:Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)", re.I)
 _DPI = 170
 _MARGIN = 24
 _MIN_REGION = 120     # 区域最小边长（点）
 _FIGPAGE_MIN_GFX = 300   # 图页：图形元素数下限
 _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
+_DETACHED_FIGPAGE_MAX_WORDS = 1000  # 文末整页科研图可含大量坐标轴/图例文字
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
-_CROP_VERSION = 1         # v1: 剔除与主图分离的杂志页眉/Logo 带
+_CONTENT_PAD = 6          # 文本/图形并集外留白，避免坐标轴文字贴边
+_CROP_VERSION = 2         # v2: 文末图页纳入坐标轴/图例文字，并支持高密度矢量图
 
 
 @dataclass
@@ -86,16 +91,12 @@ def match_figure(figures: List[Figure], description: str) -> Optional[Figure]:
 
 
 def _legend_caption_numbers(lines: List[str]) -> List[Tuple[bool, str]]:
-    """FIGURE LEGENDS 页里的 Figure 编号；用于题注页和文末图页分离的投稿稿格式。"""
-    in_legend = False
+    """提取独立 Figure legend 行，兼容无 ``FIGURE LEGENDS`` 标题和行号前缀。"""
     out: List[Tuple[bool, str]] = []
     seen = set()
     for raw in lines:
         text = (raw or "").strip()
         if _LEGEND_HEADING_RE.search(text):
-            in_legend = True
-            continue
-        if not in_legend:
             continue
         m = _LEGEND_CAP_RE.match(text)
         if not m:
@@ -105,6 +106,51 @@ def _legend_caption_numbers(lines: List[str]) -> List[Tuple[bool, str]]:
             out.append(key)
             seen.add(key)
     return out
+
+
+def _detached_figure_page(page, words: list, gfx: list) -> bool:
+    """识别文末无文字整页图；兼容单个大栅格图，不再只依赖数百个矢量元素。"""
+    if _is_figure_page(len(words), len(gfx)):
+        return True
+    if len(gfx) >= _FIGPAGE_MIN_GFX and len(words) <= _DETACHED_FIGPAGE_MAX_WORDS:
+        return True
+    # 复杂科研图会包含数百个坐标轴、图例和面板标签。它们虽然有较多可提取文字，
+    # 但只要图形元素密度已达到整页图阈值，就仍应当视为图页。文字上限仅用于
+    # 后面的“大栅格图”回退，避免把含普通插图的正文页误判为独立图页。
+    if len(words) > 20:
+        return False
+    page_area = max(1.0, float(page.width) * float(page.height))
+    for image in getattr(page, "images", None) or []:
+        width = max(0.0, float(image.get("x1", 0)) - float(image.get("x0", 0)))
+        height = max(0.0, float(image.get("bottom", 0)) - float(image.get("top", 0)))
+        if width * height / page_area >= 0.10:
+            return True
+    return False
+
+
+def _legend_document_pairs(prof: List[Dict]) -> List[Tuple[Tuple[bool, str], int]]:
+    """把末尾多页 legends 与之后的无编号图页按顺序配对，允许中间夹表格/说明页。"""
+    if not prof:
+        return []
+    heading_pages = [i for i, item in enumerate(prof) if item.get("has_legend_heading")]
+    caption_floor = heading_pages[0] if heading_pages else int(len(prof) * 0.55)
+    captions: List[Tuple[bool, str]] = []
+    seen = set()
+    last_caption_page = -1
+    for i in range(caption_floor, len(prof)):
+        for key in prof[i].get("legend_caps") or []:
+            if key in seen:
+                continue
+            captions.append(key)
+            seen.add(key)
+            last_caption_page = i
+    if not captions or last_caption_page < 0:
+        return []
+    figure_pages = [
+        i for i in range(last_caption_page + 1, len(prof))
+        if prof[i].get("is_detached_fig")
+    ]
+    return list(zip(captions, figure_pages))
 
 
 def _legend_page_pairs(prof: List[Dict], legend_idx: int, used_pages: set) -> List[Tuple[Tuple[bool, str], int]]:
@@ -204,6 +250,35 @@ def _legend_page_region(
     return region
 
 
+def _legend_page_content_region(
+    gfx: list, words: list, page_w: float, page_h: float,
+) -> Optional[Tuple[float, float, float, float]]:
+    """文末整页图的完整内容区：保留坐标轴/图例文字，同时继续排除独立页眉。"""
+    region = _legend_page_region(gfx, page_w, page_h)
+    if region is None:
+        return None
+    rx0, rt, rx1, rb = region
+    # 只纳入接近主图或位于主图下方的文字；避免把已剔除的杂志页眉重新并入。
+    content_words = [
+        word for word in words
+        if float(word.get("bottom", 0)) >= rt - _MARGIN
+        and not (
+            not bool(word.get("upright", True))
+            and float(word.get("x1", 0)) >= page_w - _MARGIN
+        )
+    ]
+    word_region = _union(content_words)
+    if word_region is not None:
+        wx0, wt, wx1, wb = word_region
+        rx0, rt, rx1, rb = min(rx0, wx0), min(rt, wt), max(rx1, wx1), max(rb, wb)
+    return (
+        max(0.0, rx0 - _CONTENT_PAD),
+        max(0.0, rt - _CONTENT_PAD),
+        min(page_w, rx1 + _CONTENT_PAD),
+        min(page_h, rb + _CONTENT_PAD),
+    )
+
+
 def extract_figures_from_legend_pages(
     pdf_path: str, out_dir: str, *,
     max_pages: Optional[int] = None, dpi: int = _DPI, use_cache: bool = True,
@@ -237,34 +312,36 @@ def extract_figures_from_legend_pages(
                     "gfx": gfx,
                     "legend_caps": _legend_caption_numbers(lines),
                     "is_fig": _is_figure_page(len(words), len(gfx)),
+                    "is_detached_fig": _detached_figure_page(pg, words, gfx),
+                    "has_legend_heading": any(_LEGEND_HEADING_RE.search(line) for line in lines),
                 })
 
             used_pages: set = set()
-            for i in range(limit):
-                if not prof[i]["legend_caps"]:
+            for (is_ext, num), fp in _legend_document_pairs(prof):
+                if fp in used_pages:
                     continue
-                for (is_ext, num), fp in _legend_page_pairs(prof, i, used_pages):
-                    figure_page = prof[fp]["pg"]
-                    region = _legend_page_region(
-                        prof[fp]["gfx"], float(figure_page.width), float(figure_page.height),
-                    )
-                    if region is None:
-                        continue
-                    rx0, rt, rx1, rb = region
-                    if (rx1 - rx0) < _MIN_REGION or (rb - rt) < _MIN_REGION:
-                        continue
-                    rendered = doc[fp].render(scale=scale).to_pil()
-                    box = (max(0, int(rx0 * scale)), max(0, int(rt * scale)),
-                           int(rx1 * scale), int(rb * scale))
-                    crop = rendered.crop(box)
-                    fname = f"{'legend_ed' if is_ext else 'legend_fig'}{num}_p{fp + 1}.png"
-                    crop.save(str(out / fname))
-                    figures.append(Figure(
-                        label=num, is_extended=is_ext, caption="",
-                        page=fp + 1, image_path=str(out / fname),
-                        width=crop.width, height=crop.height,
-                    ))
-                    used_pages.add(fp)
+                figure_page = prof[fp]["pg"]
+                region = _legend_page_content_region(
+                    prof[fp]["gfx"], prof[fp]["words"],
+                    float(figure_page.width), float(figure_page.height),
+                )
+                if region is None:
+                    continue
+                rx0, rt, rx1, rb = region
+                if (rx1 - rx0) < _MIN_REGION or (rb - rt) < _MIN_REGION:
+                    continue
+                rendered = doc[fp].render(scale=scale).to_pil()
+                box = (max(0, int(rx0 * scale)), max(0, int(rt * scale)),
+                       int(rx1 * scale), int(rb * scale))
+                crop = rendered.crop(box)
+                fname = f"{'legend_ed' if is_ext else 'legend_fig'}{num}_p{fp + 1}.png"
+                crop.save(str(out / fname))
+                figures.append(Figure(
+                    label=num, is_extended=is_ext, caption="",
+                    page=fp + 1, image_path=str(out / fname),
+                    width=crop.width, height=crop.height,
+                ))
+                used_pages.add(fp)
     finally:
         doc.close()
 

@@ -1,10 +1,17 @@
 """PDF 抽图策略：快速信号判断与覆盖率优先的回退顺序。"""
 import unittest
 
-from utils.figure_strategy import FigureSignals, planned_figure_strategies
+from utils.figure_strategy import FigureSignals, _DETACHED_LEGEND_CAPTION_RE, planned_figure_strategies
 
 
 class TestFigureStrategy(unittest.TestCase):
+    def test_line_numbered_colon_legend_is_detectable(self):
+        match = _DETACHED_LEGEND_CAPTION_RE.match(
+            "1093 Figure 1: Integration site density."
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(2), "1")
+
     def test_caption_pdf_skips_legend_and_uses_caption_first(self):
         signals = FigureSignals(
             caption_keys=frozenset({("1", False), ("2", False)}),

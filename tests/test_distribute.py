@@ -128,6 +128,21 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(len(fake.created), 0)
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
 
+    def test_missing_required_figure_blocks_before_any_upload_or_draft_write(self):
+        content_dir = Path(self.db.get_article(self.job_pk).content_dir)
+        (content_dir / "article.md").write_text(
+            "# 标题\n\n正文。\n\n[图片:Figure 1 关键结果]", encoding="utf-8",
+        )
+        fake = FakeWeChat()
+        with patch.object(bp, "_resolve_job_figures", return_value=([], content_dir / "figures")):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        job_row = self.db.get_job(self.job_pk)
+        self.assertEqual(job_row.status, JobStatus.FAILED)
+        self.assertIn("Figure 1", job_row.error_message or "")
+
     def test_payload_shows_cover_in_article_body(self):
         payload = bp._build_article_payload(
             title="测试标题",
