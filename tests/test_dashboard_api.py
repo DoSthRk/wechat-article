@@ -193,6 +193,47 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(job.source_pdf_sha256, "a" * 64)
         self.assertEqual(job.source_pdf_size, 123)
 
+    def test_source_pdf_link_can_patch_existing_draft_without_body_change(self):
+        job_pk = self.db.find_job_pk("job1")
+        self.db.update_job_source_pdf(
+            job_pk,
+            url="https://www.genemedi.net/uploads/papers/ab/hash.pdf",
+            sha256="a" * 64,
+            size=123,
+        )
+
+        class FakeClient:
+            updated = []
+
+            def __init__(self, account):
+                self.account = account
+
+            def get_draft(self, _media_id):
+                source = self.updated[-1][2]["content_source_url"] if self.updated else ""
+                return {"news_item": [{
+                    "title": "原题", "author": "免疫客", "digest": "摘要",
+                    "content": "<p>原正文</p>", "thumb_media_id": "thumb",
+                    "show_cover_pic": 1, "need_open_comment": 0,
+                    "only_fans_can_comment": 0, "content_source_url": source,
+                }]}
+
+            def update_draft(self, media_id, index, payload):
+                self.updated.append((media_id, index, payload))
+
+        FakeClient.updated = []
+        with patch("utils.wechat_client.WeChatClient", FakeClient):
+            response = self.client.post(
+                "/api/source-pdf/apply-to-draft", json={"job_id": "job1"},
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = FakeClient.updated[0][2]
+        self.assertEqual(payload["content"], "<p>原正文</p>")
+        self.assertEqual(payload["thumb_media_id"], "thumb")
+        self.assertEqual(
+            payload["content_source_url"],
+            "https://www.genemedi.net/uploads/papers/ab/hash.pdf",
+        )
+
 
 class TestUploadApi(unittest.TestCase):
     def setUp(self):

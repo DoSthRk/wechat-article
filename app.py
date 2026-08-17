@@ -150,6 +150,55 @@ def create_app(testing: bool = False) -> Flask:
             "sha256": published.sha256, "size": published.size,
         })
 
+    @app.post("/api/source-pdf/apply-to-draft")
+    def api_source_pdf_apply_to_draft():
+        """Patch only an existing draft's “阅读原文” URL; preserve its body and cover."""
+        from utils.wechat_client import WeChatAPIError, WeChatClient
+        data = request.get_json(silent=True) or {}
+        job_id = str(data.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        db = get_db_manager()
+        job_pk = db.find_job_pk(job_id)
+        db_job = db.get_job(job_pk) if job_pk is not None else None
+        if db_job is None:
+            return jsonify({"ok": False, "error": f"未知 job_id：{job_id}"}), 404
+        if not db_job.source_pdf_url:
+            return jsonify({"ok": False, "error": "该任务尚未发布原文 PDF"}), 409
+        distributions = [
+            item for item in db.list_distributions(job_pk)
+            if item.platform == "wechat" and item.wechat_media_id
+        ]
+        if not distributions:
+            return jsonify({"ok": False, "error": "该任务没有可更新的公众号草稿"}), 409
+        distribution = distributions[0]
+        client = WeChatClient(account=distribution.account or "default")
+        try:
+            draft = client.get_draft(distribution.wechat_media_id)
+            items = draft.get("news_item") or []
+            if not items:
+                raise WeChatAPIError("现有公众号草稿没有图文内容")
+            current = items[0]
+            allowed = (
+                "title", "author", "digest", "content", "thumb_media_id",
+                "show_cover_pic", "pic_crop_235_1", "pic_crop_1_1",
+                "need_open_comment", "only_fans_can_comment",
+            )
+            payload = {key: current[key] for key in allowed if key in current}
+            payload["content_source_url"] = db_job.source_pdf_url
+            client.update_draft(distribution.wechat_media_id, 0, payload)
+            verified = client.get_draft(distribution.wechat_media_id)
+            verified_items = verified.get("news_item") or []
+            actual_url = str((verified_items[0] if verified_items else {}).get("content_source_url") or "")
+            if actual_url != db_job.source_pdf_url:
+                raise WeChatAPIError("公众号草稿回读的阅读原文链接不一致")
+        except WeChatAPIError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        return jsonify({
+            "ok": True, "job_id": job_id, "account": distribution.account,
+            "media_id": distribution.wechat_media_id, "content_source_url": actual_url,
+        })
+
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
         cms_required = (
