@@ -45,9 +45,10 @@ function renderPipeline() {
     const pick = el("input", "pipeline-pick"); pick.type = "checkbox"; pick.dataset.jobId = article.job_id; pick.dataset.translate = canTranslate ? "1" : "0"; pick.dataset.publish = (canZh || canEn) ? "1" : "0"; pick.disabled = !(canTranslate || canZh || canEn); pick.onchange = updateSelection;
     const title = article.title || fileName(article.pdf_path);
     const action = canZh ? '<button class="text-button" data-action="publish" data-lang="zh">发布中文</button>' : canTranslate ? '<button class="text-button" data-action="translate" data-lang="en">翻译英文</button>' : canEn ? '<button class="text-button" data-action="publish" data-lang="en">发布英文</button>' : "";
+    const sourcePdf = article.source_pdf_url ? `<a class="link" target="_blank" rel="noopener" href="${esc(article.source_pdf_url)}">原文PDF</a>` : "";
     const error = cmsZh?.publish_error || en?.translation_error || "";
     const row = el("tr");
-    row.innerHTML = `<td class="check-col"></td><td><div class="article-title" title="${esc(title)}">${esc(title)}</div><div class="article-file">${esc(fileName(article.pdf_path))}</div></td><td>${status(genState,"待生成")}</td><td>${status(wxState,"待入草稿箱")}</td><td>${status(zhState,"待发布")}</td><td>${status(enState,"待翻译")}</td><td><div class="row-actions">${action}${article.title ? `<a class="link" target="_blank" href="/preview/${encodeURIComponent(article.job_id)}?wechat=1">预览</a>` : ""}${error ? `<span class="err" title="${esc(error)}">失败详情</span>` : ""}</div></td>`;
+    row.innerHTML = `<td class="check-col"></td><td><div class="article-title" title="${esc(title)}">${esc(title)}</div><div class="article-file">${esc(fileName(article.pdf_path))}</div></td><td>${status(genState,"待生成")}</td><td>${status(wxState,"待入草稿箱")}</td><td>${status(zhState,"待发布")}</td><td>${status(enState,"待翻译")}</td><td><div class="row-actions">${action}${article.title ? `<a class="link" target="_blank" href="/preview/${encodeURIComponent(article.job_id)}?wechat=1">预览</a>` : ""}${sourcePdf}${error ? `<span class="err" title="${esc(error)}">失败详情</span>` : ""}</div></td>`;
     row.firstElementChild.appendChild(pick); body.appendChild(row);
   }
   updateSelection(); updateStages();

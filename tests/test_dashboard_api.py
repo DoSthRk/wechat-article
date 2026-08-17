@@ -134,6 +134,13 @@ class TestDashboardApi(unittest.TestCase):
             "ALIYUN_OSS_ENDPOINT": "oss-cn-shanghai.aliyuncs.com",
             "ALIYUN_OSS_BUCKET": "bucket",
             "ALIYUN_OSS_CDN_BASE_URL": "https://img.example.com",
+            "SOURCE_PDF_STORAGE": "ssh",
+            "SOURCE_PDF_SSH_HOST": "example.com",
+            "SOURCE_PDF_SSH_USER": "uploader",
+            "SOURCE_PDF_SSH_PRIVATE_KEY": "/secure/key",
+            "SOURCE_PDF_SSH_KNOWN_HOSTS": "/secure/known_hosts",
+            "SOURCE_PDF_SSH_REMOTE_DIR": "/srv/papers",
+            "SOURCE_PDF_PUBLIC_BASE_URL": "https://pdf.genemedi.net",
         }
         with patch.dict(os.environ, configured, clear=True):
             response = self.client.get("/api/workflow/preflight")
@@ -142,6 +149,8 @@ class TestDashboardApi(unittest.TestCase):
         self.assertTrue(data["translation"]["configured"])
         self.assertTrue(data["cms"]["configured"])
         self.assertEqual(data["cms"]["missing"], [])
+        self.assertTrue(data["source_pdf"]["configured"])
+        self.assertEqual(data["source_pdf"]["mode"], "ssh")
         self.assertEqual(data["translation_languages"], ["en", "ja", "ko", "ru"])
         body = response.get_data(as_text=True)
         self.assertNotIn("translation-secret", body)
@@ -155,6 +164,16 @@ class TestDashboardApi(unittest.TestCase):
         self.assertFalse(data["cms"]["configured"])
         self.assertIn("GENEMEDI_BLOG_USER", data["cms"]["missing"])
         self.assertNotIn("cms-secret", response.get_data(as_text=True))
+
+    def test_source_pdf_provision_returns_public_identity_only(self):
+        with patch(
+            "utils.source_pdf_store.provision_source_pdf_ssh",
+            return_value={"public_key": "ssh-ed25519 PUBLIC", "fingerprint": "SHA256:test"},
+        ):
+            response = self.client.post("/api/source-pdf/provision")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["public_key"], "ssh-ed25519 PUBLIC")
+        self.assertNotIn("private", response.get_data(as_text=True).lower())
 
 
 class TestUploadApi(unittest.TestCase):

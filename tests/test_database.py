@@ -55,6 +55,19 @@ class TestDistributions(unittest.TestCase):
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="immune"))
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="aav", lang="en"))
 
+    def test_source_pdf_identity_is_persisted_and_exposed(self):
+        self.db.update_job_source_pdf(
+            self.job_pk,
+            url="https://www.genemedi.net/uploads/papers/ab/hash.pdf",
+            sha256="a" * 64,
+            size=12345,
+        )
+        job = self.db.get_job(self.job_pk)
+        self.assertEqual(job.source_pdf_sha256, "a" * 64)
+        self.assertEqual(job.source_pdf_size, 12345)
+        rows, _ = self.db.list_article_overview()
+        self.assertEqual(rows[0]["source_pdf_url"], job.source_pdf_url)
+
 
 if __name__ == "__main__":
     unittest.main()

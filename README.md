@@ -95,6 +95,14 @@ A：客户端会拿一次 token 缓存到 `runtime/wechat_token.json`，2 小时
 **Q：草稿重发会创建新的还是更新？**
 A：DB 里 `article_drafts.wechat_media_id` 非空时走 `draft/update`（更新现有草稿，**位置不变**）；空时走 `draft/add`（新建）。这跟 target-running 的 Drupal PATCH 是同一思路。
 
+### 原文 PDF 与“阅读原文”
+
+公众号投放前会默认发布任务对应的原文 PDF，并把已通过公网校验的 HTTPS 地址写入
+草稿 `content_source_url`。默认 `SOURCE_PDF_STORAGE=ssh`，以内容哈希命名上传到
+`genemedi.net`；容量不足时可切换为 `oss`。PDF 上传、HTTPS、HTTP 状态、
+`Content-Type: application/pdf` 或 PDF 文件头任一校验失败，都会在公众号草稿发生
+任何创建或覆盖前终止投放。所需配置见 `.env.example` 的“公众号原文 PDF”段。
+
 **Q：thumb_media_id 必须自己手动准备一个？**
 A：Phase 0 是。Phase 1 加图片管线后会自动从 image_pool 选一张当封面，自动上传。
 

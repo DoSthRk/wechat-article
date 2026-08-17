@@ -12,6 +12,7 @@ from unittest.mock import patch
 from db.database import DatabaseManager, JobStatus
 from utils.job_loader import Job
 from utils.wechat_client import WeChatAPIError
+from utils.source_pdf_store import SourcePdfError
 import batch_processor as bp
 
 
@@ -73,8 +74,15 @@ class TestDistributeOne(unittest.TestCase):
             side_effect=lambda html, *_args, **_kwargs: (html + '<img src="https://img.test/1.png">', 1),
         )
         self._apply_figures.start()
+        self._source_pdf = patch.object(
+            bp,
+            "_ensure_source_pdf_published",
+            return_value="https://www.genemedi.net/uploads/papers/ab/source.pdf",
+        )
+        self._source_pdf.start()
 
     def tearDown(self):
+        self._source_pdf.stop()
         self._apply_figures.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
@@ -88,6 +96,10 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(dist.wechat_media_id, "media-NEW")
         self.assertEqual(dist.publish_status, "published")
         self.assertEqual(dist.assembled_dir, str(Path(self._tmp.name) / "out"))
+        self.assertEqual(
+            fake.created[0][0]["content_source_url"],
+            "https://www.genemedi.net/uploads/papers/ab/source.pdf",
+        )
 
         # 重投放：同 distribution 已有 media_id → PATCH，不再 create
         self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
@@ -161,6 +173,19 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(job_row.status, JobStatus.FAILED)
         self.assertIn("至少需要 1 张", job_row.error_message or "")
 
+    def test_source_pdf_failure_blocks_before_draft_write(self):
+        fake = FakeWeChat()
+        with patch.object(
+            bp, "_ensure_source_pdf_published", side_effect=SourcePdfError("公网校验失败"),
+        ):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        job_row = self.db.get_job(self.job_pk)
+        self.assertEqual(job_row.status, JobStatus.FAILED)
+        self.assertIn("原文 PDF 上传失败", job_row.error_message or "")
+
     def test_payload_shows_cover_in_article_body(self):
         payload = bp._build_article_payload(
             title="测试标题",
@@ -173,6 +198,7 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(payload["show_cover_pic"], 1)
         self.assertEqual(payload["pic_crop_235_1"], "0_0_1_1")
         self.assertEqual(payload["pic_crop_1_1"], "0.287222_0_0.712778_1")
+        self.assertEqual(payload["content_source_url"], "")
 
     def test_article_image_cover_precedes_configured_fallback(self):
         """正文有可用配图时，不应被账户固定占位封面覆盖。"""

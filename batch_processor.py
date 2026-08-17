@@ -49,6 +49,12 @@ from utils.job_loader import Job, load_jobs
 from utils.line_loader import LineLoadError, load_line_by_id
 from utils.logger import setup_logger
 from utils.product_loader import load_product_by_id
+from utils.source_pdf_store import (
+    SourcePdfError,
+    create_source_pdf_store,
+    inspect_pdf,
+    verify_public_pdf,
+)
 from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
 from utils.pdf_figure_extractor import (
@@ -321,6 +327,13 @@ def _distribute_one(
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
         logger.error("[%s] 配图质量闸拦下，未上传/未更新草稿：%s", job.job_id, missing_labels)
         return False
+    try:
+        source_pdf_url = _ensure_source_pdf_published(db, job_pk, job)
+    except SourcePdfError as exc:
+        error = f"distribute: 原文 PDF 上传失败：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] 原文 PDF 质量闸拦下，未创建/更新公众号草稿：%s", job.job_id, exc)
+        return False
     # 优先取该篇文章的首张可用配图作封面；账户固定素材只用于无图时兜底。
     thumb_media_id = _auto_cover_media_id(client, account, job, html, resolved=resolved_figures)
     if not thumb_media_id:
@@ -361,6 +374,7 @@ def _distribute_one(
         digest=article.digest or "", content_html=html,
         author=_resolve_author(account, args),
         thumb_media_id=thumb_media_id,
+        content_source_url=source_pdf_url,
     )
     try:
         if existing and existing.wechat_media_id:
@@ -403,6 +417,36 @@ def _safe_product_name(job: Job) -> str:
         return (load_product_by_id(PRODUCTS_DIR, job.product).name or "").strip()
     except Exception:
         return ""
+
+
+def _ensure_source_pdf_published(db, job_pk: int, job: Job) -> str:
+    """Upload the original PDF once and verify its public URL before drafting."""
+    path, digest, size = inspect_pdf(job.pdf)
+    db_job = db.get_job(job_pk)
+    if (
+        db_job
+        and db_job.source_pdf_url
+        and db_job.source_pdf_sha256 == digest
+        and int(db_job.source_pdf_size or 0) == size
+    ):
+        try:
+            verify_public_pdf(db_job.source_pdf_url)
+            logger.info("[%s] 复用已校验原文 PDF：%s", job.job_id, db_job.source_pdf_url)
+            return db_job.source_pdf_url
+        except SourcePdfError as exc:
+            logger.warning("[%s] 已存原文 PDF 链接失效，重新上传：%s", job.job_id, exc)
+
+    published = create_source_pdf_store().upload(str(path))
+    if published.sha256 != digest or int(published.size) != size:
+        raise SourcePdfError("上传结果与本地原文 PDF 的哈希或大小不一致")
+    db.update_job_source_pdf(
+        job_pk, url=published.url, sha256=published.sha256, size=published.size,
+    )
+    logger.info(
+        "[%s] 原文 PDF 已发布：%s bytes=%d sha256=%s",
+        job.job_id, published.url, published.size, published.sha256[:12],
+    )
+    return published.url
 
 
 def _resolve_wechat_account(job: Job) -> str:
@@ -1032,6 +1076,7 @@ def _apply_figures(
 def _build_article_payload(
     title: str, digest: str, content_html: str,
     author: str, thumb_media_id: str,
+    content_source_url: str = "",
 ) -> dict:
     """公众号 draft/add 单篇 article 的最小字段集。"""
     return {
@@ -1039,7 +1084,7 @@ def _build_article_payload(
         "author": author[:8] or "TarMart",      # 公众号上限 8 字
         "digest": digest[:120] or title[:120],   # 公众号上限 120 字
         "content": content_html,
-        "content_source_url": "",
+        "content_source_url": content_source_url,
         "thumb_media_id": thumb_media_id,
         "show_cover_pic": 1,
         "pic_crop_235_1": "0_0_1_1",

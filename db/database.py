@@ -80,6 +80,9 @@ class Job(Base):
     product_id = Column(String(128), nullable=False)
     image_pool = Column(String(128), comment="Phase 1 用")
     title_hint = Column(String(255))
+    source_pdf_url = Column(String(1024), comment="原文 PDF 的公开 HTTPS 地址")
+    source_pdf_sha256 = Column(String(64), comment="原文 PDF 内容哈希，用于去重和变更检测")
+    source_pdf_size = Column(Integer, default=0, comment="原文 PDF 字节数")
     status = Column(
         Enum(JobStatus, name="job_status"),
         default=JobStatus.PENDING,
@@ -110,6 +113,9 @@ class Job(Base):
             "product_id": self.product_id,
             "image_pool": self.image_pool,
             "title_hint": self.title_hint,
+            "source_pdf_url": self.source_pdf_url,
+            "source_pdf_sha256": self.source_pdf_sha256,
+            "source_pdf_size": int(self.source_pdf_size or 0),
             "status": self.status.value if self.status else None,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -309,6 +315,11 @@ class DatabaseManager:
         if not self.engine.url.get_backend_name().startswith("sqlite"):
             return
         additions = {
+            "jobs": {
+                "source_pdf_url": "VARCHAR(1024)",
+                "source_pdf_sha256": "VARCHAR(64)",
+                "source_pdf_size": "INTEGER DEFAULT 0",
+            },
             "articles": {
                 "markdown_health_score": "INTEGER DEFAULT 0",
                 "tonal_score": "INTEGER DEFAULT 0",
@@ -426,6 +437,20 @@ class DatabaseManager:
         session = self.get_session()
         try:
             return session.query(Article).filter(Article.job_pk == job_pk).first()
+        finally:
+            session.close()
+
+    def update_job_source_pdf(self, job_pk: int, *, url: str, sha256: str, size: int) -> None:
+        """Persist the verified public source-PDF identity for later re-use."""
+        session = self.get_session()
+        try:
+            job = session.query(Job).filter(Job.id == job_pk).first()
+            if not job:
+                return
+            job.source_pdf_url = url
+            job.source_pdf_sha256 = sha256
+            job.source_pdf_size = int(size)
+            session.commit()
         finally:
             session.close()
 
@@ -617,6 +642,9 @@ class DatabaseManager:
                 items.append({
                     "job_id": j.job_id,
                     "pdf_path": j.pdf_path,
+                    "source_pdf_url": j.source_pdf_url,
+                    "source_pdf_sha256": j.source_pdf_sha256,
+                    "source_pdf_size": int(j.source_pdf_size or 0),
                     "status": j.status.value if j.status else None,
                     "template_id": j.template_id,
                     "product_id": j.product_id,

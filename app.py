@@ -115,6 +115,16 @@ def create_app(testing: bool = False) -> Flask:
         from utils.workflow_runner import workflow_status
         return jsonify(workflow_status())
 
+    @app.post("/api/source-pdf/provision")
+    def api_source_pdf_provision():
+        """One-time SSH identity bootstrap; never returns private-key material."""
+        from utils.source_pdf_store import SourcePdfError, provision_source_pdf_ssh
+        try:
+            identity = provision_source_pdf_ssh()
+        except SourcePdfError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": True, **identity})
+
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
         cms_required = (
@@ -124,9 +134,37 @@ def create_app(testing: bool = False) -> Flask:
             "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL",
         )
         cms_missing = [name for name in cms_required if not os.getenv(name, "").strip()]
+        source_pdf_mode = os.getenv("SOURCE_PDF_STORAGE", "ssh").strip().lower()
+        if source_pdf_mode == "ssh":
+            from utils.source_pdf_store import (
+                DEFAULT_PUBLIC_BASE_URL, DEFAULT_SSH_HOST, DEFAULT_SSH_KNOWN_HOSTS,
+                DEFAULT_SSH_PRIVATE_KEY, DEFAULT_SSH_REMOTE_DIR, DEFAULT_SSH_USER,
+            )
+            source_pdf_values = {
+                "SOURCE_PDF_SSH_HOST": os.getenv("SOURCE_PDF_SSH_HOST", DEFAULT_SSH_HOST),
+                "SOURCE_PDF_SSH_USER": os.getenv("SOURCE_PDF_SSH_USER", DEFAULT_SSH_USER),
+                "SOURCE_PDF_SSH_PRIVATE_KEY": os.getenv("SOURCE_PDF_SSH_PRIVATE_KEY", DEFAULT_SSH_PRIVATE_KEY),
+                "SOURCE_PDF_SSH_KNOWN_HOSTS": os.getenv("SOURCE_PDF_SSH_KNOWN_HOSTS", DEFAULT_SSH_KNOWN_HOSTS),
+                "SOURCE_PDF_SSH_REMOTE_DIR": os.getenv("SOURCE_PDF_SSH_REMOTE_DIR", DEFAULT_SSH_REMOTE_DIR),
+                "SOURCE_PDF_PUBLIC_BASE_URL": os.getenv("SOURCE_PDF_PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL),
+            }
+        else:
+            source_pdf_values = {
+                "SOURCE_PDF_OSS_ACCESS_KEY_ID": os.getenv("SOURCE_PDF_OSS_ACCESS_KEY_ID") or os.getenv("ALIYUN_OSS_ACCESS_KEY_ID", ""),
+                "SOURCE_PDF_OSS_ACCESS_KEY_SECRET": os.getenv("SOURCE_PDF_OSS_ACCESS_KEY_SECRET") or os.getenv("ALIYUN_OSS_ACCESS_KEY_SECRET", ""),
+                "SOURCE_PDF_OSS_ENDPOINT": os.getenv("SOURCE_PDF_OSS_ENDPOINT") or os.getenv("ALIYUN_OSS_ENDPOINT", ""),
+                "SOURCE_PDF_OSS_BUCKET": os.getenv("SOURCE_PDF_OSS_BUCKET") or os.getenv("ALIYUN_OSS_BUCKET", ""),
+                "SOURCE_PDF_PUBLIC_BASE_URL": os.getenv("SOURCE_PDF_PUBLIC_BASE_URL", ""),
+            }
+        source_pdf_missing = [name for name, value in source_pdf_values.items() if not (value or "").strip()]
         return jsonify({
             "translation": {"configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip())},
             "cms": {"configured": not cms_missing, "missing": cms_missing},
+            "source_pdf": {
+                "configured": source_pdf_mode in {"ssh", "oss"} and not source_pdf_missing,
+                "mode": source_pdf_mode,
+                "missing": source_pdf_missing,
+            },
             "translation_languages": ["en", "ja", "ko", "ru"],
             "cms_languages": ["zh", "en", "ja", "ko", "ru"],
         })
