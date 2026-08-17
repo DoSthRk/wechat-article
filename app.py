@@ -125,6 +125,31 @@ def create_app(testing: bool = False) -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 500
         return jsonify({"ok": True, **identity})
 
+    @app.post("/api/source-pdf/publish")
+    def api_source_pdf_publish():
+        """Publish one existing job's original PDF without touching its draft."""
+        from utils.source_pdf_store import SourcePdfError, create_source_pdf_store
+        data = request.get_json(silent=True) or {}
+        job_id = str(data.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        db = get_db_manager()
+        job_pk = db.find_job_pk(job_id)
+        db_job = db.get_job(job_pk) if job_pk is not None else None
+        if db_job is None:
+            return jsonify({"ok": False, "error": f"未知 job_id：{job_id}"}), 404
+        try:
+            published = create_source_pdf_store().upload(db_job.pdf_path)
+        except SourcePdfError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        db.update_job_source_pdf(
+            job_pk, url=published.url, sha256=published.sha256, size=published.size,
+        )
+        return jsonify({
+            "ok": True, "job_id": job_id, "url": published.url,
+            "sha256": published.sha256, "size": published.size,
+        })
+
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
         cms_required = (

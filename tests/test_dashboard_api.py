@@ -14,6 +14,7 @@ from db.database import DatabaseManager, JobStatus
 
 import app as appmod
 from utils import panel_runner as pr
+from utils.source_pdf_store import PublishedSourcePdf
 
 
 class TestDashboardApi(unittest.TestCase):
@@ -174,6 +175,23 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["public_key"], "ssh-ed25519 PUBLIC")
         self.assertNotIn("private", response.get_data(as_text=True).lower())
+
+    def test_source_pdf_publish_persists_verified_url_without_drafting(self):
+        class Store:
+            def upload(self, path):
+                self.path = path
+                return PublishedSourcePdf(
+                    "https://www.genemedi.net/uploads/papers/ab/hash.pdf", "a" * 64, 123,
+                )
+
+        store = Store()
+        with patch("utils.source_pdf_store.create_source_pdf_store", return_value=store):
+            response = self.client.post("/api/source-pdf/publish", json={"job_id": "job1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["url"], "https://www.genemedi.net/uploads/papers/ab/hash.pdf")
+        job = self.db.get_job(self.db.find_job_pk("job1"))
+        self.assertEqual(job.source_pdf_sha256, "a" * 64)
+        self.assertEqual(job.source_pdf_size, 123)
 
 
 class TestUploadApi(unittest.TestCase):
