@@ -343,6 +343,11 @@ def _distribute_one(
     leftover = len(find_image_placeholders(html))
     if n_figs or leftover:
         logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
+    if n_figs < 1:
+        error = "distribute: 正文至少需要 1 张成功上传的配图"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] 配图质量闸拦下，未创建/更新草稿：正文成功配图数为 0", job.job_id)
+        return False
 
     # 拼接产品模块（line×platform 平台专属视觉块：文章链接 + 公众号名片卡 + 产品/二维码图）
     module = _load_product_module(job.line, WECHAT_PLATFORM)

@@ -67,8 +67,15 @@ class TestDistributeOne(unittest.TestCase):
         (content_dir / "article.md").write_text("# 标题\n\n正文段落。", encoding="utf-8")
         self.db.upsert_article(self.job_pk, title="测试标题", digest="测试摘要", content_dir=str(content_dir))
         self.job = Job(job_id="j1", pdf="p", template="t", product="pr", line=None)
+        self._apply_figures = patch.object(
+            bp,
+            "_apply_figures",
+            side_effect=lambda html, *_args, **_kwargs: (html + '<img src="https://img.test/1.png">', 1),
+        )
+        self._apply_figures.start()
 
     def tearDown(self):
+        self._apply_figures.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
 
@@ -142,6 +149,17 @@ class TestDistributeOne(unittest.TestCase):
         job_row = self.db.get_job(self.job_pk)
         self.assertEqual(job_row.status, JobStatus.FAILED)
         self.assertIn("Figure 1", job_row.error_message or "")
+
+    def test_zero_successful_body_images_blocks_before_draft_write(self):
+        fake = FakeWeChat()
+        with patch.object(bp, "_apply_figures", return_value=("<p>正文</p>", 0)):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        job_row = self.db.get_job(self.job_pk)
+        self.assertEqual(job_row.status, JobStatus.FAILED)
+        self.assertIn("至少需要 1 张", job_row.error_message or "")
 
     def test_payload_shows_cover_in_article_body(self):
         payload = bp._build_article_payload(
