@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -202,6 +203,12 @@ def create_app(testing: bool = False) -> Flask:
                 raise WeChatAPIError("公众号草稿回读的阅读原文链接不一致")
             actual_content = str((verified_items[0] if verified_items else {}).get("content") or "")
             if not contains_source_pdf_guide(actual_content, guide_url):
+                observed = re.findall(r'https?://[^"\'\s>]+', actual_content)
+                app.logger.warning(
+                    "source PDF guide missing after draft readback: expected=%s observed_tail=%s",
+                    guide_url,
+                    observed[-5:],
+                )
                 raise WeChatAPIError("公众号草稿回读未发现阅读原文引导图")
         except (WeChatAPIError, TemplateAssetError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 502
