@@ -103,7 +103,7 @@ A：DB 里 `article_drafts.wechat_media_id` 非空时走 `draft/update`（更新
 `Content-Type: application/pdf` 或 PDF 文件头任一校验失败，都会在公众号草稿发生
 任何创建或覆盖前终止投放。所需配置见 `.env.example` 的“公众号原文 PDF”段。
 
-投放时还会把 `inputs/template_assets/source-pdf-guide-v1.png` 上传为公众号图片，
+投放时还会把 `assets/source-pdf-guide-v1.png` 上传为公众号图片，
 并作为最后一个正文模块追加在产品模块之后，提示读者点击文末“阅读原文”获取原 PDF。
 上传地址按公众号账号和图片 SHA-256 缓存在 `runtime/wechat_template_asset_urls.json`，
 同一版本不会在批量任务中重复上传；引导图失败同样会在草稿写入前终止投放。

@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_PDF_GUIDE_PATH = PROJECT_ROOT / "inputs" / "template_assets" / "source-pdf-guide-v1.png"
+SOURCE_PDF_GUIDE_PATH = PROJECT_ROOT / "assets" / "source-pdf-guide-v1.png"
 DEFAULT_CACHE_PATH = PROJECT_ROOT / "runtime" / "wechat_template_asset_urls.json"
 _CACHE_LOCK = threading.Lock()
 
