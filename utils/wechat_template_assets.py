@@ -32,7 +32,11 @@ def _read_cache(path: Path) -> Dict[str, str]:
         return {}
     if not isinstance(value, dict):
         return {}
-    return {str(key): str(url) for key, url in value.items() if str(url).startswith("https://")}
+    return {
+        str(key): str(url)
+        for key, url in value.items()
+        if str(url).startswith(("http://", "https://"))
+    }
 
 
 def _write_cache(path: Path, cache: Dict[str, str]) -> None:
