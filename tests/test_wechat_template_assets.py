@@ -67,6 +67,10 @@ class TestWeChatTemplateAssets(unittest.TestCase):
         self.assertEqual(repeated, rewritten)
         self.assertTrue(assets.contains_source_pdf_guide(rewritten, url))
 
+        uploaded = "http://mmbiz.qpic.cn/mmbiz_png/account/asset-token/0?from=appmsg"
+        read_back = '<img src="https://mmbiz.qpic.cn/mmbiz_png/account/asset-token/640?from=appmsg">'
+        self.assertTrue(assets.contains_source_pdf_guide(read_back, uploaded))
+
 
 if __name__ == "__main__":
     unittest.main()

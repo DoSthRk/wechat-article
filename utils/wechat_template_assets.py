@@ -90,9 +90,14 @@ def source_pdf_guide_html(image_url: str) -> str:
 
 
 def contains_source_pdf_guide(html: str, image_url: str) -> bool:
-    """Match the uploaded image even if WeChat rewrites scheme or query parameters."""
+    """Match the image after WeChat rewrites scheme, query, or size suffix."""
     parsed = urlsplit(image_url)
-    return bool(parsed.netloc and len(parsed.path) > 1 and parsed.netloc in html and parsed.path in html)
+    if not parsed.netloc or len(parsed.path) <= 1 or parsed.netloc not in html:
+        return False
+    if parsed.path in html:
+        return True
+    parent, separator, size = parsed.path.rpartition("/")
+    return bool(separator and size.isdigit() and len(parent) > 20 and f"{parent}/" in html)
 
 
 def append_source_pdf_guide(html: str, client: Any, account: str) -> Tuple[str, str]:
