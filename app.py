@@ -25,7 +25,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from db.database import get_db_manager
-from utils.wechat_template_assets import TemplateAssetError, append_source_pdf_guide
+from utils.wechat_template_assets import (
+    TemplateAssetError,
+    append_source_pdf_guide,
+    contains_source_pdf_guide,
+)
 
 
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 单次上传上限（图多的论文 PDF 可能上百 MB）
@@ -197,7 +201,7 @@ def create_app(testing: bool = False) -> Flask:
             if actual_url != db_job.source_pdf_url:
                 raise WeChatAPIError("公众号草稿回读的阅读原文链接不一致")
             actual_content = str((verified_items[0] if verified_items else {}).get("content") or "")
-            if guide_url not in actual_content:
+            if not contains_source_pdf_guide(actual_content, guide_url):
                 raise WeChatAPIError("公众号草稿回读未发现阅读原文引导图")
         except (WeChatAPIError, TemplateAssetError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 502

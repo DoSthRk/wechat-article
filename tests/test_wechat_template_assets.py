@@ -60,6 +60,13 @@ class TestWeChatTemplateAssets(unittest.TestCase):
         self.assertEqual(repeated, html)
         self.assertEqual(len(client.uploads), 1)
 
+        rewritten = html.replace("https://", "http://").replace(
+            "source-pdf-guide.png", "source-pdf-guide.png?wx_fmt=png",
+        )
+        repeated, _ = assets.append_source_pdf_guide(rewritten, client, "immune")
+        self.assertEqual(repeated, rewritten)
+        self.assertTrue(assets.contains_source_pdf_guide(rewritten, url))
+
 
 if __name__ == "__main__":
     unittest.main()

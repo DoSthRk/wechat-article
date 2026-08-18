@@ -7,6 +7,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, Tuple
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,9 +85,15 @@ def source_pdf_guide_html(image_url: str) -> str:
     )
 
 
+def contains_source_pdf_guide(html: str, image_url: str) -> bool:
+    """Match the uploaded image even if WeChat rewrites scheme or query parameters."""
+    parsed = urlsplit(image_url)
+    return bool(parsed.netloc and len(parsed.path) > 1 and parsed.netloc in html and parsed.path in html)
+
+
 def append_source_pdf_guide(html: str, client: Any, account: str) -> Tuple[str, str]:
     """Append the required guide once and return ``(content, uploaded_url)``."""
     image_url = upload_source_pdf_guide(client, account)
-    if image_url in html:
+    if contains_source_pdf_guide(html, image_url):
         return html, image_url
     return html + source_pdf_guide_html(image_url), image_url
