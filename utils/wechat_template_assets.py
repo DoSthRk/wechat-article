@@ -50,7 +50,9 @@ def upload_source_pdf_guide(client: Any, account: str) -> str:
         raise TemplateAssetError(f"阅读原文引导图不可用：{exc}") from exc
 
     digest = hashlib.sha256(payload).hexdigest()
-    cache_key = f"{account or 'default'}:{digest}"
+    # v2 preserves the exact scheme returned by media/uploadimg. WeChat may
+    # discard an image when its URL is rewritten before draft/update.
+    cache_key = f"v2:{account or 'default'}:{digest}"
     path = _cache_path()
     with _CACHE_LOCK:
         cache = _read_cache(path)
@@ -61,10 +63,8 @@ def upload_source_pdf_guide(client: Any, account: str) -> str:
             url = str(client.upload_image(str(SOURCE_PDF_GUIDE_PATH)) or "").strip()
         except Exception as exc:
             raise TemplateAssetError(f"阅读原文引导图上传失败：{exc}") from exc
-        if url.startswith("http://"):
-            url = "https://" + url[len("http://"):]
-        if not url.startswith("https://"):
-            raise TemplateAssetError("阅读原文引导图上传后未返回 HTTPS 地址")
+        if not url.startswith(("http://", "https://")):
+            raise TemplateAssetError("阅读原文引导图上传后未返回有效图片地址")
         cache[cache_key] = url
         try:
             _write_cache(path, cache)
