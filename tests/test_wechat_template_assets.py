@@ -13,7 +13,7 @@ class FakeClient:
 
     def upload_image(self, path):
         self.uploads.append(path)
-        return "https://mmbiz.qpic.cn/test/source-pdf-guide.png"
+        return "http://mmbiz.qpic.cn/test/source-pdf-guide.png"
 
 
 class TestWeChatTemplateAssets(unittest.TestCase):
@@ -40,6 +40,7 @@ class TestWeChatTemplateAssets(unittest.TestCase):
         first = assets.upload_source_pdf_guide(client, "immune")
         second = assets.upload_source_pdf_guide(client, "immune")
         self.assertEqual(first, second)
+        self.assertEqual(first, "https://mmbiz.qpic.cn/test/source-pdf-guide.png")
         self.assertEqual(len(client.uploads), 1)
         cache = json.loads(self.cache.read_text(encoding="utf-8"))
         self.assertEqual(len(cache), 1)

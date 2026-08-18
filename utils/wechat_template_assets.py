@@ -60,6 +60,8 @@ def upload_source_pdf_guide(client: Any, account: str) -> str:
             url = str(client.upload_image(str(SOURCE_PDF_GUIDE_PATH)) or "").strip()
         except Exception as exc:
             raise TemplateAssetError(f"阅读原文引导图上传失败：{exc}") from exc
+        if url.startswith("http://"):
+            url = "https://" + url[len("http://"):]
         if not url.startswith("https://"):
             raise TemplateAssetError("阅读原文引导图上传后未返回 HTTPS 地址")
         cache[cache_key] = url
