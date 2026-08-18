@@ -80,8 +80,18 @@ class TestDistributeOne(unittest.TestCase):
             return_value="https://www.genemedi.net/uploads/papers/ab/source.pdf",
         )
         self._source_pdf.start()
+        self._source_pdf_guide = patch.object(
+            bp,
+            "append_source_pdf_guide",
+            side_effect=lambda html, *_args, **_kwargs: (
+                html + '<section data-source-pdf-guide="1">GUIDE</section>',
+                "https://img.test/source-pdf-guide.png",
+            ),
+        )
+        self._source_pdf_guide.start()
 
     def tearDown(self):
+        self._source_pdf_guide.stop()
         self._source_pdf.stop()
         self._apply_figures.stop()
         self.db.engine.dispose()
@@ -129,9 +139,21 @@ class TestDistributeOne(unittest.TestCase):
             self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
             content = fake.created[0][0]["content"]
             self.assertIn("<section>PMOD</section>", content)
-            self.assertTrue(content.rstrip().endswith("</section>"))  # 在正文之后
+            self.assertLess(content.index("<section>PMOD</section>"), content.index("GUIDE"))
+            self.assertTrue(content.rstrip().endswith("GUIDE</section>"))
         finally:
             bp._load_product_module = orig
+
+    def test_guide_failure_blocks_before_draft_write(self):
+        fake = FakeWeChat()
+        with patch.object(
+            bp, "append_source_pdf_guide", side_effect=bp.TemplateAssetError("上传失败"),
+        ):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        self.assertIn("阅读原文引导图失败", self.db.get_job(self.job_pk).error_message or "")
 
     def test_missing_article_fails(self):
         task = self.db.get_or_create_task("t")

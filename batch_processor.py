@@ -57,6 +57,7 @@ from utils.source_pdf_store import (
 )
 from utils.tonal_qa import load_hard_ad_words, scan_static
 from utils.wechat_client import WeChatAPIError, WeChatClient
+from utils.wechat_template_assets import TemplateAssetError, append_source_pdf_guide
 from utils.pdf_figure_extractor import (
     Figure,
     extract_figures,
@@ -367,6 +368,16 @@ def _distribute_one(
     if module:
         html = html + module
         logger.info("[%s] 已拼接产品模块 %s-%s", job.job_id, job.line, WECHAT_PLATFORM)
+
+    # 必须放在正文及产品模块之后，才能紧邻微信底部的“阅读原文”入口。
+    try:
+        html, guide_url = append_source_pdf_guide(html, client, account)
+    except TemplateAssetError as exc:
+        error = f"distribute: 阅读原文引导图失败：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] 阅读原文引导图质量闸门，未创建/更新草稿：%s", job.job_id, exc)
+        return False
+    logger.info("[%s] 已追加阅读原文引导图：%s", job.job_id, guide_url)
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
     payload = _build_article_payload(

@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from db.database import get_db_manager
+from utils.wechat_template_assets import TemplateAssetError, append_source_pdf_guide
 
 
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 单次上传上限（图多的论文 PDF 可能上百 MB）
@@ -152,7 +153,7 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.post("/api/source-pdf/apply-to-draft")
     def api_source_pdf_apply_to_draft():
-        """Patch only an existing draft's “阅读原文” URL; preserve its body and cover."""
+        """Patch an existing draft's 阅读原文 URL and required footer guide image."""
         from utils.wechat_client import WeChatAPIError, WeChatClient
         data = request.get_json(silent=True) or {}
         job_id = str(data.get("job_id") or "").strip()
@@ -185,6 +186,9 @@ def create_app(testing: bool = False) -> Flask:
                 "need_open_comment", "only_fans_can_comment",
             )
             payload = {key: current[key] for key in allowed if key in current}
+            payload["content"], guide_url = append_source_pdf_guide(
+                str(payload.get("content") or ""), client, distribution.account or "default",
+            )
             payload["content_source_url"] = db_job.source_pdf_url
             client.update_draft(distribution.wechat_media_id, 0, payload)
             verified = client.get_draft(distribution.wechat_media_id)
@@ -192,11 +196,15 @@ def create_app(testing: bool = False) -> Flask:
             actual_url = str((verified_items[0] if verified_items else {}).get("content_source_url") or "")
             if actual_url != db_job.source_pdf_url:
                 raise WeChatAPIError("公众号草稿回读的阅读原文链接不一致")
-        except WeChatAPIError as exc:
+            actual_content = str((verified_items[0] if verified_items else {}).get("content") or "")
+            if guide_url not in actual_content:
+                raise WeChatAPIError("公众号草稿回读未发现阅读原文引导图")
+        except (WeChatAPIError, TemplateAssetError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 502
         return jsonify({
             "ok": True, "job_id": job_id, "account": distribution.account,
             "media_id": distribution.wechat_media_id, "content_source_url": actual_url,
+            "source_pdf_guide_url": guide_url,
         })
 
     @app.get("/api/workflow/preflight")
