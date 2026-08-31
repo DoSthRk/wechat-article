@@ -152,16 +152,16 @@ class TestDistributeOne(unittest.TestCase):
         finally:
             bp._load_product_module = orig
 
-    def test_guide_failure_blocks_before_draft_write(self):
+    def test_guide_failure_does_not_block_draft_write(self):
         fake = FakeWeChat()
         with patch.object(
             bp, "append_source_pdf_guide", side_effect=bp.TemplateAssetError("上传失败"),
         ):
-            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+            self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
 
-        self.assertEqual(fake.created, [])
+        self.assertEqual(len(fake.created), 1)
         self.assertEqual(fake.updated, [])
-        self.assertIn("阅读原文引导图失败", self.db.get_job(self.job_pk).error_message or "")
+        self.assertNotIn("GUIDE", fake.created[0][0]["content"])
 
     def test_missing_article_fails(self):
         task = self.db.get_or_create_task("t")
@@ -177,31 +177,30 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(len(fake.created), 0)
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
 
-    def test_missing_required_figure_blocks_before_any_upload_or_draft_write(self):
+    def test_missing_required_figure_does_not_block_draft_write(self):
         content_dir = Path(self.db.get_article(self.job_pk).content_dir)
         (content_dir / "article.md").write_text(
             "# 标题\n\n正文。\n\n[图片:Figure 1 关键结果]", encoding="utf-8",
         )
         fake = FakeWeChat()
         with patch.object(bp, "_resolve_job_figures", return_value=([], content_dir / "figures")):
-            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+            self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
 
-        self.assertEqual(fake.created, [])
+        self.assertEqual(len(fake.created), 1)
         self.assertEqual(fake.updated, [])
         job_row = self.db.get_job(self.job_pk)
-        self.assertEqual(job_row.status, JobStatus.FAILED)
-        self.assertIn("Figure 1", job_row.error_message or "")
+        self.assertEqual(job_row.status, JobStatus.PUBLISHED)
 
-    def test_zero_successful_body_images_blocks_before_draft_write(self):
+    def test_zero_successful_body_images_does_not_block_draft_write(self):
         fake = FakeWeChat()
         with patch.object(bp, "_apply_figures", return_value=("<p>正文</p>", 0)):
-            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+            self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
 
-        self.assertEqual(fake.created, [])
+        self.assertEqual(len(fake.created), 1)
         self.assertEqual(fake.updated, [])
         job_row = self.db.get_job(self.job_pk)
-        self.assertEqual(job_row.status, JobStatus.FAILED)
-        self.assertIn("至少需要 1 张", job_row.error_message or "")
+        self.assertEqual(job_row.status, JobStatus.PUBLISHED)
+        self.assertIn("GUIDE", fake.created[0][0]["content"])
 
     def test_source_pdf_failure_blocks_before_draft_write(self):
         fake = FakeWeChat()

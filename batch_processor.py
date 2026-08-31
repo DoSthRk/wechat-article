@@ -342,10 +342,11 @@ def _distribute_one(
             f"{'Extended Data ' if extended else ''}Figure {label}"
             for label, extended in sorted(missing_required)
         )
-        error = f"distribute: 必需配图未解析：{missing_labels}"
-        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
-        logger.error("[%s] 配图质量闸拦下，未上传/未更新草稿：%s", job.job_id, missing_labels)
-        return False
+        logger.warning(
+            "[%s] 必需配图未解析，移除对应占位并继续生成草稿：%s",
+            job.job_id,
+            missing_labels,
+        )
     try:
         blog_url = resolve_published_blog_url(db, job_pk, job.job_id, lang="zh")
     except BlogUrlError as exc:
@@ -383,10 +384,7 @@ def _distribute_one(
     if n_figs or leftover:
         logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
     if n_figs < 1:
-        error = "distribute: 正文至少需要 1 张成功上传的配图"
-        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
-        logger.error("[%s] 配图质量闸拦下，未创建/更新草稿：正文成功配图数为 0", job.job_id)
-        return False
+        logger.warning("[%s] 正文没有成功配图，继续生成草稿并保留阅读原文入口", job.job_id)
 
     # 拼接产品模块（line×platform 平台专属视觉块：文章链接 + 公众号名片卡 + 产品/二维码图）
     module = _load_product_module(job.line, WECHAT_PLATFORM)
@@ -398,11 +396,9 @@ def _distribute_one(
     try:
         html, guide_url = append_source_pdf_guide(html, client, account)
     except TemplateAssetError as exc:
-        error = f"distribute: 阅读原文引导图失败：{exc}"
-        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
-        logger.error("[%s] 阅读原文引导图质量闸门，未创建/更新草稿：%s", job.job_id, exc)
-        return False
-    logger.info("[%s] 已追加阅读原文引导图：%s", job.job_id, guide_url)
+        logger.warning("[%s] 阅读原文引导图失败，继续生成草稿：%s", job.job_id, exc)
+    else:
+        logger.info("[%s] 已追加阅读原文引导图：%s", job.job_id, guide_url)
 
     db.update_job_status(job_pk, JobStatus.PUBLISHING)
     payload = _build_article_payload(

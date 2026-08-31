@@ -266,26 +266,88 @@ class BlogWorkflow:
             return html, ""
         from batch_processor import _resolve_figure_path, _resolve_job_figures
 
-        extracted, figures_dir = _resolve_job_figures(source_job)
-        store = self.asset_store_factory()
+        try:
+            extracted, figures_dir = _resolve_job_figures(source_job)
+            figures_ready = True
+        except Exception as exc:
+            logger.warning(
+                "[%s] Blog figure extraction failed; publishing without figures: %s",
+                source_job.job_id,
+                exc,
+            )
+            extracted, figures_dir = [], Path(".")
+            figures_ready = False
+        store = None
+        if figures_ready:
+            try:
+                store = self.asset_store_factory()
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Blog image store unavailable; publishing without figures: %s",
+                    source_job.job_id,
+                    exc,
+                )
         used_paths = set()
         cover_url = ""
         missing = []
         for description in placeholders:
-            path = _resolve_figure_path(description, figures_dir, extracted)
+            if not figures_ready or store is None:
+                missing.append(description)
+                continue
+            try:
+                path = _resolve_figure_path(description, figures_dir, extracted)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Blog figure resolution failed for %s; omitting it: %s",
+                    source_job.job_id,
+                    description,
+                    exc,
+                )
+                missing.append(description)
+                continue
             if not path:
                 missing.append(description)
                 continue
             if path in used_paths:
                 html = html.replace(f"[图片:{description}]", "", 1)
                 continue
-            url = store.upload(path)
+            try:
+                url = store.upload(path)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Blog figure upload failed for %s; omitting it: %s",
+                    source_job.job_id,
+                    path,
+                    exc,
+                )
+                missing.append(description)
+                continue
             html = replace_image_placeholder(html, description, url)
             used_paths.add(path)
             if not cover_url:
                 cover_url = url
         if missing:
-            raise BlogPipelineError("Missing required figures: " + "; ".join(missing[:5]))
+            for description in missing:
+                html = html.replace(f"[图片:{description}]", "", 1)
+            logger.warning(
+                "[%s] Blog missing figures removed instead of blocking publication: %s",
+                source_job.job_id,
+                "; ".join(missing[:5]),
+            )
+        if not cover_url and store is not None:
+            for figure in extracted:
+                candidate = str(getattr(figure, "image_path", "") or "")
+                if not candidate or not Path(candidate).is_file():
+                    continue
+                try:
+                    cover_url = store.upload(candidate)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Blog cover fallback upload failed; continuing without cover: %s",
+                        source_job.job_id,
+                        exc,
+                    )
+                break
         return html, cover_url
 
 

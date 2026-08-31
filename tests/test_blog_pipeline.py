@@ -210,6 +210,77 @@ class BlogPipelineTests(unittest.TestCase):
         self.assertIn('src="https://img.example/article-assets/figure.png"', html)
         self.assertEqual(cover, "https://img.example/article-assets/figure.png")
 
+    def test_missing_blog_figure_is_removed_without_blocking(self):
+        class _Store:
+            def upload(self, _path):
+                raise AssertionError("missing figures must not be uploaded")
+
+        workflow = BlogWorkflow(
+            self.db,
+            blog_client_factory=lambda: self.client,
+            asset_store_factory=lambda: _Store(),
+        )
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
+            "batch_processor._resolve_figure_path", return_value=None
+        ):
+            html, cover = workflow._render_with_images(
+                "# 标题\n\n正文。\n\n[图片:Figure 1 缺失图]",
+                source_job,
+            )
+
+        self.assertNotIn("[图片:", html)
+        self.assertNotIn("缺失图", html)
+        self.assertEqual(cover, "")
+
+    def test_blog_figure_upload_failure_is_removed_without_blocking(self):
+        image = self.content_dir / "figure.png"
+        image.write_bytes(b"not-a-real-image")
+
+        class _Store:
+            def upload(self, _path):
+                raise RuntimeError("temporary image store failure")
+
+        workflow = BlogWorkflow(
+            self.db,
+            blog_client_factory=lambda: self.client,
+            asset_store_factory=lambda: _Store(),
+        )
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
+            "batch_processor._resolve_figure_path", return_value=str(image)
+        ):
+            html, cover = workflow._render_with_images(
+                "# 标题\n\n[图片:Figure 1 上传失败图]",
+                source_job,
+            )
+
+        self.assertNotIn("[图片:", html)
+        self.assertNotIn("上传失败图", html)
+        self.assertEqual(cover, "")
+
+    def test_blog_figure_extraction_failure_does_not_initialize_image_store(self):
+        workflow = BlogWorkflow(
+            self.db,
+            blog_client_factory=lambda: self.client,
+            asset_store_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("image store should not affect extraction fallback")
+            ),
+        )
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch(
+            "batch_processor._resolve_job_figures",
+            side_effect=RuntimeError("broken PDF"),
+        ):
+            html, cover = workflow._render_with_images(
+                "# 标题\n\n[图片:Figure 1 解析失败图]",
+                source_job,
+            )
+
+        self.assertNotIn("[图片:", html)
+        self.assertNotIn("解析失败图", html)
+        self.assertEqual(cover, "")
+
 
 if __name__ == "__main__":
     unittest.main()
