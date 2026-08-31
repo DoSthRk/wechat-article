@@ -32,10 +32,14 @@ _CAPTION_RE = re.compile(
     r"\.?\s*([0-9]+)(?=[\s\.\:\|、。]|$)",
     re.IGNORECASE,
 )
+_NEXT_PAGE_CAPTION_RE = re.compile(
+    r"caption\s+(?:is\s+)?on\s+(?:the\s+)?next\s+page",
+    re.IGNORECASE,
+)
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 2     # v2: 统一剔除与主图分离的杂志页眉/Logo 带
+_CAPTION_VERSION = 3     # v3: support full-page figures whose caption starts on the next page
 
 
 def caption_enabled() -> bool:
@@ -121,6 +125,21 @@ def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
     return sanitized_union([e for e in clean if cap_bottom < _cy(e) < hi])
 
 
+def _has_next_page_caption_marker(lines: List[dict]) -> bool:
+    """Return whether a page explicitly says its figure caption continues next page."""
+    return any(_NEXT_PAGE_CAPTION_RE.search(str(line.get("text") or "")) for line in lines)
+
+
+def _full_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
+    """Find the main graphics union on a preceding full-figure page."""
+    page_w, page_h = float(page.width), float(page.height)
+    clean = [e for e in _gfx(page) if not is_rule_line(e, page_w, page_h)]
+    box = _union_box(clean)
+    if box is None:
+        return None
+    return trim_detached_edge_bands(clean, box, page_w, page_h)
+
+
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
     """返回 [(num, is_extended, page_idx, (x0,y0,x1,y1)pt, caption_text), ...]，按图号去重取首张。"""
     import pdfplumber
@@ -145,11 +164,20 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                 key = (num, is_ext)
                 if not num or key in seen:
                     continue
+                figure_idx = idx
                 box = _box_for_caption(cap["top"], cap["bottom"], gfx,
                                        cap_tops, cap_bottoms, page_w, page_h)
+                if (
+                    box is None
+                    and idx > 0
+                    and float(cap["top"]) <= page_h * 0.30
+                    and _has_next_page_caption_marker(_group_lines(pdf.pages[idx - 1]))
+                ):
+                    box = _full_page_figure_box(pdf.pages[idx - 1])
+                    figure_idx = idx - 1
                 if box is None:
                     continue
-                out.append((num, is_ext, idx, box, cap["text"][:80]))
+                out.append((num, is_ext, figure_idx, box, cap["text"][:80]))
                 seen.add(key)
     return out
 

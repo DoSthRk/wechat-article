@@ -1,6 +1,7 @@
 """题注锚定抽图：题注正则 + 框计算（纯函数，无需真 PDF）。"""
 import os
 import unittest
+from unittest.mock import patch
 
 from utils import caption_figures as cf
 
@@ -65,6 +66,61 @@ class TestBoxForCaption(unittest.TestCase):
     def test_too_small_returns_none(self):
         gfx = [_el(100, 380, 110, 390)]         # 太小
         self.assertIsNone(cf._box_for_caption(400, 415, gfx, [400], [415], self.W, self.H))
+
+
+class _FakePage:
+    width = 600.0
+    height = 800.0
+    rects = []
+    curves = []
+    lines = []
+
+    def __init__(self, words, images=None):
+        self._words = words
+        self.images = images or []
+
+    def extract_words(self, **_kwargs):
+        return self._words
+
+
+def _words(text, top):
+    words = []
+    x = 50.0
+    for token in text.split():
+        width = max(12.0, len(token) * 5.0)
+        words.append({
+            "text": token, "x0": x, "x1": x + width,
+            "top": top, "bottom": top + 10,
+        })
+        x += width + 4.0
+    return words
+
+
+class _FakePdf:
+    def __init__(self, pages):
+        self.pages = pages
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class TestCrossPageCaption(unittest.TestCase):
+    def test_caption_on_next_page_uses_previous_full_page_figure(self):
+        previous = _FakePage(
+            _words("(caption on next page)", 740),
+            images=[_el(60, 55, 535, 680)],
+        )
+        caption = _FakePage(_words("Fig. 1. Transcriptomic analysis", 35))
+        with patch("pdfplumber.open", return_value=_FakePdf([previous, caption])):
+            boxes = cf.find_figure_boxes("paper.pdf")
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][0], "1")
+        self.assertEqual(boxes[0][2], 0)
+        self.assertEqual(boxes[0][3], (60.0, 55.0, 535.0, 680.0))
 
 
 class TestEnabled(unittest.TestCase):
