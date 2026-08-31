@@ -1,10 +1,10 @@
-"""wechat-article 主入口 —— generate / distribute 两阶段。
+"""wechat-article 主入口 —— generate / Blog / WeChat 流水线。
 
 阶段（``--stage``）：
     generate  ：jobs.yaml → 逐 job 生成基准正文（方案 B）→ 落盘 + 写 articles 表
     distribute：逐 job 取基准正文 → 投放到平台 distribution（当前只接公众号 wechat；
                 blog / linkedin 是 Phase 4）。account 从 line 配置的 wechat_account 取。
-    all       ：先 generate 再 distribute（默认）
+    all       ：先 generate，再发布中文 Blog，最后创建公众号草稿（默认）
 
 内容与投放解耦：一篇基准文章（article）可扇出到多个 distribution（platform × account × lang）。
 当前 distribute 只实现公众号单平台；产品模块组装（Phase 3）、多平台（Phase 4）后续接入。
@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
+from utils.blog_urls import BlogUrlError, resolve_published_blog_url
 from utils.figure_strategy import (
     FigureKey,
     figure_key_from_description,
@@ -200,8 +201,25 @@ def _run_one_job(
     if do_distribute:
         if get_client is None:
             return True
+        if not _publish_chinese_blog(db, job_pk, job):
+            return False
         return _distribute_one(db, job_pk, job, get_client, args)
 
+    return True
+
+
+def _publish_chinese_blog(db, job_pk: int, job: Job) -> bool:
+    """Publish and verify the canonical Chinese Blog before WeChat drafting."""
+    from utils.blog_pipeline import BlogPipelineError, BlogWorkflow
+
+    try:
+        result = BlogWorkflow(db).publish(job.job_id, "zh")
+    except BlogPipelineError as exc:
+        error = f"blog: 中文官网文章发布失败：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] %s", job.job_id, error)
+        return False
+    logger.info("[%s] 中文 Blog 已就绪：%s", job.job_id, result.get("url"))
     return True
 
 
@@ -329,6 +347,13 @@ def _distribute_one(
         logger.error("[%s] 配图质量闸拦下，未上传/未更新草稿：%s", job.job_id, missing_labels)
         return False
     try:
+        blog_url = resolve_published_blog_url(db, job_pk, job.job_id, lang="zh")
+    except BlogUrlError as exc:
+        error = f"distribute: 中文 Blog 未就绪：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] Blog 质量闸拦下，未创建/更新公众号草稿：%s", job.job_id, exc)
+        return False
+    try:
         source_pdf_url = _ensure_source_pdf_published(db, job_pk, job)
     except SourcePdfError as exc:
         error = f"distribute: 原文 PDF 上传失败：{exc}"
@@ -385,7 +410,7 @@ def _distribute_one(
         digest=article.digest or "", content_html=html,
         author=_resolve_author(account, args),
         thumb_media_id=thumb_media_id,
-        content_source_url=source_pdf_url,
+        content_source_url=blog_url,
     )
     try:
         if existing and existing.wechat_media_id:

@@ -97,11 +97,11 @@ A：DB 里 `article_drafts.wechat_media_id` 非空时走 `draft/update`（更新
 
 ### 原文 PDF 与“阅读原文”
 
-公众号投放前会默认发布任务对应的原文 PDF，并把已通过公网校验的 HTTPS 地址写入
-草稿 `content_source_url`。默认 `SOURCE_PDF_STORAGE=ssh`，以内容哈希命名上传到
-`genemedi.net`；容量不足时可切换为 `oss`。PDF 上传、HTTPS、HTTP 状态、
-`Content-Type: application/pdf` 或 PDF 文件头任一校验失败，都会在公众号草稿发生
-任何创建或覆盖前终止投放。所需配置见 `.env.example` 的“公众号原文 PDF”段。
+中文 Blog 发布前会默认发布任务对应的原文 PDF，并把已通过公网校验的 HTTPS 地址写入
+CMS `field_source_pdf_url`。默认 `SOURCE_PDF_STORAGE=ssh`，以内容哈希命名上传到
+`genemedi.net`；容量不足时可切换为 `oss`。公众号草稿的 `content_source_url` 指向
+已验证公开的 `https://genemedi.cn/blog/{slug}`，不再直接指向 PDF。PDF、CMS 或公开
+Blog 任一质量门失败，都会在公众号草稿发生任何创建或覆盖前终止投放。
 
 投放时还会把 `assets/source-pdf-guide-v1.png` 上传为公众号图片，
 并作为最后一个正文模块追加在产品模块之后，提示读者点击文末“阅读原文”获取原 PDF。

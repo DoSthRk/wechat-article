@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from db.database import get_db_manager
+from utils.blog_urls import BlogUrlError, resolve_published_blog_url
 from utils.wechat_template_assets import (
     TemplateAssetError,
     append_source_pdf_guide,
@@ -158,7 +159,7 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.post("/api/source-pdf/apply-to-draft")
     def api_source_pdf_apply_to_draft():
-        """Patch an existing draft's 阅读原文 URL and required footer guide image."""
+        """Point 阅读原文 to the verified Chinese Blog and keep the footer guide."""
         from utils.wechat_client import WeChatAPIError, WeChatClient
         data = request.get_json(silent=True) or {}
         job_id = str(data.get("job_id") or "").strip()
@@ -171,6 +172,12 @@ def create_app(testing: bool = False) -> Flask:
             return jsonify({"ok": False, "error": f"未知 job_id：{job_id}"}), 404
         if not db_job.source_pdf_url:
             return jsonify({"ok": False, "error": "该任务尚未发布原文 PDF"}), 409
+        try:
+            blog_url = resolve_published_blog_url(
+                db, job_pk, db_job.job_id, lang="zh",
+            )
+        except BlogUrlError as exc:
+            return jsonify({"ok": False, "error": f"中文 Blog 未就绪：{exc}"}), 409
         distributions = [
             item for item in db.list_distributions(job_pk)
             if item.platform == "wechat" and item.wechat_media_id
@@ -194,12 +201,12 @@ def create_app(testing: bool = False) -> Flask:
             payload["content"], guide_url = append_source_pdf_guide(
                 str(payload.get("content") or ""), client, distribution.account or "default",
             )
-            payload["content_source_url"] = db_job.source_pdf_url
+            payload["content_source_url"] = blog_url
             client.update_draft(distribution.wechat_media_id, 0, payload)
             verified = client.get_draft(distribution.wechat_media_id)
             verified_items = verified.get("news_item") or []
             actual_url = str((verified_items[0] if verified_items else {}).get("content_source_url") or "")
-            if actual_url != db_job.source_pdf_url:
+            if actual_url != blog_url:
                 raise WeChatAPIError("公众号草稿回读的阅读原文链接不一致")
             actual_content = str((verified_items[0] if verified_items else {}).get("content") or "")
             if not contains_source_pdf_guide(actual_content, guide_url):
@@ -215,6 +222,7 @@ def create_app(testing: bool = False) -> Flask:
         return jsonify({
             "ok": True, "job_id": job_id, "account": distribution.account,
             "media_id": distribution.wechat_media_id, "content_source_url": actual_url,
+            "source_pdf_url": db_job.source_pdf_url,
             "source_pdf_guide_url": guide_url,
         })
 

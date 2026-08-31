@@ -53,7 +53,13 @@ class BlogPipelineTests(unittest.TestCase):
     def _workflow(self, translated="# English title\n\nEnglish body."):
         def translator(_source, lang):
             return TranslationResult(True, lang, translated, model="fake", total_tokens=42)
-        return BlogWorkflow(self.db, translator=translator, blog_client_factory=lambda: self.client)
+        return BlogWorkflow(
+            self.db,
+            translator=translator,
+            blog_client_factory=lambda: self.client,
+            blog_url_verifier=lambda url: url,
+            source_pdf_publisher=lambda _db, _job_pk, _job: "https://www.genemedi.net/uploads/papers/ab/paper.pdf",
+        )
 
     def test_product_series_defaults_to_business_line(self):
         with patch.dict(os.environ, {
@@ -87,9 +93,14 @@ class BlogPipelineTests(unittest.TestCase):
         payload, public = self.client.created[0]
         self.assertTrue(public)
         self.assertEqual(payload["langcode"], "en")
+        self.assertEqual(
+            payload["source_pdf_url"],
+            "https://www.genemedi.net/uploads/papers/ab/paper.pdf",
+        )
         dist = self.db.get_distribution(self.job_pk, "blog", "genemedi", "en")
         self.assertEqual(dist.publish_status, "published")
         self.assertEqual(dist.external_id, "00000000-0000-0000-0000-000000000123")
+        self.assertEqual(dist.external_url, "https://en.genemedi.com/blog/paper-1-en")
 
     def test_translate_then_publish_other_supported_languages(self):
         workflow = self._workflow("# Translated title\n\nTranslated body.")
@@ -132,7 +143,7 @@ class BlogPipelineTests(unittest.TestCase):
             "00000000-0000-0000-0000-000000000123",
         )
 
-    def test_unprefixed_chinese_blog_url_is_refreshed(self):
+    def test_retired_blog_cms_publication_is_recreated_in_hub(self):
         self.db.upsert_distribution(
             self.job_pk,
             "blog",
@@ -146,13 +157,17 @@ class BlogPipelineTests(unittest.TestCase):
         result = self._workflow().publish("paper-1", "zh")
 
         self.assertEqual(result["status"], "published")
-        self.assertEqual(len(self.client.created), 0)
-        self.assertEqual(len(self.client.updated), 1)
+        self.assertEqual(len(self.client.created), 1)
+        self.assertEqual(len(self.client.updated), 0)
 
     def test_failed_translation_is_recorded_and_batch_continues(self):
         def failing(_source, lang):
             return TranslationResult(False, lang, error="fake provider unavailable")
-        workflow = BlogWorkflow(self.db, translator=failing, blog_client_factory=lambda: self.client)
+        workflow = BlogWorkflow(
+            self.db, translator=failing, blog_client_factory=lambda: self.client,
+            blog_url_verifier=lambda url: url,
+            source_pdf_publisher=lambda _db, _job_pk, _job: "https://example.test/paper.pdf",
+        )
         batch = run_batch(workflow, [{"job_id": "paper-1", "lang": "en"}, {"job_id": "missing", "lang": "en"}], "translate")
         self.assertFalse(batch["ok"])
         self.assertEqual(len(batch["results"]), 2)
@@ -163,7 +178,11 @@ class BlogPipelineTests(unittest.TestCase):
     def test_translation_exception_is_recorded(self):
         def broken(_source, _lang):
             raise RuntimeError("missing translation key")
-        workflow = BlogWorkflow(self.db, translator=broken, blog_client_factory=lambda: self.client)
+        workflow = BlogWorkflow(
+            self.db, translator=broken, blog_client_factory=lambda: self.client,
+            blog_url_verifier=lambda url: url,
+            source_pdf_publisher=lambda _db, _job_pk, _job: "https://example.test/paper.pdf",
+        )
         with self.assertRaisesRegex(BlogPipelineError, "missing translation key"):
             workflow.translate("paper-1")
         self.assertEqual(self.db.get_article_version(self.job_pk, "en").translation_status, "failed")

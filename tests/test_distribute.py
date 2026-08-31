@@ -13,6 +13,7 @@ from db.database import DatabaseManager, JobStatus
 from utils.job_loader import Job
 from utils.wechat_client import WeChatAPIError
 from utils.source_pdf_store import SourcePdfError
+from utils.blog_urls import BlogUrlError
 import batch_processor as bp
 
 
@@ -74,12 +75,18 @@ class TestDistributeOne(unittest.TestCase):
             side_effect=lambda html, *_args, **_kwargs: (html + '<img src="https://img.test/1.png">', 1),
         )
         self._apply_figures.start()
+        self._blog_url = patch.object(
+            bp,
+            "resolve_published_blog_url",
+            return_value="https://genemedi.cn/blog/j1-zh",
+        )
+        self._blog_url.start()
         self._source_pdf = patch.object(
             bp,
             "_ensure_source_pdf_published",
             return_value="https://www.genemedi.net/uploads/papers/ab/source.pdf",
         )
-        self._source_pdf.start()
+        self.source_pdf_mock = self._source_pdf.start()
         self._source_pdf_guide = patch.object(
             bp,
             "append_source_pdf_guide",
@@ -93,6 +100,7 @@ class TestDistributeOne(unittest.TestCase):
     def tearDown(self):
         self._source_pdf_guide.stop()
         self._source_pdf.stop()
+        self._blog_url.stop()
         self._apply_figures.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
@@ -108,7 +116,7 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(dist.assembled_dir, str(Path(self._tmp.name) / "out"))
         self.assertEqual(
             fake.created[0][0]["content_source_url"],
-            "https://www.genemedi.net/uploads/papers/ab/source.pdf",
+            "https://genemedi.cn/blog/j1-zh",
         )
 
         # 重投放：同 distribution 已有 media_id → PATCH，不再 create
@@ -208,6 +216,18 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(job_row.status, JobStatus.FAILED)
         self.assertIn("原文 PDF 上传失败", job_row.error_message or "")
 
+    def test_missing_blog_blocks_before_pdf_or_draft_write(self):
+        fake = FakeWeChat()
+        with patch.object(
+            bp, "resolve_published_blog_url", side_effect=BlogUrlError("zh Blog 尚未发布"),
+        ):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        self.source_pdf_mock.assert_not_called()
+        self.assertIn("中文 Blog 未就绪", self.db.get_job(self.job_pk).error_message or "")
+
     def test_payload_shows_cover_in_article_body(self):
         payload = bp._build_article_payload(
             title="测试标题",
@@ -234,6 +254,52 @@ class TestDistributeOne(unittest.TestCase):
 
         self.assertEqual(fake.created[0][0]["thumb_media_id"], "article-image-thumb")
         auto_cover.assert_called_once()
+
+
+class TestRunOneJobOrder(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = DatabaseManager(
+            database_url=f"sqlite:///{(Path(self._tmp.name) / 'order.db').as_posix()}"
+        )
+        self.task = self.db.get_or_create_task("order")
+        self.job = Job(job_id="j1", pdf="paper.pdf", template="aav", product="purprox")
+        self.db.upsert_job(
+            self.task.id, self.job.job_id, pdf_path=self.job.pdf,
+            template_id=self.job.template, product_id=self.job.product,
+            status=JobStatus.GENERATED,
+        )
+
+    def tearDown(self):
+        self.db.engine.dispose()
+        self._tmp.cleanup()
+
+    def test_chinese_blog_is_published_before_wechat(self):
+        events = []
+        with patch.object(
+            bp, "_publish_chinese_blog",
+            side_effect=lambda *_args: events.append("blog") or True,
+        ), patch.object(
+            bp, "_distribute_one",
+            side_effect=lambda *_args: events.append("wechat") or True,
+        ):
+            ok = bp._run_one_job(
+                self.db, self.task.id, self.job, None, lambda _account: FakeWeChat(),
+                _args(), False, True,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(events, ["blog", "wechat"])
+
+    def test_blog_failure_blocks_wechat(self):
+        with patch.object(bp, "_publish_chinese_blog", return_value=False), patch.object(
+            bp, "_distribute_one",
+        ) as distribute:
+            ok = bp._run_one_job(
+                self.db, self.task.id, self.job, None, lambda _account: FakeWeChat(),
+                _args(), False, True,
+            )
+        self.assertFalse(ok)
+        distribute.assert_not_called()
 
 
 class TestLoadProductModule(unittest.TestCase):

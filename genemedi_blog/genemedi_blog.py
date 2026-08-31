@@ -29,6 +29,7 @@ SUPPORTED_ARTICLE_KEYS = {
     "product_series",
     "cover_url",
     "slug",
+    "source_pdf_url",
 }
 
 
@@ -78,11 +79,14 @@ class BlogConfig:
     ) -> "BlogConfig":
         values = os.environ if env is None else env
         configured_base_url = values.get(
-            "GENEMEDI_BLOG_BASE_URL", "https://blog.genemedi.com"
+            "GENEMEDI_BLOG_BASE_URL", "https://hub.genemedi.net"
         )
-        if configured_base_url.rstrip("/") == "https://hub.genemedi.net":
-            configured_base_url = "https://blog.genemedi.com"
         base_url = _validate_base_url(configured_base_url)
+        if urlparse(base_url).netloc.lower() == "blog.genemedi.com":
+            # Production may still carry the retired CMS host in its shared
+            # environment file. Keep credentials untouched and route the API
+            # client to the current Hub automatically.
+            base_url = "https://hub.genemedi.net"
         username = values.get("GENEMEDI_BLOG_USER", "").strip()
         password = values.get("GENEMEDI_BLOG_PASSWORD", "")
         if require_credentials and (not username or not password):
@@ -209,11 +213,12 @@ def build_payload(
         "product_series": "field_product_series",
         "cover_url": "field_cover_url",
         "slug": "field_slug",
+        "source_pdf_url": "field_source_pdf_url",
     }
     for input_key, drupal_key in field_mapping.items():
         if input_key in article:
             value = _validate_optional_text(article, input_key)
-            if input_key == "cover_url":
+            if input_key in {"cover_url", "source_pdf_url"}:
                 _validate_cover_url(value)
             attrs[drupal_key] = value
 
@@ -384,7 +389,7 @@ class GeneMediBlogClient:
             ARTICLE_ENDPOINT
             + "?page%5Blimit%5D=1"
             + "&fields%5Bnode--article%5D="
-            + "title,field_product_series,field_cover_url,field_slug"
+            + "title,field_product_series,field_cover_url,field_slug,field_source_pdf_url"
         )
         article_status, article_document, _ = self._request(
             "GET", sparse_path, expected_statuses=(200,)
@@ -414,6 +419,7 @@ class GeneMediBlogClient:
             "field_product_series",
             "field_cover_url",
             "field_slug",
+            "field_source_pdf_url",
         )
         return {
             "operation": "probe",

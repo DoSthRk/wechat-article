@@ -10,11 +10,11 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
-from urllib.parse import urlparse
 
 import markdown as md_lib
 
 from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
+from utils.blog_urls import blog_slug, public_blog_url, verify_public_blog_url
 from utils.job_loader import Job as SourceJob
 from utils.logger import setup_logger
 from utils.translator import TranslationResult, translate_markdown
@@ -25,7 +25,6 @@ logger = setup_logger("blog_pipeline")
 BLOG_PLATFORM = "blog"
 BLOG_ACCOUNT = "genemedi"
 _H1_RE = re.compile(r"<h1\b[^>]*>.*?</h1>", re.IGNORECASE | re.DOTALL)
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 class BlogPipelineError(Exception):
@@ -82,8 +81,7 @@ def _markdown_to_blog_html(markdown_text: str) -> str:
 
 
 def _slug(job_id: str, lang: str) -> str:
-    normalized = _SLUG_RE.sub("-", (job_id or "article").lower()).strip("-")
-    return f"{normalized or 'article'}-{lang}"
+    return blog_slug(job_id, lang)
 
 
 def _product_series(product_id: str) -> str:
@@ -110,11 +108,21 @@ class BlogWorkflow:
         translator: Callable[[str, str], TranslationResult] = translate_markdown,
         blog_client_factory: Optional[Callable[[], Any]] = None,
         asset_store_factory: Callable[[], OssImageStore] = OssImageStore.from_env,
+        blog_url_verifier: Callable[[str], str] = verify_public_blog_url,
+        source_pdf_publisher: Optional[Callable[[Any, int, SourceJob], str]] = None,
     ) -> None:
         self.db = db
         self.translator = translator
         self.blog_client_factory = blog_client_factory or self._new_blog_client
         self.asset_store_factory = asset_store_factory
+        self.blog_url_verifier = blog_url_verifier
+        self.source_pdf_publisher = source_pdf_publisher or self._publish_source_pdf
+
+    @staticmethod
+    def _publish_source_pdf(db: Any, job_pk: int, source_job: SourceJob) -> str:
+        from batch_processor import _ensure_source_pdf_published
+
+        return _ensure_source_pdf_published(db, job_pk, source_job)
 
     @staticmethod
     def _new_blog_client() -> Any:
@@ -173,24 +181,11 @@ class BlogWorkflow:
             raise BlogPipelineError("Blog queue state is incomplete")
         if article.publish_blocked:
             raise BlogPipelineError(f"Article is blocked by quality gate: {article.block_reason or 'unknown'}")
-        legacy_hub_publication = (
-            distribution.publish_status == "published"
-            and urlparse(distribution.external_url or "").netloc == "hub.genemedi.net"
-        )
-        legacy_unprefixed_publication = (
-            distribution.publish_status == "published"
-            and lang != "en"
-            and urlparse(distribution.external_url or "").netloc == "blog.genemedi.com"
-            and not urlparse(distribution.external_url or "").path.startswith(
-                f"/{self._drupal_language(lang)}/"
-            )
-        )
-        if (
-            distribution.publish_status == "published"
-            and not legacy_hub_publication
-            and not legacy_unprefixed_publication
-        ):
+        public_url = public_blog_url(job_id, lang)
+        existing_url = str(distribution.external_url or "").rstrip("/")
+        if distribution.publish_status == "published" and existing_url == public_url:
             return {"job_id": job_id, "lang": lang, "status": "already_published", "url": distribution.external_url}
+        legacy_publication = bool(existing_url and existing_url != public_url)
         if lang in BLOG_TARGET_LANGS and version.translation_status != "translated":
             raise BlogPipelineError(f"{lang} article must be translated before publishing")
         if lang == BLOG_SOURCE_LANG and version.translation_status != "ready":
@@ -201,6 +196,9 @@ class BlogWorkflow:
 
         self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="publishing", publish_error=None)
         try:
+            source_pdf_url = self.source_pdf_publisher(
+                self.db, job_pk, _build_source_job(db_job),
+            )
             markdown_text = markdown_path.read_text(encoding="utf-8")
             html, cover_url = self._render_with_images(markdown_text, _build_source_job(db_job))
             title, _digest = extract_title_and_digest(markdown_text)
@@ -210,6 +208,7 @@ class BlogWorkflow:
                 "body_format": "full_html",
                 "langcode": self._drupal_language(lang),
                 "slug": _slug(job_id, lang),
+                "source_pdf_url": source_pdf_url,
             }
             series = _product_series(db_job.product_id)
             if series:
@@ -219,9 +218,17 @@ class BlogWorkflow:
             client = self.blog_client_factory()
             result = (
                 client.update(distribution.external_id, payload, publish=True)
-                if distribution.external_id and not legacy_hub_publication
+                if distribution.external_id and not legacy_publication
                 else client.create(payload, publish=True)
             )
+            self.db.upsert_distribution(
+                job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang,
+                publish_status="publishing", publish_error=None,
+                external_id=str(result.get("uuid") or distribution.external_id or ""),
+                external_node_id=str(result.get("node_id") or ""),
+                external_url=public_url,
+            )
+            self.blog_url_verifier(public_url)
         except Exception as exc:
             error = str(exc)
             self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="failed", publish_error=error)
@@ -231,9 +238,15 @@ class BlogWorkflow:
         self.db.upsert_distribution(
             job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="published", publish_error=None,
             external_id=str(result.get("uuid") or distribution.external_id or ""),
-            external_node_id=str(result.get("node_id") or ""), external_url=str(result.get("public_url") or ""),
+            external_node_id=str(result.get("node_id") or ""), external_url=public_url,
         )
-        return {"job_id": job_id, "lang": lang, "status": "published", "url": result.get("public_url")}
+        return {
+            "job_id": job_id,
+            "lang": lang,
+            "status": "published",
+            "url": public_url,
+            "cms_url": result.get("public_url"),
+        }
 
     @staticmethod
     def _drupal_language(lang: str) -> str:

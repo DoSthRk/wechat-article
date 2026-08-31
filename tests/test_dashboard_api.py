@@ -81,7 +81,7 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("TRANSLATION_LANGS", js)
         self.assertIn("CMS_LANGS", js)
 
-        self.assertIn("PDF → 公众号草稿", html)
+        self.assertIn("PDF → 中文Blog → 公众号草稿", html)
         self.assertIn("多语言翻译", html)
         self.assertIn("多语言 CMS 发布", html)
 
@@ -227,6 +227,9 @@ class TestDashboardApi(unittest.TestCase):
 
         with patch("utils.wechat_client.WeChatClient", FakeClient), patch.object(
             appmod, "append_source_pdf_guide", side_effect=append_guide,
+        ), patch.object(
+            appmod, "resolve_published_blog_url",
+            return_value="https://genemedi.cn/blog/job1-zh",
         ):
             response = self.client.post(
                 "/api/source-pdf/apply-to-draft", json={"job_id": "job1"},
@@ -240,9 +243,27 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(payload["thumb_media_id"], "thumb")
         self.assertEqual(
             payload["content_source_url"],
+            "https://genemedi.cn/blog/job1-zh",
+        )
+        self.assertEqual(
+            response.get_json()["source_pdf_url"],
             "https://www.genemedi.net/uploads/papers/ab/hash.pdf",
         )
         self.assertEqual(response.get_json()["source_pdf_guide_url"], "https://img.test/guide.png")
+
+    def test_source_pdf_apply_requires_published_chinese_blog(self):
+        job_pk = self.db.find_job_pk("job1")
+        self.db.update_job_source_pdf(
+            job_pk,
+            url="https://www.genemedi.net/uploads/papers/ab/hash.pdf",
+            sha256="a" * 64,
+            size=123,
+        )
+        response = self.client.post(
+            "/api/source-pdf/apply-to-draft", json={"job_id": "job1"},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("中文 Blog 未就绪", response.get_json()["error"])
 
 
 class TestUploadApi(unittest.TestCase):

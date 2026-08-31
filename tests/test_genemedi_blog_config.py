@@ -5,16 +5,16 @@ from genemedi_blog.genemedi_blog import BlogConfig, GeneMediBlogClient, build_pa
 
 
 class GeneMediCmsConfigTests(unittest.TestCase):
-    def test_default_target_is_blog_cms(self):
+    def test_default_target_is_hub_cms(self):
         config = BlogConfig.from_env({}, require_credentials=False)
-        self.assertEqual(config.base_url, "https://blog.genemedi.com")
+        self.assertEqual(config.base_url, "https://hub.genemedi.net")
 
-    def test_legacy_hub_target_is_migrated_to_blog_cms(self):
+    def test_retired_blog_cms_is_migrated_to_hub(self):
         config = BlogConfig.from_env(
-            {"GENEMEDI_BLOG_BASE_URL": "https://hub.genemedi.net/"},
+            {"GENEMEDI_BLOG_BASE_URL": "https://blog.genemedi.com/"},
             require_credentials=False,
         )
-        self.assertEqual(config.base_url, "https://blog.genemedi.com")
+        self.assertEqual(config.base_url, "https://hub.genemedi.net")
 
     def test_automatic_publish_payload_sets_status_true(self):
         payload = build_payload(
@@ -24,9 +24,23 @@ class GeneMediCmsConfigTests(unittest.TestCase):
         )
         self.assertTrue(payload["data"]["attributes"]["status"])
 
+    def test_source_pdf_url_maps_to_new_cms_field(self):
+        payload = build_payload(
+            {
+                "title": "Title",
+                "body": "<p>Body</p>",
+                "source_pdf_url": "https://www.genemedi.net/uploads/papers/ab/paper.pdf",
+            },
+            operation="create",
+        )
+        self.assertEqual(
+            payload["data"]["attributes"]["field_source_pdf_url"],
+            "https://www.genemedi.net/uploads/papers/ab/paper.pdf",
+        )
+
     def test_chinese_public_url_includes_drupal_language_prefix(self):
         client = GeneMediBlogClient(
-            BlogConfig("https://blog.genemedi.com", "", "")
+            BlogConfig("https://hub.genemedi.net", "", "")
         )
         result = client._normalize_write_result(
             "create",
@@ -44,12 +58,12 @@ class GeneMediCmsConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             result["public_url"],
-            "https://blog.genemedi.com/zh-hans/blog/93-example",
+            "https://hub.genemedi.net/zh-hans/blog/93-example",
         )
 
     def test_chinese_update_uses_language_prefixed_jsonapi_path(self):
         client = GeneMediBlogClient(
-            BlogConfig("https://blog.genemedi.com", "", "")
+            BlogConfig("https://hub.genemedi.net", "", "")
         )
         document = {
             "data": {
