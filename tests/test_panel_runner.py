@@ -132,6 +132,7 @@ class TestUpload(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self._saved_project_root = pr.PROJECT_ROOT
         self._saved_pdfs, pr.PDFS_DIR = pr.PDFS_DIR, Path(self._tmp.name)
         self._run_tmp = tempfile.TemporaryDirectory()
         self._saved_run_dir, pr.RUN_DIR = pr.RUN_DIR, Path(self._run_tmp.name)
@@ -140,6 +141,7 @@ class TestUpload(unittest.TestCase):
         dbmod._instance = DatabaseManager(database_url=f"sqlite:///{(Path(self._db_tmp.name) / 't.db').as_posix()}")
 
     def tearDown(self):
+        pr.PROJECT_ROOT = self._saved_project_root
         pr.PDFS_DIR = self._saved_pdfs
         pr.RUN_DIR = self._saved_run_dir
         dbmod._instance.engine.dispose()
@@ -183,6 +185,30 @@ class TestUpload(unittest.TestCase):
         self.assertTrue(item["has_article"])
         self.assertTrue(item["operator_pending"])
         self.assertTrue(item["already_generated"])
+
+    def test_article_from_previous_release_stays_bound_after_deploy(self):
+        current_root = Path(self._tmp.name) / "releases" / "new-release"
+        pr.PROJECT_ROOT = current_root
+        pr.PDFS_DIR = current_root / "inputs" / "pdfs"
+        saved = pr.save_uploaded_pdf("solidex", "免疫客文章-3-1.pdf", self._PDF)
+        db = dbmod.get_db_manager()
+        task = db.get_or_create_task("previous-release")
+        job_pk = db.upsert_job(
+            task.id,
+            "免疫客文章-3-1",
+            pdf_path="/opt/gm-apps/article/releases/old-release/inputs/pdfs/免疫客/免疫客文章-3-1.pdf",
+            template_id="t",
+            product_id="p",
+            status=JobStatus.PUBLISHED,
+        ).id
+        db.upsert_article(job_pk, title="已完成文章", content_dir="免疫客文章-3-1")
+
+        solidex = next(line for line in pr.list_sources() if line["line_id"] == "solidex")
+        item = next(file for file in solidex["pdfs"] if file["name"] == saved["name"])
+
+        self.assertTrue(item["bound"])
+        self.assertTrue(item["has_article"])
+        self.assertEqual(item["title"], "已完成文章")
 
     def test_path_traversal_stripped_to_basename(self):
         r = pr.save_uploaded_pdf("solidex", "../../../evil.pdf", self._PDF)
@@ -298,6 +324,13 @@ class TestNormPdfKey(unittest.TestCase):
         rel = "inputs/pdfs/免疫客/免疫客文章-CAR T-2.pdf"
         ab = str(pr.PROJECT_ROOT / "inputs" / "pdfs" / "免疫客" / "免疫客文章-CAR T-2.pdf")
         self.assertEqual(pr._norm_pdf_key(rel), pr._norm_pdf_key(ab))
+
+    def test_release_paths_match_across_deployments(self):
+        old = "/opt/gm-apps/article/releases/old/inputs/pdfs/免疫客/免疫客文章-3-1.pdf"
+        new = "/opt/gm-apps/article/releases/new/inputs/pdfs/免疫客/免疫客文章-3-1.pdf"
+
+        self.assertEqual(pr._norm_pdf_key(old), pr._norm_pdf_key(new))
+        self.assertEqual(pr._norm_pdf_key(old), "inputs/pdfs/免疫客/免疫客文章-3-1.pdf")
 
 
 class TestListSources(unittest.TestCase):

@@ -221,7 +221,17 @@ def _line_ids() -> List[str]:
 
 def _norm_pdf_key(path: str) -> str:
     """把 PDF 路径统一成「项目内相对 posix 小写」做匹配键（吃绝对/相对、正反斜杠、大小写）。"""
-    raw_path = str(path).replace("\\", "/")
+    raw_path = re.sub(r"/+", "/", str(path).replace("\\", "/").strip())
+    # 生产按 release 目录部署，数据库中的绝对路径会保留旧 release 前缀。
+    # 只要路径包含 inputs/pdfs，就截取这段稳定的项目内路径，使新旧 release 可绑定同一 PDF。
+    folded_path = raw_path.lower()
+    pdf_root = "inputs/pdfs/"
+    marker = f"/{pdf_root}"
+    marker_at = folded_path.rfind(marker)
+    if marker_at >= 0:
+        return folded_path[marker_at + 1:]
+    if folded_path.startswith(pdf_root):
+        return folded_path
     pp = Path(raw_path)
     try:
         return pp.relative_to(PROJECT_ROOT).as_posix().lower()
