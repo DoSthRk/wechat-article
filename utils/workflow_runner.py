@@ -93,7 +93,13 @@ def _active(stage: str) -> Dict[str, Any]:
     return {}
 
 
-def start_workflow(stage: str, selections: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def start_workflow(
+    stage: str,
+    selections: Iterable[Dict[str, Any]],
+    *,
+    owner_line: str = "",
+    owner_username: str = "",
+) -> Dict[str, Any]:
     if stage not in STAGES:
         return {"ok": False, "error": "未知流水线阶段"}
     items = _normalize(stage, selections)
@@ -107,7 +113,12 @@ def start_workflow(stage: str, selections: Iterable[Dict[str, Any]]) -> Dict[str
         active = _active(stage)
         if active:
             return {"ok": False, "error": f"{stage} 任务正在运行"}
-        return start_workflow(stage, items)
+        return start_workflow(
+            stage,
+            items,
+            owner_line=owner_line,
+            owner_username=owner_username,
+        )
 
     run_id = uuid.uuid4().hex[:10]
     state_path = RUN_DIR / f"{run_id}.state.json"
@@ -116,6 +127,8 @@ def start_workflow(stage: str, selections: Iterable[Dict[str, Any]]) -> Dict[str
         "run_id": run_id, "stage": stage, "status": "running", "pid": None,
         "total": len(items), "completed": 0, "failed": 0, "current": None,
         "errors": [], "started_at": time.time(), "finished_at": None,
+        "owner_line": str(owner_line or ""),
+        "owner_username": str(owner_username or ""),
     }
     _atomic_write(state_path, state)
     selections_path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")

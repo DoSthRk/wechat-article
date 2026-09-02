@@ -13,14 +13,14 @@ const esc = (value) => (value == null ? "" : String(value)).replace(/[&<>"]/g, (
 
 const LINE_TITLES = { aav: "AAV", solidex: "Solidex" };
 const TRANSLATION_LANGS = ["en", "ja", "ko", "ru"];
-const CMS_LANGS = ["zh", ...TRANSLATION_LANGS];
-const LANG_LABELS = { zh: "ZH", en: "EN", ja: "JA", ko: "KO", ru: "RU" };
+const LANG_LABELS = { en: "EN", ja: "JA", ko: "KO", ru: "RU" };
 
 let generationBusy = false;
 let workflowState = {};
 let preflight = {};
 let sourceLines = [];
 let pollTimer = null;
+const selectedKeys = new Set();
 
 function needsAction(file) {
   return file.needs_action != null ? !!file.needs_action : (!file.has_article || file.operator_pending);
@@ -34,17 +34,11 @@ function distribution(file, platform, lang) {
   return (file.distributions || []).find((item) => item.platform === platform && item.lang === lang);
 }
 
-function generationState(file) {
-  if (file.blocked) return "failed";
-  if (file.has_article) return "done";
-  return generationBusy ? "pending" : "pending";
-}
-
 function wechatState(file) {
-  const item = distribution(file, "wechat", "zh");
-  if (item?.publish_status === "published") return "done";
-  if (item?.publish_status === "publishing") return "running";
-  if (["failed", "blocked"].includes(item?.publish_status)) return "failed";
+  const state = distribution(file, "wechat", "zh")?.publish_status;
+  if (state === "published") return "done";
+  if (state === "publishing") return "running";
+  if (["failed", "blocked"].includes(state)) return "failed";
   return file.has_article ? "pending" : "waiting";
 }
 
@@ -64,102 +58,154 @@ function cmsState(file, lang) {
   return "pending";
 }
 
-function stateText(state, labels) {
-  const key = state === "waiting" ? "pending" : state;
-  return `<span class="state-text"><i class="dot ${key}"></i>${esc(labels[state] || labels.pending)}</span>`;
+function coreComplete(file) {
+  return file.has_article && cmsState(file, "zh") === "done" && wechatState(file) === "done";
 }
 
-function languageDots(langs, stateFor, stageLabel) {
-  return `<span class="lang-dots">${langs.map((lang) => {
-    const state = stateFor(lang);
-    const label = LANG_LABELS[lang];
-    const readable = { pending: "待处理", running: "处理中", done: "已完成", failed: "失败" }[state] || "待处理";
-    return `<span class="lang-dot" title="${label} ${stageLabel}：${readable}"><i class="dot ${state}"></i><b>${label}</b></span>`;
-  }).join("")}</span>`;
+function requiresCoreAction(file) {
+  return needsAction(file) || !coreComplete(file);
+}
+
+function stateBadge(state, text) {
+  return `<span class="state-badge ${esc(state)}"><i></i>${esc(text)}</span>`;
+}
+
+function coreStatus(file) {
+  if (file.blocked) return ["failed", "生成结果需要检查"];
+  if (!file.has_article) return ["pending", "待生成"];
+  if (cmsState(file, "zh") === "failed") return ["failed", "中文 Blog 发布失败"];
+  if (cmsState(file, "zh") !== "done") return ["running", "等待中文 Blog"];
+  if (wechatState(file) === "failed") return ["failed", "公众号草稿提交失败"];
+  if (wechatState(file) !== "done") return ["running", "等待公众号草稿"];
+  return ["done", "中文流程已完成"];
 }
 
 function allFiles() {
   return sourceLines.flatMap((line) => (line.pdfs || []).map((file) => ({ ...file, line_id: line.line_id })));
 }
 
-function selectedFiles() {
-  const keys = new Set([...document.querySelectorAll(".row-pick:checked")].map((node) => node.dataset.key));
-  return allFiles().filter((file) => keys.has(`${file.line_id}|${file.pdf}`));
-}
-
-function updateSelection() {
-  const count = document.querySelectorAll(".row-pick:checked").length;
-  $("#selected-count").textContent = count;
-  $("#translate-selected").disabled = !count || workflowState.translate?.status === "running";
-  $("#publish-selected").disabled = !count || workflowState.publish?.status === "running";
-  document.querySelectorAll(".line").forEach((line) => updateGenerateButton(line));
-}
-
-function eligibleTranslations(file) {
-  if (!file.has_article || file.blocked) return [];
-  return TRANSLATION_LANGS.filter((lang) => ["pending", "failed"].includes(articleVersion(file, lang)?.translation_status || "pending"));
-}
-
-function eligiblePublications(file) {
-  if (!file.has_article || file.blocked) return [];
-  return CMS_LANGS.filter((lang) => {
-    const queue = distribution(file, "blog", lang);
-    if (!queue || !["pending", "failed"].includes(queue.publish_status)) return false;
-    if (lang === "zh") return articleVersion(file, lang)?.translation_status === "ready";
-    return articleVersion(file, lang)?.translation_status === "translated";
+function selectedFiles(lineId = "") {
+  return allFiles().filter((file) => {
+    const key = `${file.line_id}|${file.pdf}`;
+    return selectedKeys.has(key) && (!lineId || file.line_id === lineId);
   });
 }
 
-function renderRow(lineId, file) {
+function updateGenerateButton(card) {
+  const lineId = card.dataset.lineId;
+  const count = selectedFiles(lineId).filter(requiresCoreAction).length;
+  const button = card.querySelector(".generate-line");
+  const countNode = card.querySelector(".selected-count");
+  if (countNode) countNode.textContent = String(count);
+  if (!button) return;
+  button.disabled = generationBusy || !count;
+  button.textContent = count ? `生成并提交草稿（${count}）` : "生成并提交草稿";
+}
+
+function updateSelection() {
+  document.querySelectorAll(".line").forEach(updateGenerateButton);
+}
+
+function languageProgress(file, lang) {
+  const translated = translationState(file, lang);
+  const published = cmsState(file, lang);
+  if (published === "done") return { state: "done", text: "已发布", action: "" };
+  if (published === "running") return { state: "running", text: "发布中", action: "" };
+  if (translated === "running") return { state: "running", text: "翻译中", action: "" };
+  if (translated === "done") return { state: published === "failed" ? "failed" : "ready", text: published === "failed" ? "发布失败" : "已翻译", action: "publish" };
+  return { state: translated === "failed" ? "failed" : "pending", text: translated === "failed" ? "翻译失败" : "未翻译", action: "translate" };
+}
+
+function renderLanguagePanel(file) {
+  const publishedCount = TRANSLATION_LANGS.filter((lang) => cmsState(file, lang) === "done").length;
+  const details = el("details", "language-panel");
+  const summary = el("summary");
+  summary.innerHTML = `<span>多语言发布 <em>可选</em></span><small>${publishedCount}/4 已发布</small>`;
+  details.appendChild(summary);
+  const list = el("div", "language-list");
+  for (const lang of TRANSLATION_LANGS) {
+    const progress = languageProgress(file, lang);
+    const row = el("div", "language-row");
+    row.innerHTML = `<b>${LANG_LABELS[lang]}</b>${stateBadge(progress.state, progress.text)}<span class="language-action"></span>`;
+    const action = row.querySelector(".language-action");
+    const published = distribution(file, "blog", lang);
+    if (progress.state === "done" && published?.external_url) {
+      const open = el("a", "text-action", "打开");
+      open.href = published.external_url;
+      open.target = "_blank";
+      action.appendChild(open);
+    } else if (progress.action) {
+      const button = el("button", "text-action", progress.action === "translate" ? "翻译" : "发布");
+      const busy = workflowState[progress.action]?.status === "running";
+      const configured = progress.action === "translate" ? preflight.translation?.configured : preflight.cms?.configured;
+      button.disabled = busy || configured === false;
+      button.addEventListener("click", () => runWorkflow(progress.action, [{ job_id: file.job_id, lang }]));
+      action.appendChild(button);
+    }
+    list.appendChild(row);
+  }
+  details.appendChild(list);
+  return details;
+}
+
+function renderPendingRow(lineId, file) {
   const row = el("tr");
   const key = `${lineId}|${file.pdf}`;
-  const generated = file.title || file.name;
-  const generation = generationState(file);
-  const draft = wechatState(file);
-  const canTranslate = eligibleTranslations(file).length > 0;
-  const canPublish = eligiblePublications(file).length > 0;
+  const [state, label] = coreStatus(file);
   row.innerHTML = `
-    <td class="pick-col"><input class="row-pick" type="checkbox" data-key="${esc(key)}" aria-label="选择 ${esc(file.name)}"></td>
-    <td class="file-cell"><div class="file-title" title="${esc(generated)}">${esc(generated)}${file.already_generated && needsAction(file) ? '<span class="generated-mark">已生成过</span>' : ""}</div><div class="file-name">${esc(file.name)}</div></td>
-    <td>${stateText(generation, { done: "已生成", failed: "需要处理", pending: "待生成" })}</td>
-    <td>${stateText(draft, { done: "已入草稿箱", running: "提交中", failed: "失败", waiting: "等待生成", pending: "待入草稿箱" })}</td>
-    <td>${languageDots(TRANSLATION_LANGS, (lang) => translationState(file, lang), "翻译")}</td>
-    <td>${languageDots(CMS_LANGS, (lang) => cmsState(file, lang), "发布")}</td>
+    <td class="pick-col"><input class="row-pick" type="checkbox" data-key="${esc(key)}" aria-label="选择 ${esc(file.name)}" ${selectedKeys.has(key) ? "checked" : ""}></td>
+    <td class="file-cell"><div class="file-title" title="${esc(file.title || file.name)}">${esc(file.title || file.name)}</div><div class="file-name">${esc(file.name)}</div></td>
+    <td>${stateBadge(state, label)}</td>
     <td><div class="row-actions"></div></td>`;
-  row.querySelector(".row-pick").addEventListener("change", updateSelection);
+  row.querySelector(".row-pick").addEventListener("change", (event) => {
+    if (event.target.checked) selectedKeys.add(key); else selectedKeys.delete(key);
+    updateSelection();
+  });
   const actions = row.querySelector(".row-actions");
-  if (needsAction(file)) {
-    const remove = el("button", "text-action delete", "删除");
-    remove.addEventListener("click", () => deletePdf(lineId, file.pdf, file.name, remove));
-    actions.appendChild(remove);
-  }
-  if (canTranslate) {
-    const translate = el("button", "text-action", "翻译");
-    translate.addEventListener("click", () => runWorkflow("translate", [file]));
-    actions.appendChild(translate);
-  }
-  if (canPublish) {
-    const publish = el("button", "text-action", "发布");
-    publish.addEventListener("click", () => runWorkflow("publish", [file]));
-    actions.appendChild(publish);
-  }
   if (file.has_article) {
-    const preview = el("a", "text-action", "预览");
+    const preview = el("a", "text-action", "预览现有内容");
     preview.href = `/preview/${encodeURIComponent(file.job_id)}?wechat=1`;
     preview.target = "_blank";
     actions.appendChild(preview);
   }
-  if (!actions.children.length) actions.appendChild(el("span", "line-meta", "—"));
+  if (needsAction(file)) {
+    const remove = el("button", "text-action delete", "删除 PDF");
+    remove.addEventListener("click", () => deletePdf(lineId, file.pdf, file.name, remove));
+    actions.appendChild(remove);
+  }
   return row;
+}
+
+function renderCompletedCard(file) {
+  const card = el("article", "completed-card");
+  const body = el("div", "completed-main");
+  body.innerHTML = `<div><span class="complete-mark">✓</span><div class="completed-copy"><h3>${esc(file.title || file.name)}</h3><p>中文 Blog 已发布 · 已进入公众号草稿箱</p></div></div><div class="row-actions"></div>`;
+  const actions = body.querySelector(".row-actions");
+  const blog = distribution(file, "blog", "zh");
+  if (blog?.external_url) {
+    const openBlog = el("a", "btn secondary compact", "打开 Blog");
+    openBlog.href = blog.external_url;
+    openBlog.target = "_blank";
+    actions.appendChild(openBlog);
+  }
+  const preview = el("a", "btn secondary compact", "预览草稿");
+  preview.href = `/preview/${encodeURIComponent(file.job_id)}?wechat=1`;
+  preview.target = "_blank";
+  actions.appendChild(preview);
+  card.append(body, renderLanguagePanel(file));
+  return card;
 }
 
 function renderLine(line) {
   const card = el("section", "line");
   card.dataset.lineId = line.line_id;
   const files = line.pdfs || [];
+  const pending = files.filter(requiresCoreAction);
+  const completed = files.filter(coreComplete);
+
   const head = el("div", "line-head");
   const title = el("div");
-  title.innerHTML = `<h2>${esc(LINE_TITLES[line.line_id] || line.name || line.line_id)}</h2><div class="line-meta">PDF ${files.length} 篇 · 待生成 ${(line.counts || {}).pending || 0} 篇 · 草稿箱 ${(line.counts || {}).published || 0} 篇</div>`;
+  title.innerHTML = `<h2>${esc(LINE_TITLES[line.line_id] || line.name || line.line_id)}</h2><div class="line-meta">待处理 ${pending.length} 篇 · 已完成 ${completed.length} 篇</div>`;
   const actions = el("div", "line-actions");
   const input = el("input");
   input.type = "file";
@@ -167,93 +213,70 @@ function renderLine(line) {
   input.multiple = true;
   input.hidden = true;
   input.addEventListener("change", () => { uploadPdfs(line.line_id, input.files); input.value = ""; });
-  const upload = el("button", "btn secondary", "上传 PDF");
+  const upload = el("button", "btn primary", "上传 PDF");
   upload.addEventListener("click", () => input.click());
-  const generate = el("button", "btn primary generate-line", "生成选中文件");
-  generate.addEventListener("click", () => {
-    const selected = selectedFiles().filter((file) => file.line_id === line.line_id && needsAction(file));
-    startGeneration(line.line_id, selected.map((file) => file.pdf));
-  });
-  actions.append(input, upload, generate);
+  actions.append(input, upload);
   head.append(title, actions);
   card.appendChild(head);
-  if (!files.length) {
-    card.appendChild(el("div", "empty", "暂无 PDF，请先上传文件"));
-    return card;
+
+  const pendingSection = el("section", "work-section");
+  const pendingHead = el("div", "section-head");
+  pendingHead.innerHTML = `<div><h3>待处理 PDF</h3><p>选择后一次完成中文 Blog、原文 PDF 和公众号草稿</p></div><div class="selection-actions"><span>已选 <b class="selected-count">0</b> 篇</span></div>`;
+  const generate = el("button", "btn primary generate-line", "生成并提交草稿");
+  generate.disabled = true;
+  generate.addEventListener("click", () => {
+    const chosen = selectedFiles(line.line_id).filter(requiresCoreAction);
+    startGeneration(line.line_id, chosen.map((file) => file.pdf));
+  });
+  pendingHead.querySelector(".selection-actions").appendChild(generate);
+  pendingSection.appendChild(pendingHead);
+  if (!pending.length) {
+    pendingSection.appendChild(el("div", "empty success-empty", "没有待处理文件。上传 PDF 即可开始。"));
+  } else {
+    const wrap = el("div", "pipeline-wrap");
+    const table = el("table", "pipeline-table");
+    table.innerHTML = `<thead><tr><th class="pick-col"></th><th>PDF / 文章</th><th>当前状态</th><th>操作</th></tr></thead>`;
+    const body = el("tbody");
+    pending.forEach((file) => body.appendChild(renderPendingRow(line.line_id, file)));
+    table.appendChild(body);
+    wrap.appendChild(table);
+    pendingSection.appendChild(wrap);
   }
-  const wrap = el("div", "pipeline-wrap");
-  const table = el("table", "pipeline-table");
-  table.innerHTML = `<thead><tr><th class="pick-col"></th><th>PDF / 文章</th><th>生成</th><th>公众号草稿</th><th>翻译 <span class="line-meta">EN · JA · KO · RU</span></th><th>CMS 发布 <span class="line-meta">ZH · EN · JA · KO · RU</span></th><th>操作</th></tr></thead>`;
-  const body = el("tbody");
-  files.forEach((file) => body.appendChild(renderRow(line.line_id, file)));
-  table.appendChild(body);
-  wrap.appendChild(table);
-  card.appendChild(wrap);
+  card.appendChild(pendingSection);
+
+  const completedSection = el("section", "work-section completed-section");
+  const completedHead = el("div", "section-head");
+  completedHead.innerHTML = `<div><h3>已完成文章</h3><p>中文流程已结束；需要时可单独测试某一种语言</p></div>`;
+  completedSection.appendChild(completedHead);
+  if (!completed.length) completedSection.appendChild(el("div", "empty", "暂无已完成文章"));
+  else completed.forEach((file) => completedSection.appendChild(renderCompletedCard(file)));
+  card.appendChild(completedSection);
   return card;
-}
-
-function updateGenerateButton(card) {
-  const lineId = card.dataset.lineId;
-  const count = selectedFiles().filter((file) => file.line_id === lineId && needsAction(file)).length;
-  const button = card.querySelector(".generate-line");
-  if (!button) return;
-  button.disabled = generationBusy || !count;
-  button.textContent = count ? `生成选中文件 (${count})` : "生成选中文件";
-}
-
-async function loadSources() {
-  try {
-    const data = await (await fetch("/api/sources")).json();
-    sourceLines = data.lines || [];
-    const box = $("#lines");
-    box.innerHTML = "";
-    sourceLines.forEach((line) => box.appendChild(renderLine(line)));
-    if (!sourceLines.length) box.appendChild(el("div", "empty", "暂无内容线"));
-    updateSelection();
-    updateStageSummaries();
-  } catch (error) {
-    $("#lines").innerHTML = '<div class="empty">流水线加载失败</div>';
-    setStatus(`加载失败：${error.message}`, "failed");
-  }
-}
-
-function updateStageSummaries() {
-  const files = allFiles();
-  const generated = files.filter((file) => file.has_article);
-  const pending = files.filter(needsAction).length;
-  const drafts = files.filter((file) => wechatState(file) === "done").length;
-  const translated = generated.reduce((sum, file) => sum + TRANSLATION_LANGS.filter((lang) => translationState(file, lang) === "done").length, 0);
-  const translationTotal = generated.length * TRANSLATION_LANGS.length;
-  const published = generated.reduce((sum, file) => sum + CMS_LANGS.filter((lang) => cmsState(file, lang) === "done").length, 0);
-  const publishTotal = generated.length * CMS_LANGS.length;
-  $("#stage-generate").textContent = `${pending} 篇待生成 · ${drafts} 篇已入草稿箱`;
-  $("#stage-translate").textContent = `${translated}/${translationTotal} 个语言版本已完成`;
-  $("#stage-publish").textContent = `${published}/${publishTotal} 个语言版本已发布`;
-}
-
-function setPill(id, state, text) {
-  const node = $(id);
-  node.className = `stage-pill ${state}`;
-  node.textContent = text;
-}
-
-function updateWorkflowPills() {
-  setPill("#stage-generate-state", generationBusy ? "running" : "idle", generationBusy ? "运行中" : "空闲");
-  for (const stage of ["translate", "publish"]) {
-    const state = workflowState[stage] || { status: "idle" };
-    const id = stage === "translate" ? "#stage-translate-state" : "#stage-publish-state";
-    if (state.status === "running") setPill(id, "running", `${state.completed || 0}/${state.total || 0}`);
-    else if (state.status === "failed") setPill(id, "failed", `失败 ${state.failed || 0}`);
-    else if (state.status === "done") setPill(id, "done", "已完成");
-    else if (preflight[stage === "translate" ? "translation" : "cms"]?.configured === false) setPill(id, "failed", "未配置");
-    else setPill(id, "idle", "空闲");
-  }
 }
 
 function setStatus(text, state = "") {
   const box = $("#status");
   box.textContent = text;
   box.className = `status ${state}`.trim();
+}
+
+async function loadSources() {
+  try {
+    const response = await fetch("/api/sources");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    sourceLines = data.lines || [];
+    const validKeys = new Set(allFiles().map((file) => `${file.line_id}|${file.pdf}`));
+    [...selectedKeys].forEach((key) => { if (!validKeys.has(key)) selectedKeys.delete(key); });
+    const box = $("#lines");
+    box.innerHTML = "";
+    sourceLines.forEach((line) => box.appendChild(renderLine(line)));
+    if (!sourceLines.length) box.appendChild(el("div", "empty", "当前用户没有配置业务线"));
+    updateSelection();
+  } catch (error) {
+    $("#lines").innerHTML = '<div class="empty">工作台加载失败</div>';
+    setStatus(`加载失败：${error.message}`, "failed");
+  }
 }
 
 async function uploadPdfs(lineId, filesLike) {
@@ -268,9 +291,10 @@ async function uploadPdfs(lineId, filesLike) {
     const data = await response.json();
     const failures = (data.results || []).filter((item) => !item.ok);
     if (!response.ok || failures.length) throw new Error(failures[0]?.error || data.error || `HTTP ${response.status}`);
-    const repeated = (data.results || []).filter((item) => item.already_generated).length;
+    const uploadedKeys = (data.results || []).filter((item) => item.ok).map((item) => `${lineId}|${item.pdf}`);
+    uploadedKeys.forEach((key) => selectedKeys.add(key));
     await loadSources();
-    setStatus(repeated ? `上传完成；${repeated} 个文件已生成过，可重新生成` : `上传完成，共 ${files.length} 个 PDF`, "done");
+    setStatus(`上传完成，已自动选中 ${files.length} 个 PDF；点击“生成并提交草稿”继续`, "done");
   } catch (error) {
     setStatus(`上传失败：${error.message}`, "failed");
   }
@@ -287,11 +311,12 @@ async function deletePdf(lineId, pdf, name, button) {
     });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    selectedKeys.delete(`${lineId}|${pdf}`);
     await loadSources();
     setStatus(`已删除 ${data.name || name}`, "done");
   } catch (error) {
     button.disabled = false;
-    button.textContent = "删除";
+    button.textContent = "删除 PDF";
     setStatus(`删除失败：${error.message}`, "failed");
   }
 }
@@ -300,7 +325,7 @@ async function startGeneration(lineId, pdfs) {
   if (generationBusy || !pdfs.length) return;
   generationBusy = true;
   updateSelection();
-  setStatus(`正在启动 ${pdfs.length} 篇内容生成`, "running");
+  setStatus(`正在启动 ${pdfs.length} 篇中文内容流程`, "running");
   try {
     const response = await fetch("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -312,27 +337,14 @@ async function startGeneration(lineId, pdfs) {
   } catch (error) {
     generationBusy = false;
     updateSelection();
-    setStatus(`生成启动失败：${error.message}`, "failed");
+    setStatus(`启动失败：${error.message}`, "failed");
   }
 }
 
-function workflowSelections(stage, files) {
-  const selections = [];
-  for (const file of files) {
-    const langs = stage === "translate" ? eligibleTranslations(file) : eligiblePublications(file);
-    langs.forEach((lang) => selections.push({ job_id: file.job_id, lang }));
-  }
-  return selections;
-}
-
-async function runWorkflow(stage, files) {
-  const selections = workflowSelections(stage, files);
-  if (!selections.length) {
-    setStatus(stage === "translate" ? "所选内容没有待翻译版本" : "所选内容没有可发布版本", "failed");
-    return;
-  }
+async function runWorkflow(stage, selections) {
+  if (!selections.length) return;
   const label = stage === "translate" ? "翻译" : "CMS 发布";
-  setStatus(`正在提交 ${selections.length} 个${label}任务`, "running");
+  setStatus(`正在启动 ${LANG_LABELS[selections[0].lang]} ${label}`, "running");
   try {
     const response = await fetch(`/api/workflow/${stage}/run`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -340,7 +352,7 @@ async function runWorkflow(stage, files) {
     });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    setStatus(`${label}任务已启动，共 ${data.total} 个语言版本`, "running");
+    setStatus(`${LANG_LABELS[selections[0].lang]} ${label}任务已启动`, "running");
     poll();
   } catch (error) {
     setStatus(`${label}启动失败：${error.message}`, "failed");
@@ -348,24 +360,19 @@ async function runWorkflow(stage, files) {
 }
 
 function describeCurrent(generation, workflows) {
-  if (generation.current) {
-    const summary = generation.current.summary || {};
-    return [summary.message || "内容生成中", "running"];
-  }
+  if (generation.current) return [generation.current.summary?.message || "中文内容处理中", "running"];
+  if (generation.busy_other_line) return ["另一业务线正在处理任务，请稍后再试", "running"];
   for (const stage of ["translate", "publish"]) {
     const state = workflows[stage];
     if (state?.status === "running") {
-      const current = state.current ? `：${state.current.job_id} / ${LANG_LABELS[state.current.lang]}` : "";
+      if (state.other_line_running) return ["另一业务线正在执行多语言任务，请稍后再试", "running"];
+      const current = state.current ? `：${LANG_LABELS[state.current.lang] || state.current.lang}` : "";
       return [`${stage === "translate" ? "多语言翻译" : "CMS 发布"} ${state.completed || 0}/${state.total || 0}${current}`, "running"];
     }
   }
-  const failed = [workflows.translate, workflows.publish].find((state) => state?.status === "failed" && state.failed);
-  if (failed) return [`最近任务有 ${failed.failed} 个版本失败：${failed.errors?.[0] || "请重试失败项"}`, "failed"];
-  const missing = [];
-  if (preflight.translation?.configured === false) missing.push("翻译服务");
-  if (preflight.cms?.configured === false) missing.push("CMS/图片服务");
-  if (missing.length) return [`${missing.join("、")}尚未配置，生成公众号草稿不受影响`, "failed"];
-  return ["流水线空闲，可选择文章执行下一阶段", ""];
+  const failed = [workflows.translate, workflows.publish].find((state) => state?.status === "failed" && state.failed && !state.other_line_running);
+  if (failed) return [`最近任务失败：${failed.errors?.[0] || "请在对应语言处重试"}`, "failed"];
+  return ["工作台空闲，可以上传 PDF 或处理待办", ""];
 }
 
 async function poll() {
@@ -377,7 +384,6 @@ async function poll() {
     ]);
     generationBusy = !!generation.busy;
     workflowState = workflows || {};
-    updateWorkflowPills();
     const [message, state] = describeCurrent(generation, workflowState);
     setStatus(message, state);
     await loadSources();
@@ -385,26 +391,17 @@ async function poll() {
     setStatus(`状态刷新失败：${error.message}`, "failed");
   }
   const active = generationBusy || workflowState.translate?.status === "running" || workflowState.publish?.status === "running";
-  pollTimer = setTimeout(poll, active ? 2500 : 8000);
+  pollTimer = setTimeout(poll, active ? 2500 : 10000);
 }
 
 async function loadPreflight() {
   try {
     preflight = await fetch("/api/workflow/preflight").then((response) => response.json());
-    updateWorkflowPills();
-    if (preflight.translation?.configured === false || preflight.cms?.configured === false) {
-      const missing = [];
-      if (preflight.translation?.configured === false) missing.push("翻译服务");
-      if (preflight.cms?.configured === false) missing.push("CMS/图片服务");
-      setStatus(`${missing.join("、")}尚未配置，生成公众号草稿不受影响`, "failed");
-    }
   } catch (_error) {
-    /* 预检失败不阻断已存在的流水线状态。 */
+    /* 多语言是可选能力，预检失败不影响中文主流程。 */
   }
 }
 
 $("#refresh").addEventListener("click", poll);
-$("#translate-selected").addEventListener("click", () => runWorkflow("translate", selectedFiles()));
-$("#publish-selected").addEventListener("click", () => runWorkflow("publish", selectedFiles()));
 loadPreflight();
 poll();

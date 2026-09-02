@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>无权访问</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='operator.css') }}">
+</head>
+<body>
+  <main class="access-denied">
+    <p class="eyebrow">GM-LAB / 内容平台</p>
+    <h1>{{ '登录信息不可用' if code == 401 else '无权访问该业务线' }}</h1>
+    <p>请从 GM-LAB 进入本人负责的内容工作台；如需调整业务线，请联系管理员。</p>
+    <a class="gm-lab-home" href="https://lab.genemedi.cn/">返回 GM-LAB</a>
+  </main>
+</body>
+</html>

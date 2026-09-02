@@ -71,19 +71,94 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn('aav: "AAV"', js)
         self.assertIn('solidex: "Solidex"', js)
         self.assertIn("上传 PDF", js)
-        self.assertIn("生成选中文件", js)
+        self.assertIn("生成并提交草稿", js)
         self.assertIn("row-pick", js)
-        self.assertIn("已生成过", js)
         self.assertIn("needsAction", js)
         self.assertNotIn("confirm(", js)
         self.assertIn("/api/pdf/delete", js)
         self.assertIn("/api/workflow/${stage}/run", js)
         self.assertIn("TRANSLATION_LANGS", js)
-        self.assertIn("CMS_LANGS", js)
 
-        self.assertIn("PDF → 中文Blog → 公众号草稿", html)
-        self.assertIn("多语言翻译", html)
-        self.assertIn("多语言 CMS 发布", html)
+        self.assertIn("生成中文文章", html)
+        self.assertIn("进入公众号草稿箱", html)
+        self.assertNotIn("翻译选中内容", html)
+        self.assertNotIn("发布选中内容", html)
+
+    @staticmethod
+    def _access_lines():
+        return [
+            {"line_id": "aav", "name": "AAV", "pdfs": [{"job_id": "aav-job", "pdf": "inputs/pdfs/AAVTx/aav.pdf"}]},
+            {"line_id": "solidex", "name": "Solidex", "pdfs": [{"job_id": "solidex-job", "pdf": "inputs/pdfs/免疫客/solidex.pdf"}]},
+        ]
+
+    def test_operator_is_scoped_to_logged_in_business_user(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()):
+            solidex = self.client.get("/api/sources", headers={"X-GM-LAB-Username": "jhh"})
+            aav = self.client.get("/api/sources", headers={"X-GM-LAB-Username": "hqq"})
+
+        self.assertEqual([line["line_id"] for line in solidex.get_json()["lines"]], ["solidex"])
+        self.assertEqual([line["line_id"] for line in aav.get_json()["lines"]], ["aav"])
+        page = self.client.get("/operator", headers={"X-GM-LAB-Username": "jhh"}).get_data(as_text=True)
+        self.assertIn("Solidex 内容工作台", page)
+        self.assertIn("当前用户：jhh", page)
+
+    def test_unknown_user_is_denied(self):
+        response = self.client.get("/api/sources", headers={"X-GM-LAB-Username": "someone-else"})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("无权访问", response.get_json()["error"])
+
+    def test_cross_line_generation_is_denied_before_runner(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+            "utils.panel_runner.start_run"
+        ) as start_run:
+            response = self.client.post(
+                "/api/run",
+                headers={"X-GM-LAB-Username": "jhh"},
+                json={"line_id": "aav", "pdfs": ["inputs/pdfs/AAVTx/aav.pdf"]},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        start_run.assert_not_called()
+
+    def test_cross_line_translation_is_denied_before_worker(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+            "utils.workflow_runner.start_workflow"
+        ) as start_workflow:
+            response = self.client.post(
+                "/api/workflow/translate/run",
+                headers={"X-GM-LAB-Username": "jhh"},
+                json={"selections": [{"job_id": "aav-job", "lang": "en"}]},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        start_workflow.assert_not_called()
+
+    def test_same_line_workflow_records_business_owner(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+            "utils.workflow_runner.start_workflow", return_value={"ok": True}
+        ) as start_workflow:
+            response = self.client.post(
+                "/api/workflow/translate/run",
+                headers={"X-GM-LAB-Username": "hqq"},
+                json={"selections": [{"job_id": "aav-job", "lang": "en"}]},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        start_workflow.assert_called_once_with(
+            "translate",
+            [{"job_id": "aav-job", "lang": "en"}],
+            owner_line="aav",
+            owner_username="hqq",
+        )
+
+    def test_cross_line_preview_is_denied(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()):
+            response = self.client.get(
+                "/preview/solidex-job",
+                headers={"X-GM-LAB-Username": "hqq"},
+            )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_admin_page_keeps_full_dashboard(self):
         r = self.client.get("/admin")

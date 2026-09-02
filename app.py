@@ -35,12 +35,92 @@ from utils.wechat_template_assets import (
 
 
 _MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 单次上传上限（图多的论文 PDF 可能上百 MB）
+_USER_LINE_ACCESS = {
+    "jhh": frozenset({"solidex"}),
+    "hqq": frozenset({"aav"}),
+}
+_LINE_LABELS = {"solidex": "Solidex", "aav": "AAV"}
 
 
 def create_app(testing: bool = False) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
+
+    def _username() -> str:
+        username = str(request.headers.get("X-GM-LAB-Username") or "").strip().lower()
+        if testing and not username:
+            return "admin"
+        if not username:
+            abort(401)
+        return username
+
+    def _admin_users() -> set[str]:
+        configured = os.getenv("GM_BLOG_ADMIN_USERS", "admin")
+        return {item.strip().lower() for item in configured.split(",") if item.strip()}
+
+    def _line_access() -> set[str] | None:
+        username = _username()
+        if username in _admin_users():
+            return None
+        allowed = _USER_LINE_ACCESS.get(username)
+        if not allowed:
+            abort(403)
+        return set(allowed)
+
+    def _require_admin() -> None:
+        if _username() not in _admin_users():
+            abort(403)
+
+    def _require_line(line_id: str) -> str:
+        normalized = str(line_id or "").strip().lower()
+        allowed = _line_access()
+        if not normalized or (allowed is not None and normalized not in allowed):
+            abort(403)
+        return normalized
+
+    def _visible_source_lines() -> list[dict]:
+        from utils.panel_runner import list_sources
+        lines = list_sources()
+        allowed = _line_access()
+        if allowed is None:
+            return lines
+        return [line for line in lines if line.get("line_id") in allowed]
+
+    def _job_line_index() -> dict[str, str]:
+        from utils.panel_runner import list_sources
+        return {
+            str(file.get("job_id") or ""): str(line.get("line_id") or "")
+            for line in list_sources()
+            for file in line.get("pdfs", [])
+            if file.get("job_id")
+        }
+
+    def _require_job(job_id: str) -> str:
+        normalized = str(job_id or "").strip()
+        line_id = _job_line_index().get(normalized)
+        allowed = _line_access()
+        if allowed is None:
+            return line_id or "admin"
+        if not line_id:
+            abort(404)
+        if line_id not in allowed:
+            abort(403)
+        return line_id
+
+    def _require_selections(selections: list) -> str:
+        lines = {_require_job(str(item.get("job_id") or "")) for item in selections if isinstance(item, dict)}
+        if not lines:
+            abort(400)
+        return next(iter(lines)) if len(lines) == 1 else "admin"
+
+    @app.errorhandler(401)
+    @app.errorhandler(403)
+    def _access_denied(error):
+        if request.path.startswith("/api/"):
+            message = "未识别到 GM-LAB 登录用户" if error.code == 401 else "无权访问该业务线"
+            return jsonify({"ok": False, "error": message}), error.code
+        return render_template("access_denied.html", code=error.code), error.code
 
     @app.errorhandler(413)
     def _too_large(_e):
@@ -57,18 +137,36 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/operator")
     def operator():
-        return render_template("operator.html")
+        username = _username()
+        allowed = _line_access()
+        line_id = next(iter(allowed)) if allowed and len(allowed) == 1 else ""
+        return render_template(
+            "operator.html",
+            username=username,
+            line_id=line_id,
+            line_label=_LINE_LABELS.get(line_id, "全部业务线"),
+        )
 
     @app.get("/admin")
     def dashboard():
+        _require_admin()
         return render_template("dashboard.html")
 
     @app.get("/api/articles")
     def api_articles():
         from utils.pricing import article_cost_cny, rate_card
+        allowed = _line_access()
         page = max(1, request.args.get("page", 1, type=int))
         page_size = max(1, min(200, request.args.get("page_size", 100, type=int)))
-        items, total = get_db_manager().list_article_overview(page=page, page_size=page_size)
+        if allowed is None:
+            items, total = get_db_manager().list_article_overview(page=page, page_size=page_size)
+        else:
+            visible_jobs = {job_id for job_id, line_id in _job_line_index().items() if line_id in allowed}
+            all_items, _ = get_db_manager().list_article_overview(page=1, page_size=10000)
+            all_items = [item for item in all_items if item.get("job_id") in visible_jobs]
+            total = len(all_items)
+            start = (page - 1) * page_size
+            items = all_items[start:start + page_size]
         for it in items:  # 每篇估算 LLM 生成成本（CNY）
             it["cost_cny"] = round(
                 article_cost_cny(it.get("model"), it.get("prompt_tokens"), it.get("completion_tokens")), 4,
@@ -96,6 +194,7 @@ def create_app(testing: bool = False) -> Flask:
         selections = data.get("selections")
         if not isinstance(selections, list) or not selections:
             return jsonify({"ok": False, "error": "请至少选择一篇英文文章"}), 400
+        _require_selections(selections)
         return jsonify(run_batch(BlogWorkflow(get_db_manager()), selections, "translate"))
 
     @app.post("/api/blog/publish")
@@ -105,6 +204,7 @@ def create_app(testing: bool = False) -> Flask:
         selections = data.get("selections")
         if not isinstance(selections, list) or not selections:
             return jsonify({"ok": False, "error": "请至少选择一篇待发布文章"}), 400
+        _require_selections(selections)
         return jsonify(run_batch(BlogWorkflow(get_db_manager()), selections, "publish"))
 
     @app.post("/api/workflow/<stage>/run")
@@ -114,17 +214,30 @@ def create_app(testing: bool = False) -> Flask:
         selections = data.get("selections")
         if not isinstance(selections, list) or not selections:
             return jsonify({"ok": False, "error": "请至少选择一个可处理版本"}), 400
-        result = start_workflow(stage, selections)
+        owner_line = _require_selections(selections)
+        result = start_workflow(stage, selections, owner_line=owner_line, owner_username=_username())
         return jsonify(result), (202 if result.get("ok") else 409)
 
     @app.get("/api/workflow/status")
     def api_workflow_status():
         from utils.workflow_runner import workflow_status
-        return jsonify(workflow_status())
+        allowed = _line_access()
+        states = workflow_status()
+        if allowed is not None:
+            for state in states.values():
+                owner_line = str(state.get("owner_line") or "")
+                if owner_line and owner_line not in allowed:
+                    state.update(current=None, errors=[], other_line_running=state.get("status") == "running")
+                elif not owner_line:
+                    current_job = str((state.get("current") or {}).get("job_id") or "")
+                    if not current_job or _job_line_index().get(current_job) not in allowed:
+                        state.update(current=None, errors=[])
+        return jsonify(states)
 
     @app.post("/api/source-pdf/provision")
     def api_source_pdf_provision():
         """One-time SSH identity bootstrap; never returns private-key material."""
+        _require_admin()
         from utils.source_pdf_store import SourcePdfError, provision_source_pdf_ssh
         try:
             identity = provision_source_pdf_ssh()
@@ -140,6 +253,7 @@ def create_app(testing: bool = False) -> Flask:
         job_id = str(data.get("job_id") or "").strip()
         if not job_id:
             return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        _require_job(job_id)
         db = get_db_manager()
         job_pk = db.find_job_pk(job_id)
         db_job = db.get_job(job_pk) if job_pk is not None else None
@@ -165,6 +279,7 @@ def create_app(testing: bool = False) -> Flask:
         job_id = str(data.get("job_id") or "").strip()
         if not job_id:
             return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        _require_job(job_id)
         db = get_db_manager()
         job_pk = db.find_job_pk(job_id)
         db_job = db.get_job(job_pk) if job_pk is not None else None
@@ -228,6 +343,7 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
+        _line_access()
         cms_required = (
             "GENEMEDI_BLOG_USER", "GENEMEDI_BLOG_PASSWORD",
             "GENEMEDI_BLOG_CHINESE_LANGCODE", "ALIYUN_OSS_ACCESS_KEY_ID",
@@ -272,13 +388,12 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/api/sources")
     def api_sources():
-        from utils.panel_runner import list_sources
-        return jsonify({"lines": list_sources()})
+        return jsonify({"lines": _visible_source_lines(), "username": _username()})
 
     @app.post("/api/upload")
     def api_upload():
         from utils.panel_runner import save_uploaded_pdf
-        line_id = request.form.get("line_id", "")
+        line_id = _require_line(request.form.get("line_id", ""))
         files = [f for f in request.files.getlist("file") if f and f.filename]
         if not files:
             return jsonify({"ok": False, "error": "未收到文件"}), 400
@@ -289,26 +404,41 @@ def create_app(testing: bool = False) -> Flask:
     def api_delete_pdf():
         from utils.panel_runner import delete_pending_pdf
         data = request.get_json(silent=True) or {}
-        return jsonify(delete_pending_pdf(str(data.get("line_id", "")), str(data.get("pdf", ""))))
+        line_id = _require_line(str(data.get("line_id", "")))
+        return jsonify(delete_pending_pdf(line_id, str(data.get("pdf", ""))))
 
     @app.post("/api/run")
     def api_run():
         from utils.panel_runner import start_run
         data = request.get_json(silent=True) or {}
-        return jsonify(start_run(str(data.get("line_id", "")), list(data.get("pdfs") or [])))
+        line_id = _require_line(str(data.get("line_id", "")))
+        return jsonify(start_run(line_id, list(data.get("pdfs") or [])))
 
     @app.post("/api/run/cancel")
     def api_cancel_run():
-        from utils.panel_runner import cancel_run
+        from utils.panel_runner import cancel_run, runs_status
+        allowed = _line_access()
+        current = runs_status().get("current") or {}
+        if allowed is not None and current.get("line_id") not in allowed:
+            abort(403)
         return jsonify(cancel_run())
 
     @app.get("/api/runs")
     def api_runs():
         from utils.panel_runner import runs_status
-        return jsonify(runs_status())
+        allowed = _line_access()
+        status = runs_status()
+        if allowed is not None:
+            current = status.get("current")
+            if current and current.get("line_id") not in allowed:
+                status["current"] = None
+                status["busy_other_line"] = True
+            status["history"] = [item for item in status.get("history", []) if item.get("line_id") in allowed]
+        return jsonify(status)
 
     @app.get("/preview/<job_id>")
     def preview(job_id: str):
+        _require_job(job_id)
         content_dir = get_db_manager().latest_content_dir(job_id)
         if not content_dir:
             abort(404)
