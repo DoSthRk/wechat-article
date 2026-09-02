@@ -78,11 +78,16 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("/api/pdf/delete", js)
         self.assertIn("/api/workflow/${stage}/run", js)
         self.assertIn("TRANSLATION_LANGS", js)
+        self.assertIn("expandedLanguageJobs", js)
+        self.assertIn("details.open = expandedLanguageJobs.has(file.job_id)", js)
+        self.assertIn("forceSources || active || wasActive", js)
+        self.assertNotIn("const validKeys", js)
 
         self.assertIn("生成中文文章", html)
         self.assertIn("进入公众号草稿箱", html)
         self.assertNotIn("翻译选中内容", html)
         self.assertNotIn("发布选中内容", html)
+        self.assertNotIn('id="status"', html)
 
     @staticmethod
     def _access_lines():

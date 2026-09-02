@@ -16,11 +16,14 @@ const TRANSLATION_LANGS = ["en", "ja", "ko", "ru"];
 const LANG_LABELS = { en: "EN", ja: "JA", ko: "KO", ru: "RU" };
 
 let generationBusy = false;
+let generationState = {};
 let workflowState = {};
 let preflight = {};
 let sourceLines = [];
 let pollTimer = null;
 const selectedKeys = new Set();
+const expandedLanguageJobs = new Set();
+let lineNotice = { text: "", state: "" };
 
 function needsAction(file) {
   return file.needs_action != null ? !!file.needs_action : (!file.has_article || file.operator_pending);
@@ -71,6 +74,16 @@ function stateBadge(state, text) {
 }
 
 function coreStatus(file) {
+  if ((generationState.current?.jobs || []).includes(file.job_id)) {
+    return ["running", "中文内容处理中"];
+  }
+  const recentRun = (generationState.history || []).find((run) => (run.jobs || []).includes(file.job_id));
+  if (recentRun?.status === "failed" && requiresCoreAction(file)) {
+    return ["failed", recentRun.summary?.message || "最近一次生成失败，请重试"];
+  }
+  if (recentRun?.status === "cancelled" && requiresCoreAction(file)) {
+    return ["failed", "最近一次生成已取消"];
+  }
   if (file.blocked) return ["failed", "生成结果需要检查"];
   if (!file.has_article) return ["pending", "待生成"];
   if (cmsState(file, "zh") === "failed") return ["failed", "中文 Blog 发布失败"];
@@ -107,6 +120,14 @@ function updateSelection() {
 }
 
 function languageProgress(file, lang) {
+  const translating = workflowState.translate;
+  if (translating?.status === "running" && translating.current?.job_id === file.job_id && translating.current?.lang === lang) {
+    return { state: "running", text: "翻译中", action: "" };
+  }
+  const publishing = workflowState.publish;
+  if (publishing?.status === "running" && publishing.current?.job_id === file.job_id && publishing.current?.lang === lang) {
+    return { state: "running", text: "发布中", action: "" };
+  }
   const translated = translationState(file, lang);
   const published = cmsState(file, lang);
   if (published === "done") return { state: "done", text: "已发布", action: "" };
@@ -119,6 +140,11 @@ function languageProgress(file, lang) {
 function renderLanguagePanel(file) {
   const publishedCount = TRANSLATION_LANGS.filter((lang) => cmsState(file, lang) === "done").length;
   const details = el("details", "language-panel");
+  details.open = expandedLanguageJobs.has(file.job_id);
+  details.addEventListener("toggle", () => {
+    if (details.open) expandedLanguageJobs.add(file.job_id);
+    else expandedLanguageJobs.delete(file.job_id);
+  });
   const summary = el("summary");
   summary.innerHTML = `<span>多语言发布 <em>可选</em></span><small>${publishedCount}/4 已发布</small>`;
   details.appendChild(summary);
@@ -219,6 +245,10 @@ function renderLine(line) {
   head.append(title, actions);
   card.appendChild(head);
 
+  const notice = el("div", `line-notice ${lineNotice.state}`.trim(), lineNotice.text);
+  notice.hidden = !lineNotice.text;
+  card.appendChild(notice);
+
   const pendingSection = el("section", "work-section");
   const pendingHead = el("div", "section-head");
   pendingHead.innerHTML = `<div><h3>待处理 PDF</h3><p>选择后一次完成中文 Blog、原文 PDF 和公众号草稿</p></div><div class="selection-actions"><span>已选 <b class="selected-count">0</b> 篇</span></div>`;
@@ -255,9 +285,12 @@ function renderLine(line) {
 }
 
 function setStatus(text, state = "") {
-  const box = $("#status");
-  box.textContent = text;
-  box.className = `status ${state}`.trim();
+  lineNotice = { text, state };
+  document.querySelectorAll(".line-notice").forEach((box) => {
+    box.textContent = text;
+    box.className = `line-notice ${state}`.trim();
+    box.hidden = !text;
+  });
 }
 
 async function loadSources() {
@@ -266,8 +299,6 @@ async function loadSources() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     sourceLines = data.lines || [];
-    const validKeys = new Set(allFiles().map((file) => `${file.line_id}|${file.pdf}`));
-    [...selectedKeys].forEach((key) => { if (!validKeys.has(key)) selectedKeys.delete(key); });
     const box = $("#lines");
     box.innerHTML = "";
     sourceLines.forEach((line) => box.appendChild(renderLine(line)));
@@ -359,38 +390,33 @@ async function runWorkflow(stage, selections) {
   }
 }
 
-function describeCurrent(generation, workflows) {
-  if (generation.current) return [generation.current.summary?.message || "中文内容处理中", "running"];
-  if (generation.busy_other_line) return ["另一业务线正在处理任务，请稍后再试", "running"];
-  for (const stage of ["translate", "publish"]) {
-    const state = workflows[stage];
-    if (state?.status === "running") {
-      if (state.other_line_running) return ["另一业务线正在执行多语言任务，请稍后再试", "running"];
-      const current = state.current ? `：${LANG_LABELS[state.current.lang] || state.current.lang}` : "";
-      return [`${stage === "translate" ? "多语言翻译" : "CMS 发布"} ${state.completed || 0}/${state.total || 0}${current}`, "running"];
-    }
-  }
-  const failed = [workflows.translate, workflows.publish].find((state) => state?.status === "failed" && state.failed && !state.other_line_running);
-  if (failed) return [`最近任务失败：${failed.errors?.[0] || "请在对应语言处重试"}`, "failed"];
-  return ["工作台空闲，可以上传 PDF 或处理待办", ""];
+function workflowIsActive(states = workflowState) {
+  return states.translate?.status === "running" || states.publish?.status === "running";
 }
 
-async function poll() {
+async function poll(forceSources = false) {
+  if (forceSources instanceof Event) forceSources = true;
   if (pollTimer) clearTimeout(pollTimer);
+  const wasActive = generationBusy || workflowIsActive();
   try {
     const [generation, workflows] = await Promise.all([
       fetch("/api/runs").then((response) => response.json()),
       fetch("/api/workflow/status").then((response) => response.json()),
     ]);
     generationBusy = !!generation.busy;
+    generationState = generation;
     workflowState = workflows || {};
-    const [message, state] = describeCurrent(generation, workflowState);
-    setStatus(message, state);
-    await loadSources();
+    const active = generationBusy || workflowIsActive();
+    if (forceSources || active || wasActive || !sourceLines.length) await loadSources();
+
+    const otherWorkflow = [workflowState.translate, workflowState.publish].some((state) => state?.other_line_running);
+    if (generation.busy_other_line) setStatus("另一业务线正在处理任务，请稍后再试", "running");
+    else if (otherWorkflow) setStatus("另一业务线正在执行多语言任务，请稍后再试", "running");
+    else if (active || lineNotice.state === "running") setStatus("", "");
   } catch (error) {
     setStatus(`状态刷新失败：${error.message}`, "failed");
   }
-  const active = generationBusy || workflowState.translate?.status === "running" || workflowState.publish?.status === "running";
+  const active = generationBusy || workflowIsActive();
   pollTimer = setTimeout(poll, active ? 2500 : 10000);
 }
 
@@ -402,6 +428,6 @@ async function loadPreflight() {
   }
 }
 
-$("#refresh").addEventListener("click", poll);
+$("#refresh").addEventListener("click", () => poll(true));
 loadPreflight();
-poll();
+poll(true);
