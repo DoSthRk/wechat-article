@@ -390,10 +390,15 @@ class TestUploadApi(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_pdfs, pr.PDFS_DIR = pr.PDFS_DIR, Path(self._tmp.name)
+        self._saved_archived_pdfs, pr.ARCHIVED_PDFS_DIR = (
+            pr.ARCHIVED_PDFS_DIR,
+            Path(self._tmp.name) / "archived_pdfs",
+        )
         self.client = appmod.create_app(testing=True).test_client()
 
     def tearDown(self):
         pr.PDFS_DIR = self._saved_pdfs
+        pr.ARCHIVED_PDFS_DIR = self._saved_archived_pdfs
         self._tmp.cleanup()
 
     def test_upload_ok(self):
@@ -422,6 +427,27 @@ class TestUploadApi(unittest.TestCase):
         body = r.get_json()
         self.assertTrue(body["ok"], body)
         self.assertFalse((pr.PDFS_DIR / "免疫客" / "待删.pdf").exists())
+
+    def test_archive_pdf_ok(self):
+        upload = self.client.post("/api/upload", data={
+            "line_id": "solidex",
+            "file": (io.BytesIO(b"%PDF-1.7\n%x\n"), "待归档.pdf"),
+        }, content_type="multipart/form-data").get_json()
+
+        r = self.client.post("/api/pdf/archive", json={
+            "line_id": "solidex",
+            "pdf": upload["results"][0]["pdf"],
+            "batch": "20260904-pending-clear",
+        })
+
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["ok"], body)
+        self.assertFalse((pr.PDFS_DIR / "免疫客" / "待归档.pdf").exists())
+        self.assertTrue(
+            (pr.ARCHIVED_PDFS_DIR / "20260904-pending-clear" /
+             "solidex" / "待归档.pdf").exists()
+        )
 
     def test_upload_bad_content_is_json_error(self):
         r = self.client.post("/api/upload", data={

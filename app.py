@@ -448,6 +448,17 @@ def create_app(testing: bool = False) -> Flask:
         line_id = _require_line(str(data.get("line_id", "")))
         return jsonify(delete_pending_pdf(line_id, str(data.get("pdf", ""))))
 
+    @app.post("/api/pdf/archive")
+    def api_archive_pdf():
+        from utils.panel_runner import archive_pdf
+        data = request.get_json(silent=True) or {}
+        line_id = _require_line(str(data.get("line_id", "")))
+        return jsonify(archive_pdf(
+            line_id,
+            str(data.get("pdf", "")),
+            str(data.get("batch", "")),
+        ))
+
     @app.post("/api/run")
     def api_run():
         from utils.panel_runner import start_run

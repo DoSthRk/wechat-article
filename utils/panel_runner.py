@@ -30,6 +30,7 @@ logger = setup_logger("panel_runner")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LINES_DIR = PROJECT_ROOT / "inputs" / "lines"
 PDFS_DIR = PROJECT_ROOT / "inputs" / "pdfs"
+ARCHIVED_PDFS_DIR = PROJECT_ROOT / "inputs" / "archived_pdfs"
 RUN_DIR = PROJECT_ROOT / "runtime" / "panel_runs"
 _DEFAULT_MAX_PAGES = 20
 _OPERATOR_PENDING_FILE = "operator_pending.json"
@@ -213,6 +214,57 @@ def delete_pending_pdf(line_id: str, pdf: str) -> dict:
         return {"ok": False, "error": f"删除失败：{exc}"}
     logger.info("panel delete: line=%s file=%s", line_id, target.name)
     return {"ok": True, "name": target.name, "pdf": target_display, "removed_from_pending": False}
+
+
+def archive_pdf(line_id: str, pdf: str, batch: str) -> dict:
+    """Move one line-owned PDF out of the active scan tree without deleting history."""
+    line_id = (line_id or "").strip()
+    try:
+        line = load_line_by_id(str(LINES_DIR), line_id)
+    except LineLoadError as exc:
+        return {"ok": False, "error": f"线配置无效：{exc}"}
+    folder = str((line.extra or {}).get("pdf_folder") or "").strip()
+    if not folder:
+        return {"ok": False, "error": "该线未配置 pdf_folder"}
+
+    safe_batch = re.sub(r"[^A-Za-z0-9._-]+", "-", (batch or "").strip()).strip(".-")
+    if not safe_batch:
+        return {"ok": False, "error": "归档批次名称无效"}
+
+    line_dir = (PDFS_DIR / folder).resolve()
+    target = (PROJECT_ROOT / str(pdf)).resolve() if not Path(str(pdf)).is_absolute() else Path(str(pdf)).resolve()
+    try:
+        target.relative_to(line_dir)
+    except ValueError:
+        return {"ok": False, "error": "该文件不属于当前内容线"}
+    if target.suffix.lower() != ".pdf":
+        return {"ok": False, "error": "只能归档 PDF 文件"}
+    if not target.is_file():
+        return {"ok": False, "error": "文件不存在"}
+
+    archive_dir = ARCHIVED_PDFS_DIR / safe_batch / line_id
+    destination = archive_dir / target.name
+    if destination.exists():
+        return {"ok": False, "error": "归档中已存在同名文件"}
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target.rename(destination)
+    except OSError as exc:
+        return {"ok": False, "error": f"归档失败：{exc}"}
+
+    target_display = _display_pdf_path(target)
+    _unmark_operator_pending(line_id, target_display)
+    try:
+        archived_to = destination.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        archived_to = str(destination)
+    logger.info("panel archive: line=%s file=%s batch=%s", line_id, target.name, safe_batch)
+    return {
+        "ok": True,
+        "name": target.name,
+        "pdf": target_display,
+        "archived_to": archived_to,
+    }
 
 
 def _line_ids() -> List[str]:

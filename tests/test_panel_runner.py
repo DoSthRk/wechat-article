@@ -134,6 +134,10 @@ class TestUpload(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._saved_project_root = pr.PROJECT_ROOT
         self._saved_pdfs, pr.PDFS_DIR = pr.PDFS_DIR, Path(self._tmp.name)
+        self._saved_archived_pdfs, pr.ARCHIVED_PDFS_DIR = (
+            pr.ARCHIVED_PDFS_DIR,
+            Path(self._tmp.name) / "archived_pdfs",
+        )
         self._run_tmp = tempfile.TemporaryDirectory()
         self._saved_run_dir, pr.RUN_DIR = pr.RUN_DIR, Path(self._run_tmp.name)
         self._db_tmp = tempfile.TemporaryDirectory()
@@ -143,6 +147,7 @@ class TestUpload(unittest.TestCase):
     def tearDown(self):
         pr.PROJECT_ROOT = self._saved_project_root
         pr.PDFS_DIR = self._saved_pdfs
+        pr.ARCHIVED_PDFS_DIR = self._saved_archived_pdfs
         pr.RUN_DIR = self._saved_run_dir
         dbmod._instance.engine.dispose()
         dbmod._instance = self._orig_db_instance
@@ -257,6 +262,29 @@ class TestUpload(unittest.TestCase):
         r = pr.delete_pending_pdf("solidex", "inputs/pdfs/AAVTx/a.pdf")
         self.assertFalse(r["ok"])
         self.assertIn("不属于", r["error"])
+
+    def test_archive_pdf_moves_generated_file_out_of_active_tree(self):
+        saved = pr.save_uploaded_pdf("solidex", "archive-me.pdf", self._PDF)
+        target = pr.PDFS_DIR / "免疫客" / "archive-me.pdf"
+
+        archived = pr.archive_pdf("solidex", saved["pdf"], "20260904-pending-clear")
+
+        self.assertTrue(archived["ok"], archived)
+        self.assertFalse(target.exists())
+        self.assertTrue(
+            (pr.ARCHIVED_PDFS_DIR / "20260904-pending-clear" /
+             "solidex" / "archive-me.pdf").exists()
+        )
+
+    def test_archive_pdf_rejects_cross_line_file(self):
+        aav_dir = pr.PDFS_DIR / "AAVTx"
+        aav_dir.mkdir(parents=True, exist_ok=True)
+        (aav_dir / "a.pdf").write_bytes(self._PDF)
+
+        archived = pr.archive_pdf("solidex", "inputs/pdfs/AAVTx/a.pdf", "batch")
+
+        self.assertFalse(archived["ok"])
+        self.assertTrue((aav_dir / "a.pdf").exists())
 
     def test_delete_generated_override_removes_queue_not_file(self):
         db = dbmod.get_db_manager()
