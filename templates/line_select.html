@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>选择业务线</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='operator.css') }}">
+</head>
+<body>
+  <main class="line-select">
+    <p class="eyebrow">GeneMedi 内容平台</p>
+    <h1>选择你负责的业务线</h1>
+    <p class="line-select-hint">首次选择后，系统会在本机记住该业务线。</p>
+    <div class="line-select-actions">
+      <a class="line-entry" href="{{ url_for('direct_solidex') }}">
+        <strong>Solidex</strong>
+        <span>负责人：jhh</span>
+      </a>
+      <a class="line-entry" href="{{ url_for('direct_aav') }}">
+        <strong>AAV</strong>
+        <span>负责人：hqq</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>

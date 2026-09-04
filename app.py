@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 import markdown as md_lib
-from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
+from flask import Flask, abort, jsonify, make_response, redirect, render_template, request, url_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,6 +40,8 @@ _USER_LINE_ACCESS = {
     "hqq": frozenset({"aav"}),
 }
 _LINE_LABELS = {"solidex": "Solidex", "aav": "AAV"}
+_DIRECT_LINE_USERS = {"solidex": "jhh", "aav": "hqq"}
+_DIRECT_LINE_COOKIE = "gm_article_line"
 
 
 def create_app(testing: bool = False) -> Flask:
@@ -47,8 +49,14 @@ def create_app(testing: bool = False) -> Flask:
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
 
+    def _direct_line() -> str:
+        line_id = str(request.cookies.get(_DIRECT_LINE_COOKIE) or "").strip().lower()
+        return line_id if line_id in _DIRECT_LINE_USERS else ""
+
     def _username() -> str:
         username = str(request.headers.get("X-GM-LAB-Username") or "").strip().lower()
+        if not username:
+            username = _DIRECT_LINE_USERS.get(_direct_line(), "")
         if testing and not username:
             return "admin"
         if not username:
@@ -133,7 +141,39 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/")
     def index():
+        if not request.headers.get("X-GM-LAB-Username") and not _direct_line() and not testing:
+            return render_template("line_select.html", lines=_LINE_LABELS)
         return redirect(url_for("operator"))
+
+    @app.get("/select-line")
+    def select_line():
+        return render_template("line_select.html", lines=_LINE_LABELS)
+
+    def _direct_operator(line_id: str):
+        response = make_response(render_template(
+            "operator.html",
+            username=_DIRECT_LINE_USERS[line_id],
+            line_id=line_id,
+            line_label=_LINE_LABELS[line_id],
+            direct_mode=True,
+        ))
+        response.set_cookie(
+            _DIRECT_LINE_COOKIE,
+            line_id,
+            max_age=30 * 24 * 60 * 60,
+            httponly=True,
+            samesite="Lax",
+            path="/",
+        )
+        return response
+
+    @app.get("/solidex")
+    def direct_solidex():
+        return _direct_operator("solidex")
+
+    @app.get("/aav")
+    def direct_aav():
+        return _direct_operator("aav")
 
     @app.get("/operator")
     def operator():
@@ -145,6 +185,7 @@ def create_app(testing: bool = False) -> Flask:
             username=username,
             line_id=line_id,
             line_label=_LINE_LABELS.get(line_id, "全部业务线"),
+            direct_mode=bool(_direct_line() and not request.headers.get("X-GM-LAB-Username")),
         )
 
     @app.get("/admin")

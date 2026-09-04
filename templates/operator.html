@@ -15,7 +15,11 @@
     </div>
     <div class="header-actions">
       <button id="refresh" class="btn secondary">刷新</button>
+      {% if direct_mode %}
+      <a class="gm-lab-home" href="{{ url_for('select_line') }}">切换业务线</a>
+      {% else %}
       <a class="gm-lab-home" href="https://lab.genemedi.cn/">返回 GM-LAB</a>
+      {% endif %}
     </div>
   </header>
 

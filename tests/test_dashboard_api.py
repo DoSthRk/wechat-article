@@ -107,6 +107,46 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn("Solidex 内容工作台", page)
         self.assertIn("当前用户：jhh", page)
 
+    def test_direct_line_entry_scopes_followup_requests_without_gm_lab_header(self):
+        app = appmod.create_app(testing=False)
+        client = app.test_client()
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()):
+            entry = client.get("/solidex")
+            sources = client.get("/api/sources")
+
+        self.assertEqual(entry.status_code, 200)
+        self.assertIn("Solidex 内容工作台", entry.get_data(as_text=True))
+        self.assertIn("gm_article_line=solidex", entry.headers["Set-Cookie"])
+        self.assertEqual(sources.status_code, 200)
+        self.assertEqual(sources.get_json()["username"], "jhh")
+        self.assertEqual(
+            [line["line_id"] for line in sources.get_json()["lines"]],
+            ["solidex"],
+        )
+
+    def test_direct_line_cookie_cannot_operate_other_line(self):
+        app = appmod.create_app(testing=False)
+        client = app.test_client()
+        client.get("/solidex")
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+            "utils.panel_runner.start_run"
+        ) as start_run:
+            response = client.post(
+                "/api/run",
+                json={"line_id": "aav", "pdfs": ["inputs/pdfs/AAVTx/aav.pdf"]},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        start_run.assert_not_called()
+
+    def test_direct_ip_root_offers_line_selection(self):
+        app = appmod.create_app(testing=False)
+        response = app.test_client().get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('href="/solidex"', html)
+        self.assertIn('href="/aav"', html)
+
     def test_unknown_user_is_denied(self):
         response = self.client.get("/api/sources", headers={"X-GM-LAB-Username": "someone-else"})
         self.assertEqual(response.status_code, 403)
