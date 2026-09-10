@@ -50,6 +50,44 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["status"], "ok")
 
+    def test_wechat_preview_reads_actual_draft_without_local_markdown(self):
+        with patch("app.WeChatClient") as factory:
+            factory.return_value.get_draft.return_value = {"news_item": [{
+                "content": '<p>微信后台修改后的内容</p><img src="https://example.com/figure.png"><section>产品模块</section>',
+            }]}
+            response = self.client.get("/preview/job1?wechat=1")
+        self.assertEqual(response.status_code, 200)
+        factory.assert_called_once_with(account="aav")
+        factory.return_value.get_draft.assert_called_once_with("m1")
+        text = response.get_data(as_text=True)
+        self.assertIn("微信后台修改后的内容", text)
+        self.assertIn("https://example.com/figure.png", text)
+        self.assertIn("产品模块", text)
+        factory.return_value.update_draft.assert_not_called()
+        factory.return_value.create_draft.assert_not_called()
+
+    def test_wechat_preview_failure_is_explicit_and_hides_remote_error(self):
+        from utils.wechat_client import WeChatAPIError
+        with patch("app.WeChatClient", side_effect=WeChatAPIError("sensitive-remote-response")):
+            response = self.client.get("/preview/job1?wechat=1")
+        text = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("暂时无法读取公众号草稿", text)
+        self.assertNotIn("sensitive-remote-response", text)
+        self.assertNotIn("[图片:", text)
+
+    def test_wechat_preview_missing_draft_does_not_call_wechat(self):
+        with patch.object(self.db, "latest_wechat_draft", return_value=None), patch("app.WeChatClient") as factory:
+            response = self.client.get("/preview/job1?wechat=1")
+        self.assertIn("尚无已提交的公众号草稿", response.get_data(as_text=True))
+        factory.assert_not_called()
+
+    def test_wechat_preview_empty_remote_content_is_explicit(self):
+        with patch("app.WeChatClient") as factory:
+            factory.return_value.get_draft.return_value = {"news_item": []}
+            response = self.client.get("/preview/job1?wechat=1")
+        self.assertIn("公众号草稿正文为空", response.get_data(as_text=True))
+
     def test_root_redirects_to_operator_page(self):
         r = self.client.get("/")
         self.assertEqual(r.status_code, 302)

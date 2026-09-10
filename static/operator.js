@@ -69,6 +69,10 @@ function requiresCoreAction(file) {
   return needsAction(file) || !coreComplete(file);
 }
 
+function isCompleted(file) {
+  return coreComplete(file) && !requiresCoreAction(file);
+}
+
 function stateBadge(state, text) {
   return `<span class="state-badge ${esc(state)}"><i></i>${esc(text)}</span>`;
 }
@@ -84,6 +88,7 @@ function coreStatus(file) {
   if (recentRun?.status === "cancelled" && requiresCoreAction(file)) {
     return ["failed", "最近一次生成已取消"];
   }
+  if (file.operator_pending) return ["pending", "PDF 已重新上传，待重新处理"];
   if (file.blocked) return ["failed", "生成结果需要检查"];
   if (!file.has_article) return ["pending", "待生成"];
   if (cmsState(file, "zh") === "failed") return ["failed", "中文 Blog 发布失败"];
@@ -195,7 +200,7 @@ function renderPendingRow(lineId, file) {
     actions.appendChild(preview);
   }
   if (needsAction(file)) {
-    const remove = el("button", "text-action delete", "删除 PDF");
+    const remove = el("button", "text-action delete", file.operator_pending ? "取消重新处理" : "删除 PDF");
     remove.addEventListener("click", () => deletePdf(lineId, file.pdf, file.name, remove));
     actions.appendChild(remove);
   }
@@ -227,7 +232,7 @@ function renderLine(line) {
   card.dataset.lineId = line.line_id;
   const files = line.pdfs || [];
   const pending = files.filter(requiresCoreAction);
-  const completed = files.filter(coreComplete);
+  const completed = files.filter(isCompleted);
 
   const head = el("div", "line-head");
   const title = el("div");
@@ -333,6 +338,7 @@ async function uploadPdfs(lineId, filesLike) {
 
 async function deletePdf(lineId, pdf, name, button) {
   if (generationBusy) return;
+  const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "删除中";
   try {
@@ -344,10 +350,10 @@ async function deletePdf(lineId, pdf, name, button) {
     if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
     selectedKeys.delete(`${lineId}|${pdf}`);
     await loadSources();
-    setStatus(`已删除 ${data.name || name}`, "done");
+    setStatus(data.removed_from_pending ? `已取消重新处理 ${data.name || name}，保留 PDF 和已有文章` : `已删除 ${data.name || name}`, "done");
   } catch (error) {
     button.disabled = false;
-    button.textContent = "删除 PDF";
+    button.textContent = originalLabel;
     setStatus(`删除失败：${error.message}`, "failed");
   }
 }

@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from db.database import get_db_manager
 from utils.blog_urls import BlogUrlError, resolve_published_blog_url
+from utils.wechat_client import WeChatClient, WeChatAPIError
 from utils.wechat_template_assets import (
     TemplateAssetError,
     append_source_pdf_guide,
@@ -491,6 +492,22 @@ def create_app(testing: bool = False) -> Flask:
     @app.get("/preview/<job_id>")
     def preview(job_id: str):
         _require_job(job_id)
+        wechat = bool(request.args.get("wechat"))
+        if wechat:
+            draft = get_db_manager().latest_wechat_draft(job_id)
+            content = ""
+            error = "尚无已提交的公众号草稿，请先查看基准正文。"
+            if draft:
+                try:
+                    data = WeChatClient(account=draft["account"]).get_draft(draft["media_id"])
+                    items = data.get("news_item") or []
+                    content = items[0].get("content", "") if items else ""
+                    error = "" if content else "公众号草稿正文为空，请到微信后台核对。"
+                except WeChatAPIError:
+                    # 不把含远端响应、配置或 token 的异常细节暴露给业务页面。
+                    error = "暂时无法读取公众号草稿，草稿可能已删除或接口不可用。请稍后重试或到微信后台核对。"
+            return render_template("markdown_preview.html", job_id=job_id,
+                                   content=content, wechat=True, preview_error=error)
         content_dir = get_db_manager().latest_content_dir(job_id)
         if not content_dir:
             abort(404)
@@ -498,15 +515,7 @@ def create_app(testing: bool = False) -> Flask:
         if not md_path.exists():
             abort(404)
         md_text = md_path.read_text(encoding="utf-8")
-        wechat = bool(request.args.get("wechat"))
-        if wechat:
-            # 公众号草稿样式：正是投放到草稿的 HTML（含分级标题内联样式）
-            from utils.wechat_html import markdown_to_wechat_html
-            content = markdown_to_wechat_html(md_text)
-        else:
-            content = md_lib.markdown(
-                md_text, extensions=["tables", "fenced_code", "sane_lists"],
-            )
+        content = md_lib.markdown(md_text, extensions=["tables", "fenced_code", "sane_lists"])
         return render_template("markdown_preview.html", job_id=job_id, content=content, wechat=wechat)
 
     return app

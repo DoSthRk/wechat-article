@@ -38,6 +38,16 @@ class TestDistributions(unittest.TestCase):
         self.assertEqual(d2.wechat_media_id, "m1")
         self.assertEqual(d2.publish_status, "published")
 
+    def test_preview_does_not_reuse_a_previous_generation_draft(self):
+        self.db.upsert_article(self.job_pk, title="旧稿", content_dir="old")
+        self.db.upsert_distribution(self.job_pk, "wechat", account="aav", wechat_media_id="old-media")
+        self.assertEqual(self.db.latest_wechat_draft("job1"), {"account": "aav", "media_id": "old-media"})
+        task = self.db.get_or_create_task("regenerated")
+        job = self.db.upsert_job(task.id, "job1", pdf_path="p.pdf", template_id="t", product_id="pr")
+        self.db.upsert_article(job.id, title="新稿", content_dir="new")
+        self.assertIsNone(self.db.latest_wechat_draft("job1"))
+
+
     def test_one_article_many_distributions(self):
         self.db.upsert_distribution(self.job_pk, "wechat", account="aav")
         self.db.upsert_distribution(self.job_pk, "blog", account="genemedi", lang="en")

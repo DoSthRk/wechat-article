@@ -89,6 +89,21 @@ python batch_processor.py
 
 ## 常见问题
 
+### 本地测试
+
+使用 Python 3.11；前端队列状态回归测试还需要 Node.js 18 或更新版本。
+
+```bash
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -r requirements.txt pytest
+.venv/bin/python -m pytest tests/ -q
+```
+
+重复上传已生成的 PDF 会进入“待重新处理”，不再同时列为已完成。
+“取消重新处理”只移除待处理标记，保留 PDF 和已有文章。
+“公众号实际草稿”使用对应账号读取微信草稿箱，包含配图和产品模块；
+接口失败或草稿不存在时显示明确提示，基准正文仍可独立预览。
+
 **Q：access_token 怎么管理？**
 A：客户端会拿一次 token 缓存到 `runtime/wechat_token.json`，2 小时内复用。多个进程共享同一文件，避免互相覆盖。
 

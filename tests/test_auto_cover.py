@@ -272,7 +272,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
                               "scan_error": ""},
         )()
 
-        def fake_worker(kind, job, figures_dir):
+        def fake_worker(kind, job, figures_dir, timeout_seconds=None):
             calls.append(kind)
             return {"caption": [fig1], "vision": [fig2]}[kind]
 

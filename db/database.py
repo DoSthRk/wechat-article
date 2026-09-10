@@ -676,6 +676,21 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def latest_wechat_draft(self, job_id: str) -> Optional[Dict[str, str]]:
+        """取最近一篇生成稿对应的微信草稿，不回退到旧任务的投放记录。"""
+        with self.get_session() as session:
+            article = (session.query(Article).join(Job, Article.job_pk == Job.id)
+                       .filter(Job.job_id == job_id).order_by(Article.id.desc()).first())
+            if article is None:
+                return None
+            draft = (session.query(Distribution).filter(
+                Distribution.job_pk == article.job_pk,
+                Distribution.platform == "wechat", Distribution.lang == "zh",
+                Distribution.wechat_media_id.isnot(None),
+                Distribution.wechat_media_id != "",
+            ).order_by(Distribution.id.desc()).first())
+            return {"account": draft.account, "media_id": draft.wechat_media_id} if draft else None
+
     def latest_content_dir(self, job_id: str) -> Optional[str]:
         """按 job_id 找最近一篇文章的 content_dir（preview 用）。"""
         session = self.get_session()
