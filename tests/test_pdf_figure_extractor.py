@@ -131,7 +131,8 @@ class TestLegendFigurePairing(unittest.TestCase):
                 _el(48, 104, 550, 650),
             ],
             [
-                _el(20, 48, 180, 62),   # 独立页眉：应排除
+                dict(_el(20, 48, 180, 62), text="OPEN ACCESS"),
+                dict(_el(500, 70, 598, 82), text="Article"),
                 _el(26, 96, 140, 110),  # 主图上方标签：应保留
                 _el(18, 660, 590, 676), # 底部图例：应保留
                 dict(_el(588, 210, 594, 790), upright=False), # 右侧下载水印：应排除
@@ -139,7 +140,11 @@ class TestLegendFigurePairing(unittest.TestCase):
             page_w=600,
             page_h=800,
         )
-        self.assertEqual(region, (0.0, 90.0, 600, 682.0))
+        self.assertLessEqual(region[0], 18)
+        self.assertGreater(region[1], 82)
+        self.assertLessEqual(region[1], 96)
+        self.assertGreaterEqual(region[2], 590)
+        self.assertEqual(region[3], 682)
 
 
 class TestCropCacheVersion(unittest.TestCase):

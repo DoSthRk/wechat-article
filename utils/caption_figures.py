@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands
+from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands, sanitize_figure_region, figure_crop_words
 from utils.logger import setup_logger
 from utils.pdf_figure_extractor import Figure
 
@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 3     # v3: support full-page figures whose caption starts on the next page
+_CAPTION_VERSION = 4     # v4: text-anchored stacked publisher headers and tight horizontal bounds
 
 
 def caption_enabled() -> bool:
@@ -100,7 +100,7 @@ def _union_box(band: list) -> Optional[Tuple[float, float, float, float]]:
 
 def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
                      cap_tops: List[float], cap_bottoms: List[float],
-                     page_w: float, page_h: float) -> Optional[Tuple[float, float, float, float]]:
+                     page_w: float, page_h: float, words=None) -> Optional[Tuple[float, float, float, float]]:
     """题注对应那张图的框：图相对题注通常在**上方**（少数在下方）。
 
     关键简化：正文没有图形元素，所以「相邻两题注之间的图形并集」天然只含图、不含正文 —— 无需
@@ -113,6 +113,8 @@ def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
         box = _union_box(elements)
         if box is None:
             return None
+        if words is not None:
+            return sanitize_figure_region(elements, words, box, page_w, page_h)
         return trim_detached_edge_bands(elements, box, page_w, page_h)
 
     # 上方：上一题注以下、本题注以上
@@ -137,7 +139,7 @@ def _full_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
     box = _union_box(clean)
     if box is None:
         return None
-    return trim_detached_edge_bands(clean, box, page_w, page_h)
+    return sanitize_figure_region(clean, figure_crop_words(page), box, page_w, page_h)
 
 
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
@@ -166,7 +168,8 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                     continue
                 figure_idx = idx
                 box = _box_for_caption(cap["top"], cap["bottom"], gfx,
-                                       cap_tops, cap_bottoms, page_w, page_h)
+                                       cap_tops, cap_bottoms, page_w, page_h,
+                                       words=figure_crop_words(page))
                 if (
                     box is None
                     and idx > 0

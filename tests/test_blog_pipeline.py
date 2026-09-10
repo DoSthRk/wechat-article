@@ -248,6 +248,16 @@ class BlogPipelineTests(unittest.TestCase):
         self.assertNotIn("缺失图", html)
         self.assertEqual(cover, "")
 
+    def test_unsafe_crop_blocks_publish_instead_of_omitting_figures(self):
+        from utils.figure_crop_geometry import UnsafeFigureCrop
+        workflow = self._workflow()
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch("batch_processor._resolve_job_figures", side_effect=UnsafeFigureCrop("overlap")):
+            with self.assertRaisesRegex(BlogPipelineError, "已阻止发布"):
+                workflow._render_with_images("[图片:Figure 1]", source_job)
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.updated, [])
+
     def test_blog_figure_upload_failure_is_removed_without_blocking(self):
         image = self.content_dir / "figure.png"
         image.write_bytes(b"not-a-real-image")

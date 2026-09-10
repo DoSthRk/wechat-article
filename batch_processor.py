@@ -656,6 +656,14 @@ def _run_pdf_figure_worker(
         logger.warning("[%s] %s 抽图超时 %.0fs，跳过该抽图方式", job.job_id, kind, timeout)
         return []
     if proc.returncode != 0:
+        if proc.returncode == 3:
+            from utils.figure_crop_geometry import UnsafeFigureCrop
+            try:
+                failure = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                failure = {}
+            if failure.get("error") == "unsafe_figure_crop":
+                raise UnsafeFigureCrop(failure.get("message", "图片裁剪需要人工检查"))
         detail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-3:]).strip()
         logger.warning("[%s] %s 抽图子进程失败 rc=%s：%s", job.job_id, kind, proc.returncode, detail)
         return []
@@ -955,6 +963,9 @@ def _resolve_job_figures(
                 else _run_pdf_figure_worker(kind, job, figures_dir, timeout)
             )
         except Exception as exc:  # noqa: BLE001 - 单个策略异常必须继续回退
+            from utils.figure_crop_geometry import UnsafeFigureCrop
+            if isinstance(exc, UnsafeFigureCrop):
+                raise
             logger.warning("[%s] %s 抽图异常：%s", job.job_id, kind, exc)
             extracted = []
         figures = merge_preferred_figures(figures, extracted)

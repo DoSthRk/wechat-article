@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+from utils.figure_crop_geometry import UnsafeFigureCrop
 
 
 def _parse_max_pages(raw: str) -> Optional[int]:
@@ -53,9 +54,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     kind, pdf_path, out_dir, max_pages_raw, result_json = argv
     load_dotenv()
-    figs = _extract(kind, pdf_path, out_dir, _parse_max_pages(max_pages_raw))
     result_path = Path(result_json)
     result_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        figs = _extract(kind, pdf_path, out_dir, _parse_max_pages(max_pages_raw))
+    except UnsafeFigureCrop as exc:
+        result_path.write_text(json.dumps({"error": "unsafe_figure_crop", "message": str(exc)}), encoding="utf-8")
+        return 3
     result_path.write_text(
         json.dumps([asdict(fig) for fig in figs], ensure_ascii=False, indent=2),
         encoding="utf-8",

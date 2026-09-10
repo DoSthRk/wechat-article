@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import pdfplumber
 import pypdfium2 as pdfium
 
-from utils.figure_crop_geometry import trim_detached_edge_bands
+from utils.figure_crop_geometry import trim_detached_edge_bands, sanitize_figure_region, figure_crop_words, publisher_header_bottom
 from utils.logger import setup_logger
 
 logger = setup_logger("pdf_figure_extractor")
@@ -45,7 +45,7 @@ _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
 _DETACHED_FIGPAGE_MAX_WORDS = 1000  # 文末整页科研图可含大量坐标轴/图例文字
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
 _CONTENT_PAD = 6          # 文本/图形并集外留白，避免坐标轴文字贴边
-_CROP_VERSION = 2         # v2: 文末图页纳入坐标轴/图例文字，并支持高密度矢量图
+_CROP_VERSION = 3         # v3: text-anchored publisher header cleanup
 
 
 @dataclass
@@ -254,14 +254,17 @@ def _legend_page_content_region(
     gfx: list, words: list, page_w: float, page_h: float,
 ) -> Optional[Tuple[float, float, float, float]]:
     """文末整页图的完整内容区：保留坐标轴/图例文字，同时继续排除独立页眉。"""
-    region = _legend_page_region(gfx, page_w, page_h)
+    region = _union(gfx)
     if region is None:
         return None
+    region = sanitize_figure_region(gfx, words, region, page_w, page_h)
     rx0, rt, rx1, rb = region
+    header_bottom = publisher_header_bottom(words, page_h)
     # 只纳入接近主图或位于主图下方的文字；避免把已剔除的杂志页眉重新并入。
     content_words = [
         word for word in words
         if float(word.get("bottom", 0)) >= rt - _MARGIN
+        and float(word.get("top", 0)) > header_bottom
         and not (
             not bool(word.get("upright", True))
             and float(word.get("x1", 0)) >= page_w - _MARGIN
@@ -303,7 +306,7 @@ def extract_figures_from_legend_pages(
             prof: List[Dict] = []
             for i in range(limit):
                 pg = pdf.pages[i]
-                words = pg.extract_words() or []
+                words = figure_crop_words(pg)
                 gfx = _gfx_elements(pg)
                 lines = [(ln.get("text") or "").strip() for ln in pg.extract_text_lines()]
                 prof.append({
@@ -379,7 +382,7 @@ def extract_figures(
             prof: List[Dict] = []
             for i in range(limit):
                 pg = pdf.pages[i]
-                words = pg.extract_words() or []
+                words = figure_crop_words(pg)
                 gfx = _gfx_elements(pg)
                 caps = []
                 for ln in pg.extract_text_lines():
@@ -417,8 +420,8 @@ def extract_figures(
                     if region is None or fp is None:
                         continue
                     figure_page = prof[fp]["pg"]
-                    region = trim_detached_edge_bands(
-                        prof[fp]["gfx"], region,
+                    region = sanitize_figure_region(
+                        prof[fp]["gfx"], prof[fp]["words"], region,
                         float(figure_page.width), float(figure_page.height),
                     )
                     rx0, rt, rx1, rb = region

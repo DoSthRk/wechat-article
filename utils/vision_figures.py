@@ -21,7 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
-from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands
+from utils.figure_crop_geometry import is_rule_line, trim_detached_edge_bands, sanitize_figure_region, UnsafeFigureCrop, figure_crop_words
 from utils.logger import setup_logger
 from utils.pdf_figure_extractor import Figure  # 复用 Figure 数据类（喂给 match_figure）
 
@@ -203,7 +203,11 @@ def _graphics_crop_box(pdf_path: str, idx: int):
         # 主导大图优先（图文摘要 / 整版单图）：绕开四周散落图形，裁到这张图本身
         dom = _dominant_image_box(pg, float(pg.width) * h)
         if dom:
-            return dom
+            return sanitize_figure_region(
+                [e for kind in ("images", "rects", "curves", "lines")
+                 for e in (getattr(pg, kind, None) or [])],
+                figure_crop_words(pg), dom, float(pg.width), h,
+            )
         els = []
         for kind in ("images", "rects", "curves", "lines"):
             els.extend(getattr(pg, kind, None) or [])
@@ -216,7 +220,7 @@ def _graphics_crop_box(pdf_path: str, idx: int):
         x1 = max(float(e["x1"]) for e in els)
         y0 = min(float(e["top"]) for e in els)
         y1 = max(float(e["bottom"]) for e in els)
-        region = trim_detached_edge_bands(els, (x0, y0, x1, y1), w, h)
+        region = sanitize_figure_region(els, figure_crop_words(pg), (x0, y0, x1, y1), w, h)
     return (max(0.0, region[0]), max(0.0, region[1]), region[2], region[3])
 
 
@@ -225,6 +229,8 @@ def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
     box_pt = None
     try:
         box_pt = _graphics_crop_box(pdf_path, idx)
+    except UnsafeFigureCrop:
+        raise  # Never bypass a known unsafe crop by returning a full-page VLM fallback.
     except Exception as exc:  # noqa: BLE001
         logger.warning("graphics 裁剪失败，回落 VLM bbox：%s", exc)
     if box_pt:
@@ -239,7 +245,7 @@ def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
 # 裁剪逻辑版本：升级裁剪算法时 +1。缓存命中但版本陈旧 → 按缓存的 page 就地重切（不重调 VLM）。
 # v3: 算并集前剔除「贯穿大半页的细规则线」（分栏线/页眉页脚横线），避免裁进正文
 # v4: 四条抽图路径共用边缘杂志页眉/Logo 清理器
-_CROP_VERSION = 4
+_CROP_VERSION = 5
 
 
 def _crop_version_path(out: Path) -> Path:
@@ -268,8 +274,10 @@ def _recrop_cached(pdf_path: str, figs: List[Figure]) -> List[Figure]:
             crop = _make_crop(pdf_path, f.page - 1, pil, [0, 0, 1, 1])
             crop.save(f.image_path, quality=85)
             f.width, f.height = crop.width, crop.height
-        except Exception as exc:  # noqa: BLE001 - 单张重切失败不阻断
-            logger.warning("重切图%s(p%d)失败：%s", f.label, f.page, exc)
+        except Exception:
+            # Never bless stale image bytes with the new crop version.
+            logger.exception("重切图%s(p%d)失败，保留旧缓存版本以便重试", f.label, f.page)
+            raise
     return figs
 
 

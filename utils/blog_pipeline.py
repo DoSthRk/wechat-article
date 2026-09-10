@@ -277,6 +277,9 @@ class BlogWorkflow:
             extracted, figures_dir = _resolve_job_figures(source_job)
             figures_ready = True
         except Exception as exc:
+            from utils.figure_crop_geometry import UnsafeFigureCrop
+            if isinstance(exc, UnsafeFigureCrop):
+                raise BlogPipelineError(f"图片裁剪需要人工检查，已阻止发布：{exc}") from exc
             logger.warning(
                 "[%s] Blog figure extraction failed; publishing without figures: %s",
                 source_job.job_id,
