@@ -191,6 +191,18 @@ class BlogPipelineTests(unittest.TestCase):
         with self.assertRaises(BlogPipelineError):
             self._workflow().publish("paper-1", "en")
 
+    def test_translated_publish_rejects_lost_figures_before_external_writes(self):
+        (self.content_dir / "article.md").write_text("# 标题\n[图片:Figure 1 图注]", encoding="utf-8")
+        workflow = self._workflow()
+        workflow.translate("paper-1", "ja")
+        with patch.object(workflow, "source_pdf_publisher") as publish_pdf:
+            with self.assertRaisesRegex(BlogPipelineError, "image_placeholder_mismatch"):
+                workflow.publish("paper-1", "ja")
+        publish_pdf.assert_not_called()
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.updated, [])
+        self.assertEqual(self.db.get_distribution(self.job_pk, "blog", "genemedi", "ja").publish_status, "failed")
+
     def test_blog_html_uses_original_figure_as_body_and_cover(self):
         image = self.content_dir / "figure.png"
         image.write_bytes(b"not-a-real-image")
@@ -206,9 +218,12 @@ class BlogPipelineTests(unittest.TestCase):
         with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
             "batch_processor._resolve_figure_path", return_value=str(image)
         ):
-            html, cover = workflow._render_with_images("# 标题\n\n[图片:Figure 1 示例图]", source_job)
-        self.assertIn('src="https://img.example/article-assets/figure.png"', html)
-        self.assertEqual(cover, "https://img.example/article-assets/figure.png")
+            for prefix in ["图片", "画像", "이미지"]:
+                with self.subTest(prefix=prefix):
+                    html, cover = workflow._render_with_images(f"# 标题\n\n[{prefix}:Figure 1 示例图]", source_job)
+                    self.assertIn('src="https://img.example/article-assets/figure.png"', html)
+                    self.assertEqual(cover, "https://img.example/article-assets/figure.png")
+                    self.assertNotIn(f"[{prefix}:", html)
 
     def test_missing_blog_figure_is_removed_without_blocking(self):
         class _Store:

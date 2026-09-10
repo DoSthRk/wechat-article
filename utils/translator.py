@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openai import OpenAI
 
 from utils.logger import setup_logger
+from utils.image_placeholders import normalize_image_placeholders, validate_image_placeholders
 
 logger = setup_logger("translator")
 
@@ -216,6 +217,8 @@ def translate_markdown(
                 last_error = "empty translation output"
                 logger.warning("translate_markdown %s attempt %d: empty output", lang, attempt)
                 continue
+            text = normalize_image_placeholders(text)
+            validate_image_placeholders(markdown, text)
             usage = getattr(response, "usage", None)
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
             prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)

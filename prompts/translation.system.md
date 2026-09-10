@@ -24,6 +24,9 @@ Never change heading levels, never break table structure, never reorder the docu
 
 **Image placeholders** of the form `[图片:Figure X 描述]` — translate the description text but
 KEEP the `[图片:...]` marker form exactly (do NOT convert it into Markdown image syntax).
+The literal prefix `图片:` and the `Figure N` / `Extended Data Figure N` identifiers are
+machine-readable syntax. Never translate them to `画像:`, `이미지:`, or any other language.
+Keep the same number and order of placeholders; only translate the description after the figure identifier.
 
 # Links
 

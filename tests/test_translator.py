@@ -68,6 +68,27 @@ class TranslateMarkdownTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("unsupported", result.error)
 
+    def test_localized_image_markers_are_normalized(self):
+        for lang, prefix in [("ja", "画像"), ("ko", "이미지")]:
+            with self.subTest(lang=lang):
+                client = _FakeClient([f"# Title\n[{prefix}:Figure 1 translated caption]"])
+                result = translate_markdown("# 标题\n[图片:Figure 1 源图注]", lang, client=client)
+                self.assertTrue(result.success)
+                self.assertIn("[图片:Figure 1 translated caption]", result.translated_markdown)
+
+    def test_missing_or_changed_figures_fail_translation(self):
+        for output in ["# Title", "[图片:Figure 2 wrong figure]"]:
+            with self.subTest(output=output):
+                result = translate_markdown("[图片:Figure 1 源图注]", "ja", client=_FakeClient([output]), max_retries=0)
+                self.assertFalse(result.success)
+                self.assertIn("image_placeholder_mismatch", result.error)
+
+    def test_image_validation_failure_can_retry(self):
+        client = _FakeClient(["# Missing image", "[이미지:Figure 1 caption]"])
+        result = translate_markdown("[图片:Figure 1 图注]", "ko", client=client, max_retries=1)
+        self.assertTrue(result.success)
+        self.assertEqual(len(client.calls), 2)
+
     def test_chinese_is_not_a_target(self):
         # 中文是源，不能作为翻译目标
         result = translate_markdown("# 标题", "zh", client=_FakeClient(["x"]))

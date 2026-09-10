@@ -17,6 +17,7 @@ from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
 from utils.blog_urls import blog_slug, public_blog_url, verify_public_blog_url
 from utils.job_loader import Job as SourceJob
 from utils.logger import setup_logger
+from utils.image_placeholders import normalize_image_placeholders, validate_image_placeholders
 from utils.translator import TranslationResult, translate_markdown
 from utils.wechat_html import extract_title_and_digest, find_image_placeholders, replace_image_placeholder
 
@@ -196,10 +197,15 @@ class BlogWorkflow:
 
         self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="publishing", publish_error=None)
         try:
+            markdown_text = markdown_path.read_text(encoding="utf-8")
+            if lang in BLOG_TARGET_LANGS:
+                source_version = self.db.get_article_version(job_pk, BLOG_SOURCE_LANG)
+                if source_version is None or not Path(source_version.content_path).is_file():
+                    raise BlogPipelineError("Chinese source Markdown is required for image validation")
+                validate_image_placeholders(Path(source_version.content_path).read_text(encoding="utf-8"), markdown_text)
             source_pdf_url = self.source_pdf_publisher(
                 self.db, job_pk, _build_source_job(db_job),
             )
-            markdown_text = markdown_path.read_text(encoding="utf-8")
             html, cover_url = self._render_with_images(markdown_text, _build_source_job(db_job))
             title, _digest = extract_title_and_digest(markdown_text)
             payload: Dict[str, str] = {
@@ -260,6 +266,7 @@ class BlogWorkflow:
         raise BlogPipelineError(f"Unsupported Blog language: {lang}")
 
     def _render_with_images(self, markdown_text: str, source_job: SourceJob) -> Tuple[str, str]:
+        markdown_text = normalize_image_placeholders(markdown_text)
         placeholders = find_image_placeholders(markdown_text)
         html = _markdown_to_blog_html(markdown_text)
         if not placeholders:
