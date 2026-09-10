@@ -3,6 +3,27 @@ from pathlib import Path
 import subprocess
 
 
+def test_wechat_preview_loads_lazy_images_without_overwriting_existing_sources():
+    root = Path(__file__).resolve().parent.parent
+    subprocess.run(["node", "-e", r'''
+const vm = require("node:vm");
+const fs = require("node:fs");
+const assert = require("node:assert/strict");
+const images = [
+  {"data-src": "https://mmbiz.qpic.cn/figure.jpg"},
+  {src: "https://example.com/current.jpg", "data-src": "https://example.com/old.jpg"},
+  {"data-src": "javascript:alert(1)"},
+].map(attrs => ({...attrs, getAttribute(name) { return this[name] || null; }}));
+vm.runInNewContext(fs.readFileSync("static/preview.js", "utf8"), {
+  document: {querySelectorAll: () => images},
+});
+assert.equal(images[0].src, "https://mmbiz.qpic.cn/figure.jpg");
+assert.equal(images[1].src, "https://example.com/current.jpg");
+assert.equal(images[2].src, undefined);
+assert.ok(images.every(image => image.referrerPolicy === "no-referrer"));
+'''], cwd=root, check=True, text=True, timeout=15)
+
+
 def test_reuploaded_pdf_is_pending_until_cancelled_or_processed():
     root = Path(__file__).resolve().parent.parent
     subprocess.run(["node", "-e", r'''

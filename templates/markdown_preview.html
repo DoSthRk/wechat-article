@@ -30,5 +30,8 @@
       <p class="note">提示：<code>[图片:Figure X …]</code> 是图片占位符，由投放前的图片管线替换为真实图。</p>
     {% endif %}
   </main>
+  {% if wechat and not preview_error %}
+  <script src="{{ url_for('static', filename='preview.js') }}"></script>
+  {% endif %}
 </body>
 </html>
