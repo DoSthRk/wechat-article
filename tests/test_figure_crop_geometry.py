@@ -135,8 +135,8 @@ class TestOutlinedPublisherBanners(unittest.TestCase):
         from types import SimpleNamespace
         return SimpleNamespace(
             width=600, height=800,
-            rects=[_el(75, top, 535, top + 15)],
-            curves=[_el(250 + i * 7, top + 3, 255 + i * 7, top + 12) for i in range(12)],
+            rects=[dict(_el(75, top, 535, top + 15), fill=True)],
+            curves=[dict(_el(250 + i * 7, top + 3, 255 + i * 7, top + 12), non_stroking_color=(0, 0, 0, 0)) for i in range(12)],
             extract_words=lambda: [],
         )
 
@@ -161,4 +161,14 @@ class TestOutlinedPublisherBanners(unittest.TestCase):
         pages = [self.make_page(54) for _ in range(3)]
         for p in pages:
             p.pdf = SimpleNamespace(pages=pages)
+        self.assertEqual(figure_crop_words(pages[0]), [])
+
+    def test_repeated_dark_experimental_legend_is_not_publisher_banner(self):
+        from types import SimpleNamespace
+        from utils.figure_crop_geometry import figure_crop_words
+        pages = [self.make_page() for _ in range(3)]
+        for p in pages:
+            p.pdf = SimpleNamespace(pages=pages)
+            for curve in p.curves:
+                curve['non_stroking_color'] = (0, 0, 0, 1)
         self.assertEqual(figure_crop_words(pages[0]), [])

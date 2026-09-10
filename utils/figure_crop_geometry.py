@@ -159,6 +159,15 @@ def figure_crop_words(page) -> list:
         return words
 
     def signatures(pg):
+        def white(color):
+            if isinstance(color, (int, float)):
+                return color >= .98
+            if not isinstance(color, (tuple, list)):
+                return False
+            if len(color) == 4:  # CMYK
+                return all(float(c) <= .02 for c in color)
+            return bool(color) and all(float(c) >= .98 for c in color)
+
         found = {}
         for rect in pg.rects or []:
             x0, t, x1, b = (float(rect[k]) for k in ('x0', 'top', 'x1', 'bottom'))
@@ -167,6 +176,10 @@ def figure_crop_words(page) -> list:
             outlines = [e for e in (pg.curves or [])
                         if e['x0'] >= x0 and e['x1'] <= x1 and e['top'] >= t and e['bottom'] <= b]
             if len(outlines) < 8:
+                continue
+            # White outlined letters on a filled banner are publisher chrome.
+            # A repeated experimental key with dark text is still figure data.
+            if not rect.get('fill') or not all(white(e.get('non_stroking_color')) for e in outlines):
                 continue
             signature = tuple((round(float(e[k]), 2) for e in [rect] + outlines
                                for k in ('x0', 'top', 'x1', 'bottom')))
