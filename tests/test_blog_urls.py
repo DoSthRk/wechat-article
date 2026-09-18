@@ -67,6 +67,35 @@ class BlogUrlTests(unittest.TestCase):
             verify.assert_called_once_with(expected)
             db.engine.dispose()
 
+    def test_database_reopen_normalizes_legacy_english_public_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database_url = f"sqlite:///{(Path(tmp) / 't.db').as_posix()}"
+            db = DatabaseManager(database_url=database_url)
+            task = db.get_or_create_task("t")
+            job_pk = db.upsert_job(
+                task.id, "paper-1", pdf_path="paper.pdf",
+                template_id="aav", product_id="purprox",
+            ).id
+            db.upsert_distribution(
+                job_pk, "blog", account="genemedi", lang="en",
+                publish_status="published",
+                external_id="existing-cms-uuid",
+                external_url="https://en.genemedi.com/blog/paper-1-en",
+            )
+            db.engine.dispose()
+
+            reopened = DatabaseManager(database_url=database_url)
+            distribution = reopened.get_distribution(
+                job_pk, "blog", account="genemedi", lang="en",
+            )
+            self.assertEqual(
+                distribution.external_url,
+                "https://genemedi.net/blog/paper-1-en",
+            )
+            self.assertEqual(distribution.external_id, "existing-cms-uuid")
+            self.assertEqual(distribution.publish_status, "published")
+            reopened.engine.dispose()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -302,6 +302,7 @@ class DatabaseManager:
         Base.metadata.create_all(bind=self.engine)
         self._ensure_sqlite_columns()
         self._backfill_blog_versions()
+        self._normalize_legacy_english_blog_urls()
         logger.info("DB initialized: %s", self.engine.url)
 
     def get_session(self) -> Session:
@@ -353,6 +354,35 @@ class DatabaseManager:
             session.close()
         for job_pk, content_dir in rows:
             self.ensure_blog_versions(job_pk, content_dir)
+
+    def _normalize_legacy_english_blog_urls(self) -> None:
+        """Move exact legacy English public URLs to the current canonical host."""
+        from utils.blog_urls import blog_slug, public_blog_url
+
+        session = self.get_session()
+        try:
+            rows = (
+                session.query(Distribution, Job.job_id)
+                .join(Job, Distribution.job_pk == Job.id)
+                .filter(
+                    Distribution.platform == "blog",
+                    Distribution.account == "genemedi",
+                    Distribution.lang == "en",
+                )
+                .all()
+            )
+            changed = 0
+            for distribution, job_id in rows:
+                legacy_url = f"https://en.genemedi.com/blog/{blog_slug(job_id, 'en')}"
+                if str(distribution.external_url or "").rstrip("/") != legacy_url:
+                    continue
+                distribution.external_url = public_blog_url(job_id, "en")
+                changed += 1
+            if changed:
+                session.commit()
+                logger.info("migrated %s legacy English Blog URL(s)", changed)
+        finally:
+            session.close()
 
     # ---- task / job ----
 
