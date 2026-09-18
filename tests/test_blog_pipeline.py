@@ -100,7 +100,7 @@ class BlogPipelineTests(unittest.TestCase):
         dist = self.db.get_distribution(self.job_pk, "blog", "genemedi", "en")
         self.assertEqual(dist.publish_status, "published")
         self.assertEqual(dist.external_id, "00000000-0000-0000-0000-000000000123")
-        self.assertEqual(dist.external_url, "https://en.genemedi.com/blog/paper-1-en")
+        self.assertEqual(dist.external_url, "https://genemedi.net/blog/paper-1-en")
 
     def test_translate_then_publish_other_supported_languages(self):
         workflow = self._workflow("# Translated title\n\nTranslated body.")

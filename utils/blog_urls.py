@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _DEFAULT_PUBLIC_BASE_URLS = {
     "zh": "https://genemedi.cn",
-    "en": "https://en.genemedi.com",
+    "en": "https://genemedi.net",
     "ja": "https://ja.genemedi.com",
     "ko": "https://ko.genemedi.com",
     "ru": "https://ru.genemedi.com",

@@ -17,6 +17,10 @@ class BlogUrlTests(unittest.TestCase):
 
     def test_language_public_origins(self):
         self.assertEqual(
+            public_blog_url("paper-1", "en", {}),
+            "https://genemedi.net/blog/paper-1-en",
+        )
+        self.assertEqual(
             public_blog_url("paper-1", "ja", {}),
             "https://ja.genemedi.com/blog/paper-1-ja",
         )
