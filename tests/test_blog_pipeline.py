@@ -5,7 +5,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from db.database import DatabaseManager, JobStatus
-from utils.blog_pipeline import BlogPipelineError, BlogWorkflow, _product_series, run_batch
+from utils.blog_pipeline import (
+    BlogPipelineError,
+    BlogWorkflow,
+    SshImageStore,
+    _product_series,
+    run_batch,
+)
 from utils.translator import TranslationResult
 
 
@@ -69,6 +75,43 @@ class BlogPipelineTests(unittest.TestCase):
             self.assertEqual(_product_series("purprox_aaveasy_spin_columns"), "AAV")
             self.assertEqual(_product_series("solidex_pan_t_cell_iso_kit"), "Solidex")
 
+    def test_ssh_image_store_uploads_and_verifies_public_url(self):
+        image = Path(self.tmp.name) / "figure.jpg"
+        image.write_bytes(b"figure-bytes")
+
+        class _SourceStore:
+            private_key = "/tmp/key"
+            known_hosts = "/tmp/known_hosts"
+            host = "example.test"
+            user = "uploader"
+            port = 22
+            timeout = 30
+            min_free_bytes = 1
+
+            def _run_ssh(self, command):
+                if command.startswith("df "):
+                    return "1000"
+                if command.startswith("if test -f"):
+                    return "no"
+                return ""
+
+        store = SshImageStore(
+            _SourceStore(),
+            "/srv/uploads/blog-images",
+            "https://example.test/uploads/blog-images",
+        )
+        with patch("utils.blog_pipeline.subprocess.run") as run, patch(
+            "utils.blog_pipeline.verify_public_image",
+            side_effect=lambda url, timeout: url,
+        ) as verify:
+            run.return_value.returncode = 0
+            url = store.upload(str(image))
+
+        self.assertTrue(url.startswith("https://example.test/uploads/blog-images/"))
+        self.assertTrue(url.endswith(".jpg"))
+        self.assertEqual(run.call_args.args[0][0], "scp")
+        verify.assert_called_once_with(url, timeout=30.0)
+
     def test_generation_initializes_multilingual_blog_rows(self):
         zh = self.db.get_article_version(self.job_pk, "zh")
         self.assertEqual(zh.translation_status, "ready")
@@ -118,6 +161,16 @@ class BlogPipelineTests(unittest.TestCase):
         self.assertEqual(again["status"], "already_published")
         self.assertEqual(len(self.client.created), 1)
         self.assertEqual(len(self.client.updated), 0)
+
+    def test_force_publish_updates_existing_article(self):
+        workflow = self._workflow()
+        workflow.publish("paper-1", "zh")
+
+        result = workflow.publish("paper-1", "zh", force=True)
+
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(len(self.client.created), 1)
+        self.assertEqual(len(self.client.updated), 1)
 
     def test_legacy_hub_publication_is_recreated_in_blog_cms(self):
         self.db.upsert_distribution(
@@ -225,7 +278,7 @@ class BlogPipelineTests(unittest.TestCase):
                     self.assertEqual(cover, "https://img.example/article-assets/figure.png")
                     self.assertNotIn(f"[{prefix}:", html)
 
-    def test_missing_blog_figure_is_removed_without_blocking(self):
+    def test_missing_blog_figure_blocks_publish(self):
         class _Store:
             def upload(self, _path):
                 raise AssertionError("missing figures must not be uploaded")
@@ -239,14 +292,11 @@ class BlogPipelineTests(unittest.TestCase):
         with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
             "batch_processor._resolve_figure_path", return_value=None
         ):
-            html, cover = workflow._render_with_images(
-                "# 标题\n\n正文。\n\n[图片:Figure 1 缺失图]",
-                source_job,
-            )
-
-        self.assertNotIn("[图片:", html)
-        self.assertNotIn("缺失图", html)
-        self.assertEqual(cover, "")
+            with self.assertRaisesRegex(BlogPipelineError, "正文图片不可用"):
+                workflow._render_with_images(
+                    "# 标题\n\n正文。\n\n[图片:Figure 1 缺失图]",
+                    source_job,
+                )
 
     def test_unsafe_crop_blocks_publish_instead_of_omitting_figures(self):
         from utils.figure_crop_geometry import UnsafeFigureCrop
@@ -258,7 +308,7 @@ class BlogPipelineTests(unittest.TestCase):
         self.assertEqual(self.client.created, [])
         self.assertEqual(self.client.updated, [])
 
-    def test_blog_figure_upload_failure_is_removed_without_blocking(self):
+    def test_blog_figure_upload_failure_blocks_publish(self):
         image = self.content_dir / "figure.png"
         image.write_bytes(b"not-a-real-image")
 
@@ -275,16 +325,13 @@ class BlogPipelineTests(unittest.TestCase):
         with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
             "batch_processor._resolve_figure_path", return_value=str(image)
         ):
-            html, cover = workflow._render_with_images(
-                "# 标题\n\n[图片:Figure 1 上传失败图]",
-                source_job,
-            )
+            with self.assertRaisesRegex(BlogPipelineError, "正文图片不可用"):
+                workflow._render_with_images(
+                    "# 标题\n\n[图片:Figure 1 上传失败图]",
+                    source_job,
+                )
 
-        self.assertNotIn("[图片:", html)
-        self.assertNotIn("上传失败图", html)
-        self.assertEqual(cover, "")
-
-    def test_blog_figure_extraction_failure_does_not_initialize_image_store(self):
+    def test_blog_figure_extraction_failure_blocks_publish(self):
         workflow = BlogWorkflow(
             self.db,
             blog_client_factory=lambda: self.client,
@@ -297,14 +344,11 @@ class BlogPipelineTests(unittest.TestCase):
             "batch_processor._resolve_job_figures",
             side_effect=RuntimeError("broken PDF"),
         ):
-            html, cover = workflow._render_with_images(
-                "# 标题\n\n[图片:Figure 1 解析失败图]",
-                source_job,
-            )
-
-        self.assertNotIn("[图片:", html)
-        self.assertNotIn("解析失败图", html)
-        self.assertEqual(cover, "")
+            with self.assertRaisesRegex(BlogPipelineError, "正文图片不可用"):
+                workflow._render_with_images(
+                    "# 标题\n\n[图片:Figure 1 解析失败图]",
+                    source_job,
+                )
 
 
 if __name__ == "__main__":

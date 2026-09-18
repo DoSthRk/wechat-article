@@ -8,8 +8,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from urllib import request as urllib_request
 
 import markdown as md_lib
 
@@ -76,6 +78,126 @@ class OssImageStore:
         return f"{self.cdn_base_url}/{key}"
 
 
+def verify_public_image(url: str, timeout: float = 30.0) -> str:
+    """Require an uploaded Blog image to be publicly readable before CMS writes."""
+    request = urllib_request.Request(
+        url,
+        headers={"Range": "bytes=0-1023", "User-Agent": "GeneMedi-Blog-Image-Verify/1.0"},
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            content_type = (response.headers.get_content_type() or "").lower()
+            first = response.read(1024)
+    except Exception as exc:
+        raise BlogPipelineError(f"Blog image is not publicly reachable: {url}: {exc}") from exc
+    if status not in {200, 206} or not content_type.startswith("image/") or not first:
+        raise BlogPipelineError(
+            f"Blog image public response is invalid: HTTP {status}, {content_type or 'missing type'}"
+        )
+    return url
+
+
+class SshImageStore:
+    """Publish content-addressed Blog images beside source PDFs on genemedi.net."""
+
+    def __init__(self, source_store: Any, remote_dir: str, public_base_url: str) -> None:
+        if not re.fullmatch(r"/[A-Za-z0-9._/-]+", remote_dir):
+            raise BlogPipelineError("BLOG_IMAGE_SSH_REMOTE_DIR must be a safe absolute path")
+        if not public_base_url.lower().startswith("https://"):
+            raise BlogPipelineError("BLOG_IMAGE_PUBLIC_BASE_URL must use HTTPS")
+        self.source_store = source_store
+        self.remote_dir = remote_dir.rstrip("/")
+        self.public_base_url = public_base_url.rstrip("/")
+
+    @classmethod
+    def from_env(cls) -> "SshImageStore":
+        from utils.source_pdf_store import SshSourcePdfStore
+
+        source_store = SshSourcePdfStore.from_env()
+        return cls(
+            source_store,
+            os.getenv(
+                "BLOG_IMAGE_SSH_REMOTE_DIR",
+                f"{source_store.remote_dir}/blog-images",
+            ).strip(),
+            os.getenv(
+                "BLOG_IMAGE_PUBLIC_BASE_URL",
+                f"{source_store.public_base_url}/blog-images",
+            ).strip(),
+        )
+
+    def upload(self, local_path: str) -> str:
+        path = Path(local_path)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise BlogPipelineError(f"Figure file is missing or empty: {path}")
+        suffix = path.suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+            raise BlogPipelineError(f"Unsupported Blog image type: {suffix or 'missing'}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        size = path.stat().st_size
+        remote_subdir = f"{self.remote_dir}/{digest[:2]}"
+        remote_path = f"{remote_subdir}/{digest}{suffix}"
+        remote_tmp = f"{remote_path}.part"
+        store = self.source_store
+        try:
+            store._run_ssh(f"mkdir -p {remote_subdir}")
+            available_text = store._run_ssh(
+                f"df -Pk {remote_subdir} | tail -n 1 | awk '{{print $4}}'"
+            )
+            available_bytes = int(available_text.splitlines()[-1]) * 1024
+            if available_bytes < store.min_free_bytes:
+                raise BlogPipelineError(
+                    f"genemedi.net free space is below the safety threshold: "
+                    f"{available_bytes / 1024 ** 3:.1f}GB"
+                )
+            exists = store._run_ssh(
+                f"if test -f {remote_path} && test $(stat -c %s {remote_path}) -eq {size}; "
+                "then echo yes; else echo no; fi"
+            )
+            if exists != "yes":
+                result = subprocess.run(
+                    [
+                        "scp", "-i", store.private_key, "-P", str(store.port),
+                        "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                        "-o", "StrictHostKeyChecking=yes",
+                        "-o", f"UserKnownHostsFile={store.known_hosts}",
+                        "-o", f"ConnectTimeout={store.timeout}", str(path),
+                        f"{store.user}@{store.host}:{remote_tmp}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=max(store.timeout, 120),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "unknown error").strip()
+                    raise BlogPipelineError(f"Blog image SCP returned {result.returncode}: {detail}")
+                store._run_ssh(
+                    f"test $(stat -c %s {remote_tmp}) -eq {size} && "
+                    f"chmod 0644 {remote_tmp} && mv -f {remote_tmp} {remote_path}"
+                )
+        except BlogPipelineError:
+            raise
+        except Exception as exc:
+            raise BlogPipelineError(f"Blog image SSH upload failed for {path.name}: {exc}") from exc
+        return verify_public_image(
+            f"{self.public_base_url}/{digest[:2]}/{digest}{suffix}",
+            timeout=float(store.timeout),
+        )
+
+
+def create_blog_image_store() -> Any:
+    mode = os.getenv("BLOG_IMAGE_STORAGE", "ssh").strip().lower()
+    if mode == "ssh":
+        return SshImageStore.from_env()
+    if mode == "oss":
+        return OssImageStore.from_env()
+    raise BlogPipelineError(f"Unsupported BLOG_IMAGE_STORAGE: {mode}")
+
+
 def _markdown_to_blog_html(markdown_text: str) -> str:
     html = md_lib.markdown(markdown_text, extensions=["tables", "fenced_code", "sane_lists", "nl2br"])
     return _H1_RE.sub("", html, count=1).strip()
@@ -108,7 +230,7 @@ class BlogWorkflow:
         *,
         translator: Callable[[str, str], TranslationResult] = translate_markdown,
         blog_client_factory: Optional[Callable[[], Any]] = None,
-        asset_store_factory: Callable[[], OssImageStore] = OssImageStore.from_env,
+        asset_store_factory: Callable[[], Any] = create_blog_image_store,
         blog_url_verifier: Callable[[str], str] = verify_public_blog_url,
         source_pdf_publisher: Optional[Callable[[Any, int, SourceJob], str]] = None,
     ) -> None:
@@ -170,7 +292,7 @@ class BlogWorkflow:
         self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="pending", publish_error=None)
         return {"job_id": job_id, "lang": lang, "status": "translated", "tokens": result.total_tokens}
 
-    def publish(self, job_id: str, lang: str) -> Dict[str, Any]:
+    def publish(self, job_id: str, lang: str, *, force: bool = False) -> Dict[str, Any]:
         job_pk = self.db.find_job_pk(job_id)
         if job_pk is None:
             raise BlogPipelineError(f"Unknown job: {job_id}")
@@ -184,7 +306,7 @@ class BlogWorkflow:
             raise BlogPipelineError(f"Article is blocked by quality gate: {article.block_reason or 'unknown'}")
         public_url = public_blog_url(job_id, lang)
         existing_url = str(distribution.external_url or "").rstrip("/")
-        if distribution.publish_status == "published" and existing_url == public_url:
+        if distribution.publish_status == "published" and existing_url == public_url and not force:
             return {"job_id": job_id, "lang": lang, "status": "already_published", "url": distribution.external_url}
         legacy_publication = bool(existing_url and existing_url != public_url)
         if lang in BLOG_TARGET_LANGS and version.translation_status != "translated":
@@ -337,12 +459,13 @@ class BlogWorkflow:
             if not cover_url:
                 cover_url = url
         if missing:
-            for description in missing:
-                html = html.replace(f"[图片:{description}]", "", 1)
             logger.warning(
-                "[%s] Blog missing figures removed instead of blocking publication: %s",
+                "[%s] Blog missing figures block publication: %s",
                 source_job.job_id,
                 "; ".join(missing[:5]),
+            )
+            raise BlogPipelineError(
+                "正文图片不可用，已阻止发布：" + "; ".join(missing[:5])
             )
         if not cover_url and store is not None:
             for figure in extracted:
@@ -371,7 +494,11 @@ def run_batch(workflow: BlogWorkflow, selections: Iterable[Dict[str, Any]], acti
             results.append({"ok": False, "job_id": job_id, "lang": lang, "error": "job_id and lang are required"})
             continue
         try:
-            payload = workflow.translate(job_id, lang) if action == "translate" else workflow.publish(job_id, lang)
+            payload = (
+                workflow.translate(job_id, lang)
+                if action == "translate"
+                else workflow.publish(job_id, lang, force=bool(selection.get("force")))
+            )
             results.append({"ok": True, **payload})
         except BlogPipelineError as exc:
             results.append({"ok": False, "job_id": job_id, "lang": lang, "error": str(exc)})
