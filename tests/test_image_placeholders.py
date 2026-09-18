@@ -1,6 +1,10 @@
 import pytest
 
-from utils.image_placeholders import normalize_image_placeholders, validate_image_placeholders
+from utils.image_placeholders import (
+    deduplicate_image_placeholders,
+    normalize_image_placeholders,
+    validate_image_placeholders,
+)
 
 
 def test_normalize_preserves_captions_and_other_markdown():
@@ -23,3 +27,19 @@ def test_changed_figure_sequence_is_rejected(target):
 
 def test_translated_captions_and_localized_prefix_are_accepted():
     validate_image_placeholders("[图片:Figure 1 一]\n[图片:Figure 2 二]", "[画像:Figure 1 first]\n[画像:Figure 2 second]")
+
+
+def test_duplicate_figure_numbers_keep_only_first_placeholder():
+    content = (
+        "[图片:Figure 5 第一处]\n正文\n"
+        "[图片:Figure 5 第二处]\n"
+        "[图片:图 5 第三处]\n"
+        "[图片:Figure 6 唯一占位]"
+    )
+
+    cleaned, removed = deduplicate_image_placeholders(content)
+
+    assert cleaned.count("[图片:") == 2
+    assert "[图片:Figure 5 第一处]" in cleaned
+    assert "[图片:Figure 6 唯一占位]" in cleaned
+    assert removed == ["Figure 5 第二处", "图 5 第三处"]

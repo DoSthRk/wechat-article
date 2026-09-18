@@ -60,6 +60,20 @@ class TestPromptContractB(unittest.TestCase):
         self.assertIn("PDF正文内容ABC", self.msg)
         self.assertIn("标题方向H", self.msg)
 
+    def test_figure_contract_does_not_force_padding(self):
+        self.assertIn("每个 Figure 图号最多一次", self.msg)
+        self.assertIn("全文 0-4 张", self.msg)
+        self.assertIn("不要凑数、重复或虚构", self.msg)
+        self.assertNotIn("全文 3-4 张", self.msg)
+
+    def test_verified_figure_keys_are_injected(self):
+        msg = ArticleAnalyzer._build_user_message(
+            self.job, "PDF正文内容ABC", _template(), _product(),
+            available_figure_keys={("5", False)},
+        )
+        self.assertIn("唯一图号：Figure 5", msg)
+        self.assertIn("每个图号最多一次", msg)
+
 
 class TestBasePromptFiles(unittest.TestCase):
     def test_base_prompt_contract(self):
@@ -68,6 +82,9 @@ class TestBasePromptFiles(unittest.TestCase):
         self.assertIn("解耦", base)            # 产品与正文解耦
         self.assertNotIn("最后一段", base)      # 不再有"结尾点名产品"契约
         self.assertIn("PDF", base)
+        self.assertIn("每个 Figure 图号最多出现一次", base)
+        self.assertIn("全文可放 0-4 张", base)
+        self.assertNotIn("全文 3-4 张", base)
 
     def test_aav_overlay_exists(self):
         overlay = (_PROMPTS / "lines" / "aav.md").read_text(encoding="utf-8")

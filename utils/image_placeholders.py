@@ -16,6 +16,27 @@ def normalize_image_placeholders(content: str) -> str:
     return _MARKER.sub(lambda match: f"[图片:{match.group(1).strip()}]", content)
 
 
+def deduplicate_image_placeholders(content: str) -> tuple[str, list[str]]:
+    """同一 Figure 图号只保留首次占位，返回清理后的正文和被移除的描述。"""
+    from utils.figure_strategy import figure_key_from_description
+
+    normalized = normalize_image_placeholders(content)
+    seen = set()
+    removed: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        description = match.group(1).strip()
+        key = figure_key_from_description(description)
+        if key is None or key not in seen:
+            if key is not None:
+                seen.add(key)
+            return f"[图片:{description}]"
+        removed.append(description)
+        return ""
+
+    return _CANONICAL.sub(replace, normalized), removed
+
+
 def validate_image_placeholders(source: str, translated: str) -> None:
     """翻译不得丢失、增加或调换源稿图片；图注文字允许翻译。"""
     source_descriptions = _CANONICAL.findall(normalize_image_placeholders(source))

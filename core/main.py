@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -26,6 +26,7 @@ from openai import OpenAI
 from utils.job_loader import Job
 from utils.logger import setup_logger
 from utils.pdf_extractor import extract_text
+from utils.figure_strategy import FigureKey, inspect_pdf_figure_signals
 from utils.product_loader import Product, load_product_by_id
 from utils.template_loader import StyleTemplate, load_template_by_id
 
@@ -114,7 +115,9 @@ class ArticleAnalyzer:
         try:
             template = load_template_by_id(self.templates_dir, job.template)
             product = load_product_by_id(self.products_dir, job.product)
-            pdf_text = extract_text(job.pdf, max_pages=self._resolve_max_pages(job))
+            max_pages = self._resolve_max_pages(job)
+            pdf_text = extract_text(job.pdf, max_pages=max_pages)
+            figure_signals = inspect_pdf_figure_signals(job.pdf, max_pages=max_pages)
         except Exception as exc:
             return AnalysisResult(
                 job_id=job.job_id, success=False,
@@ -123,7 +126,12 @@ class ArticleAnalyzer:
             )
 
         system_prompt = self._system_prompt_for(job)
-        user_message = self._build_user_message(job, pdf_text, template, product)
+        user_message = self._build_user_message(
+            job, pdf_text, template, product,
+            available_figure_keys=(
+                None if figure_signals.scan_error else figure_signals.caption_keys
+            ),
+        )
         logger.info(
             "calling LLM model=%s job=%s line=%s pdf=%s tpl=%s product=%s",
             self.model, job.job_id, job.line, Path(job.pdf).name, job.template, job.product,
@@ -176,6 +184,7 @@ class ArticleAnalyzer:
     @staticmethod
     def _build_user_message(
         job: Job, pdf_text: str, template: StyleTemplate, product: Product,
+        available_figure_keys: Optional[Iterable[FigureKey]] = None,
     ) -> str:
         """组装 user message：风格约束 + PDF 原文 + 任务。
 
@@ -205,12 +214,30 @@ class ArticleAnalyzer:
         ]
         if job.title_hint:
             parts.append(f"\n标题方向参考：{job.title_hint}（不必照搬，可改；标题里不要出现产品名）")
+        if available_figure_keys is None:
+            figure_contract = (
+                "- 配图占位符 `[图片:Figure X 描述]` **只能来自 PDF 里的图**；"
+                "每个 Figure 图号最多一次，全文 0-4 张，不足时不要凑数、重复或虚构"
+            )
+        else:
+            figure_keys = sorted(
+                set(available_figure_keys),
+                key=lambda item: (item[1], int(item[0]) if item[0].isdigit() else item[0]),
+            )
+            verified = ", ".join(
+                f"{'Extended Data ' if extended else ''}Figure {label}"
+                for label, extended in figure_keys
+            ) or "无"
+            figure_contract = (
+                f"- PDF 文本层已确认的唯一图号：{verified}。配图占位符只能使用这些图号，"
+                "每个图号最多一次；全文最多 4 张，图不够时不要凑数、重复或虚构"
+            )
         parts.extend([
             "",
             "## 输出契约",
             "- 只输出 markdown 正文，**不要**包在 ```markdown ... ``` 围栏里",
             "- 第一行必须是 `# 标题`",
-            "- 配图占位符 `[图片:Figure X 描述]` **只能来自 PDF 里的图**，全文 3-4 张，描述具体、中文、≤30 字",
+            figure_contract + "；描述具体、中文、≤30 字",
             "- 全文遵守模板的禁用词约束、字数区间、调性关键词",
             "- **全文零产品**（正文和结尾都不出现产品 / 品牌 / 公司 / 链接）",
         ])

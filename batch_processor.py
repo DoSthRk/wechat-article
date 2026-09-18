@@ -46,6 +46,7 @@ from utils.figure_strategy import (
     planned_figure_strategies,
 )
 from utils.health_check import markdown_health_score
+from utils.image_placeholders import deduplicate_image_placeholders
 from utils.job_loader import Job, load_jobs
 from utils.line_loader import LineLoadError, load_line_by_id
 from utils.logger import setup_logger
@@ -232,6 +233,14 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
         logger.error("[%s] generate failed: %s", job.job_id, result.error_message)
         return False
 
+    result.markdown, duplicate_figures = deduplicate_image_placeholders(result.markdown)
+    if duplicate_figures:
+        result.extra["duplicate_figure_placeholders_removed"] = duplicate_figures
+        logger.warning(
+            "[%s] 已移除 %d 个重复 Figure 占位符：%s",
+            job.job_id, len(duplicate_figures), "; ".join(duplicate_figures),
+        )
+
     out_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "article.md").write_text(result.markdown, encoding="utf-8")
@@ -268,6 +277,7 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
             "tonal_score": tonal.score,
             "publish_blocked": publish_blocked,
             "block_reason": block_reason,
+            "duplicate_figure_placeholders_removed": duplicate_figures,
             "generated_at": datetime.utcnow().isoformat(),
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",

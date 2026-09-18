@@ -4,6 +4,7 @@
 """
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from core.main import AnalysisResult
@@ -55,6 +56,22 @@ class TestGenerateQA(unittest.TestCase):
         a = self.db.get_article(self.job_pk)
         self.assertTrue(a.publish_blocked)
         self.assertIn("markdown_unhealthy", a.block_reason or "")
+
+    def test_duplicate_figure_placeholders_are_removed_before_write(self):
+        markdown = (
+            _GOOD
+            + "\n[图片:Figure 5 第一处]\n"
+            + "[图片:Figure 5 第二处]\n"
+            + "[图片:图 5 第三处]\n"
+        )
+
+        self.assertTrue(bp._generate_one(self.db, self.job_pk, self.job, _FakeAnalyzer(markdown)))
+
+        out_dir = Path(bp.ARTICLE_CONTENT_DIR) / self.job.job_id
+        article = (out_dir / "article.md").read_text(encoding="utf-8")
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(article.count("[图片:"), 1)
+        self.assertEqual(len(meta["duplicate_figure_placeholders_removed"]), 2)
 
 
 if __name__ == "__main__":

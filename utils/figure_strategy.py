@@ -107,8 +107,13 @@ def inspect_pdf_figure_signals(pdf_path: str, max_pages: int | None = None) -> F
                         match = _CAPTION_RE.match(stripped)
                         if match:
                             caption_keys.add((match.group(2), bool(_EXTENDED_RE.search(match.group(1)))))
-                        if _DETACHED_LEGEND_CAPTION_RE.match(stripped):
+                        detached = _DETACHED_LEGEND_CAPTION_RE.match(stripped)
+                        if detached:
                             has_legend_section = True
+                            caption_keys.add((
+                                detached.group(2),
+                                bool(_EXTENDED_RE.search(detached.group(1) or "")),
+                            ))
             return FigureSignals(frozenset(caption_keys), has_legend_section, limit)
         finally:
             document.close()

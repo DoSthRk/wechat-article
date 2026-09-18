@@ -36,7 +36,7 @@ _LEGEND_CAP_RE = re.compile(
     r"^(?:\d+\s+)?(Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)\s*[\.\:\|｜：]",
     re.I,
 )
-_NUM_RE = re.compile(r"(?:Extended Data\s+)?Fig(?:ure)?\.?\s*(\d+)", re.I)
+_NUM_RE = re.compile(r"(?:(?:Extended Data\s+)?Fig(?:ure)?\.?|图)\s*(\d+)", re.I)
 _DPI = 170
 _MARGIN = 24
 _MIN_REGION = 120     # 区域最小边长（点）
