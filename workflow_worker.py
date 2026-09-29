@@ -38,7 +38,7 @@ def main() -> int:
                 if args.stage == "translate":
                     workflow.translate(item["job_id"], item["lang"])
                 else:
-                    workflow.publish(item["job_id"], item["lang"])
+                    workflow.publish(item["job_id"], item["lang"], force=bool(item.get("force")))
                 state["completed"] += 1
                 print(f"[workflow] {args.stage} {item['job_id']} {item['lang']} ok", flush=True)
             except BlogPipelineError as exc:

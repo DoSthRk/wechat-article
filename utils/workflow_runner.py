@@ -67,7 +67,10 @@ def _normalize(stage: str, selections: Iterable[Dict[str, Any]]) -> List[Dict[st
         if not job_id or lang not in allowed or key in seen:
             continue
         seen.add(key)
-        normalized.append({"job_id": job_id, "lang": lang})
+        normalized_item = {"job_id": job_id, "lang": lang}
+        if stage == "publish" and item.get("force") is True:
+            normalized_item["force"] = True
+        normalized.append(normalized_item)
     return normalized
 
 

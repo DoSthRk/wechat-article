@@ -36,6 +36,16 @@ class WorkflowRunnerTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertIn("workflow_worker.py", command)
 
+    def test_publish_normalization_preserves_explicit_force(self):
+        items = workflow_runner._normalize("publish", [
+            {"job_id": "paper-1", "lang": "en", "force": True},
+            {"job_id": "paper-2", "lang": "ja", "force": False},
+        ])
+        self.assertEqual(items, [
+            {"job_id": "paper-1", "lang": "en", "force": True},
+            {"job_id": "paper-2", "lang": "ja"},
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
