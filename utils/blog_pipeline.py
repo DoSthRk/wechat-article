@@ -17,9 +17,14 @@ import markdown as md_lib
 
 from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
 from utils.blog_urls import blog_slug, public_blog_url, verify_public_blog_url
+from utils.figure_strategy import figure_key_from_description
 from utils.job_loader import Job as SourceJob
 from utils.logger import setup_logger
-from utils.image_placeholders import normalize_image_placeholders, validate_image_placeholders
+from utils.image_placeholders import (
+    normalize_image_placeholders,
+    unwrap_linked_image_placeholders,
+    validate_image_placeholders,
+)
 from utils.translator import TranslationResult, translate_markdown
 from utils.wechat_html import extract_title_and_digest, find_image_placeholders, replace_image_placeholder
 
@@ -388,15 +393,22 @@ class BlogWorkflow:
         raise BlogPipelineError(f"Unsupported Blog language: {lang}")
 
     def _render_with_images(self, markdown_text: str, source_job: SourceJob) -> Tuple[str, str]:
-        markdown_text = normalize_image_placeholders(markdown_text)
+        markdown_text = unwrap_linked_image_placeholders(
+            normalize_image_placeholders(markdown_text)
+        )
         placeholders = find_image_placeholders(markdown_text)
         html = _markdown_to_blog_html(markdown_text)
         if not placeholders:
             return html, ""
         from batch_processor import _resolve_figure_path, _resolve_job_figures
 
+        required_keys = {
+            key for description in placeholders
+            if (key := figure_key_from_description(description)) is not None
+        }
+
         try:
-            extracted, figures_dir = _resolve_job_figures(source_job)
+            extracted, figures_dir = _resolve_job_figures(source_job, required_keys)
             figures_ready = True
         except Exception as exc:
             from utils.figure_crop_geometry import UnsafeFigureCrop
@@ -423,6 +435,9 @@ class BlogWorkflow:
         cover_url = ""
         missing = []
         for description in placeholders:
+            if f"[图片:{description}]" not in html:
+                missing.append(description)
+                continue
             if not figures_ready or store is None:
                 missing.append(description)
                 continue

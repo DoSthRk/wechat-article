@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 4     # v4: text-anchored stacked publisher headers and tight horizontal bounds
+_CAPTION_VERSION = 5     # v5: right-column and following-page Nature figure captions
 
 
 def caption_enabled() -> bool:
@@ -64,13 +64,24 @@ def _group_lines(page) -> List[dict]:
                    key=lambda w: (float(w["top"]), float(w["x0"])))
     lines: List[dict] = []
     cur: list = []
+
+    def append_line(row: list) -> None:
+        lines.append(_mk_line(row))
+        # In two-column papers a right-column caption can share a baseline with
+        # left-column prose. Preserve that caption as its own line.
+        right = [word for word in row if float(word["x0"]) >= float(page.width) * 0.5]
+        if right:
+            right_line = _mk_line(right)
+            if re.match(r"^(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d+\s*[|｜]", right_line["text"], re.I):
+                lines.append(right_line)
+
     for w in words:
         if cur and float(w["top"]) - float(cur[0]["top"]) > _LINE_TOL:
-            lines.append(_mk_line(cur))
+            append_line(cur)
             cur = []
         cur.append(w)
     if cur:
-        lines.append(_mk_line(cur))
+        append_line(cur)
     return lines
 
 
@@ -142,6 +153,21 @@ def _full_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
     return sanitize_figure_region(clean, figure_crop_words(page), box, page_w, page_h)
 
 
+def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
+    """Accept a graphics-dominant figure page following a bottom-of-page caption."""
+    page_w, page_h = float(page.width), float(page.height)
+    clean = [e for e in _gfx(page) if not is_rule_line(e, page_w, page_h)]
+    if len(clean) < 250:
+        return None
+    box = _union_box(clean)
+    if box is None or box[1] > page_h * 0.35 or box[3] - box[1] < page_h * 0.35:
+        return None
+    x0, top, x1, bottom = sanitize_figure_region(
+        clean, figure_crop_words(page), box, page_w, page_h,
+    )
+    return x0, top, x1, min(page_h * 0.95, bottom + 7)
+
+
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
     """返回 [(num, is_extended, page_idx, (x0,y0,x1,y1)pt, caption_text), ...]，按图号去重取首张。"""
     import pdfplumber
@@ -167,9 +193,18 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                 if not num or key in seen:
                     continue
                 figure_idx = idx
-                box = _box_for_caption(cap["top"], cap["bottom"], gfx,
+                cap_gfx = gfx
+                cap_words = figure_crop_words(page)
+                if float(cap["x0"]) >= page_w * 0.5:
+                    cap_gfx = [e for e in gfx if float(e["x0"]) >= page_w * 0.5 - 10]
+                    cap_words = [w for w in cap_words if float(w["x0"]) >= page_w * 0.5 - 10]
+                box = _box_for_caption(cap["top"], cap["bottom"], cap_gfx,
                                        cap_tops, cap_bottoms, page_w, page_h,
-                                       words=figure_crop_words(page))
+                                       words=cap_words)
+                if box is None and idx + 1 < limit and float(cap["top"]) >= page_h * 0.65:
+                    box = _following_page_figure_box(pdf.pages[idx + 1])
+                    if box is not None:
+                        figure_idx = idx + 1
                 if (
                     box is None
                     and idx > 0

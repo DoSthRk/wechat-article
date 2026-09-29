@@ -8,12 +8,20 @@ _MARKER = re.compile(
     re.IGNORECASE,
 )
 _CANONICAL = re.compile(r"\[图片:([^\[\]\n]+?)\]")
+_LINKED_PLACEHOLDER = re.compile(
+    r"(\[图片:[^\[\]\n]+?\])\([^()\n]*\)"
+)
 _FIGURE = re.compile(r"\b(extended\s+data\s+)?fig(?:ure)?\.?\s*(\d+)\b", re.IGNORECASE)
 
 
 def normalize_image_placeholders(content: str) -> str:
     """只修正标记前缀，保留译文图注及图号。"""
     return _MARKER.sub(lambda match: f"[图片:{match.group(1).strip()}]", content)
+
+
+def unwrap_linked_image_placeholders(content: str) -> str:
+    """把误写成 Markdown 链接的图片占位符还原为独立占位符。"""
+    return _LINKED_PLACEHOLDER.sub(r"\1", content)
 
 
 def deduplicate_image_placeholders(content: str) -> tuple[str, list[str]]:

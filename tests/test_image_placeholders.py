@@ -3,6 +3,7 @@ import pytest
 from utils.image_placeholders import (
     deduplicate_image_placeholders,
     normalize_image_placeholders,
+    unwrap_linked_image_placeholders,
     validate_image_placeholders,
 )
 
@@ -43,3 +44,10 @@ def test_duplicate_figure_numbers_keep_only_first_placeholder():
     assert "[图片:Figure 5 第一处]" in cleaned
     assert "[图片:Figure 6 唯一占位]" in cleaned
     assert removed == ["Figure 5 第二处", "图 5 第三处"]
+
+
+def test_linked_placeholder_is_unwrapped_before_markdown_rendering():
+    content = "[图片:Figure 1 示意图](Figure 1)\n[普通链接](https://example.com)"
+    assert unwrap_linked_image_placeholders(content) == (
+        "[图片:Figure 1 示意图]\n[普通链接](https://example.com)"
+    )

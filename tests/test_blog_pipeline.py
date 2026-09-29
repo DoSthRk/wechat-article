@@ -278,6 +278,43 @@ class BlogPipelineTests(unittest.TestCase):
                     self.assertEqual(cover, "https://img.example/article-assets/figure.png")
                     self.assertNotIn(f"[{prefix}:", html)
 
+    def test_blog_resolves_all_required_figures_before_rendering(self):
+        image = self.content_dir / "figure.png"
+        image.write_bytes(b"figure-bytes")
+
+        class _Store:
+            def upload(self, _path):
+                return "https://img.example/figure.png"
+
+        workflow = BlogWorkflow(self.db, asset_store_factory=lambda: _Store())
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)) as resolve, patch(
+            "batch_processor._resolve_figure_path", return_value=str(image)
+        ):
+            workflow._render_with_images(
+                "# 标题\n\n[图片:Figure 1 一]\n\n[图片:Figure 4 二]", source_job,
+            )
+        resolve.assert_called_once_with(source_job, {("1", False), ("4", False)})
+
+    def test_linked_placeholder_renders_as_image_instead_of_link(self):
+        image = self.content_dir / "figure.png"
+        image.write_bytes(b"figure-bytes")
+
+        class _Store:
+            def upload(self, _path):
+                return "https://img.example/figure.png"
+
+        workflow = BlogWorkflow(self.db, asset_store_factory=lambda: _Store())
+        source_job = type("Job", (), {"job_id": "paper-1"})()
+        with patch("batch_processor._resolve_job_figures", return_value=([], self.content_dir)), patch(
+            "batch_processor._resolve_figure_path", return_value=str(image)
+        ):
+            html, _cover = workflow._render_with_images(
+                "# 标题\n\n[图片:Figure 1 示意图](Figure 1)", source_job,
+            )
+        self.assertIn('<img src="https://img.example/figure.png"', html)
+        self.assertNotIn('href="Figure 1"', html)
+
     def test_missing_blog_figure_blocks_publish(self):
         class _Store:
             def upload(self, _path):

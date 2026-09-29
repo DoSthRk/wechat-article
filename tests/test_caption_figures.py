@@ -122,6 +122,31 @@ class TestCrossPageCaption(unittest.TestCase):
         self.assertEqual(boxes[0][2], 0)
         self.assertEqual(boxes[0][3], (60.0, 55.0, 535.0, 680.0))
 
+    def test_right_column_caption_sharing_a_row_with_prose(self):
+        prose = _words("Previous findings continue", 220)
+        caption = [dict(word, x0=word["x0"] + 300, x1=word["x1"] + 300)
+                   for word in _words("Fig. 1 | Study flow", 220)]
+        page = _FakePage(prose + caption, images=[_el(350, 60, 540, 190)])
+        with patch("pdfplumber.open", return_value=_FakePdf([page])):
+            boxes = cf.find_figure_boxes("paper.pdf")
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][0], "1")
+        self.assertEqual(boxes[0][3], (350.0, 60.0, 540.0, 190.0))
+
+    def test_bottom_caption_uses_graphics_on_following_page(self):
+        caption = _FakePage(_words("Fig. 4 | Immune-cell analysis", 700))
+        following = _FakePage([], images=[
+            _el(60 + (i % 10), 130 + (i % 20), 520, 680)
+            for i in range(250)
+        ])
+        with patch("pdfplumber.open", return_value=_FakePdf([caption, following])):
+            boxes = cf.find_figure_boxes("paper.pdf")
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][0], "4")
+        self.assertEqual(boxes[0][2], 1)
+
 
 class TestEnabled(unittest.TestCase):
     def test_default_on(self):
