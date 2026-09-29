@@ -11,7 +11,6 @@ _CANONICAL = re.compile(r"\[图片:([^\[\]\n]+?)\]")
 _LINKED_PLACEHOLDER = re.compile(
     r"(\[图片:[^\[\]\n]+?\])\([^()\n]*\)"
 )
-_FIGURE = re.compile(r"\b(extended\s+data\s+)?fig(?:ure)?\.?\s*(\d+)\b", re.IGNORECASE)
 
 
 def normalize_image_placeholders(content: str) -> str:
@@ -47,14 +46,14 @@ def deduplicate_image_placeholders(content: str) -> tuple[str, list[str]]:
 
 def validate_image_placeholders(source: str, translated: str) -> None:
     """翻译不得丢失、增加或调换源稿图片；图注文字允许翻译。"""
+    from utils.figure_strategy import figure_key_from_description
+
     source_descriptions = _CANONICAL.findall(normalize_image_placeholders(source))
     target_descriptions = _CANONICAL.findall(normalize_image_placeholders(translated))
     if len(source_descriptions) != len(target_descriptions):
         raise ValueError("image_placeholder_mismatch: 译文图片数量与源稿不一致")
-    source_keys = [_FIGURE.search(description) for description in source_descriptions]
-    target_keys = [_FIGURE.search(description) for description in target_descriptions]
+    source_keys = [figure_key_from_description(description) for description in source_descriptions]
+    target_keys = [figure_key_from_description(description) for description in target_descriptions]
     if source_keys and all(source_keys):
-        def keys(matches):
-            return [(bool(m.group(1)), int(m.group(2))) if m else None for m in matches]
-        if keys(source_keys) != keys(target_keys):
+        if source_keys != target_keys:
             raise ValueError("image_placeholder_mismatch: 译文图号或顺序与源稿不一致")

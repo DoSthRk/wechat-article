@@ -51,3 +51,11 @@ def test_linked_placeholder_is_unwrapped_before_markdown_rendering():
     assert unwrap_linked_image_placeholders(content) == (
         "[图片:Figure 1 示意图]\n[普通链接](https://example.com)"
     )
+
+
+def test_localized_figure_numbers_match_source_and_detect_wrong_order():
+    source = "[图片:Figure 5 第一处]\n[图片:图 6 第二处]"
+    validate_image_placeholders(source, "[画像:図 5 first]\n[이미지:그림 6 second]")
+    validate_image_placeholders(source, "[рисунок:Рисунок 5 first]\n[рисунок:Рис. 6 second]")
+    with pytest.raises(ValueError, match="image_placeholder_mismatch"):
+        validate_image_placeholders(source, "[画像:図 6 first]\n[画像:図 5 second]")

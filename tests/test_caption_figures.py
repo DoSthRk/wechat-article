@@ -134,6 +134,23 @@ class TestCrossPageCaption(unittest.TestCase):
         self.assertEqual(boxes[0][0], "1")
         self.assertEqual(boxes[0][3], (350.0, 60.0, 540.0, 190.0))
 
+    def test_right_column_legend_beside_full_height_left_figure(self):
+        panel_label = _words("A", 100)
+        caption = [dict(word, x0=word["x0"] + 340, x1=word["x1"] + 340)
+                   for word in _words("Figure 4. Activated dendritic cells", 100)]
+        page = _FakePage(panel_label + caption, images=[
+            _el(60 + (i % 8), 110 + (i % 12), 370, 600)
+            for i in range(250)
+        ])
+        with patch("pdfplumber.open", return_value=_FakePdf([page])):
+            boxes = cf.find_figure_boxes("paper.pdf")
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][0], "4")
+        self.assertLess(boxes[0][3][0], 100)
+        self.assertGreater(boxes[0][3][2], 350)
+        self.assertGreater(boxes[0][3][3], 590)
+
     def test_bottom_caption_uses_graphics_on_following_page(self):
         caption = _FakePage(_words("Fig. 4 | Immune-cell analysis", 700))
         following = _FakePage([], images=[

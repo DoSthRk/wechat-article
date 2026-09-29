@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 5     # v5: right-column and following-page Nature figure captions
+_CAPTION_VERSION = 6     # v6: right-column legends beside full-height left-column figures
 
 
 def caption_enabled() -> bool:
@@ -72,7 +72,7 @@ def _group_lines(page) -> List[dict]:
         right = [word for word in row if float(word["x0"]) >= float(page.width) * 0.5]
         if right:
             right_line = _mk_line(right)
-            if re.match(r"^(?:extended\s+data\s+)?fig(?:ure)?\.?\s*\d+\s*[|｜]", right_line["text"], re.I):
+            if _CAPTION_RE.match(right_line["text"]):
                 lines.append(right_line)
 
     for w in words:
@@ -168,6 +168,26 @@ def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, floa
     return x0, top, x1, min(page_h * 0.95, bottom + 7)
 
 
+def _left_figure_for_right_caption(page, cap: dict) -> Optional[Tuple[float, float, float, float]]:
+    """Recover a figure occupying the left column beside its right-column legend."""
+    page_w, page_h = float(page.width), float(page.height)
+    if float(cap["x0"]) < page_w * 0.55 or float(cap["top"]) > page_h * 0.25:
+        return None
+    clean = [
+        e for e in _gfx(page)
+        if not is_rule_line(e, page_w, page_h)
+        and float(e["x1"]) < float(cap["x0"]) - 8
+        and float(cap["top"]) < _cy(e) < page_h * 0.80
+    ]
+    if len(clean) < 250:
+        return None
+    box = _union_box(clean)
+    if box is None or box[3] - box[1] < page_h * 0.35:
+        return None
+    words = [w for w in figure_crop_words(page) if float(w["x1"]) < float(cap["x0"]) - 8]
+    return sanitize_figure_region(clean, words, box, page_w, page_h)
+
+
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
     """返回 [(num, is_extended, page_idx, (x0,y0,x1,y1)pt, caption_text), ...]，按图号去重取首张。"""
     import pdfplumber
@@ -198,9 +218,11 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                 if float(cap["x0"]) >= page_w * 0.5:
                     cap_gfx = [e for e in gfx if float(e["x0"]) >= page_w * 0.5 - 10]
                     cap_words = [w for w in cap_words if float(w["x0"]) >= page_w * 0.5 - 10]
-                box = _box_for_caption(cap["top"], cap["bottom"], cap_gfx,
-                                       cap_tops, cap_bottoms, page_w, page_h,
-                                       words=cap_words)
+                box = _left_figure_for_right_caption(page, cap)
+                if box is None:
+                    box = _box_for_caption(cap["top"], cap["bottom"], cap_gfx,
+                                           cap_tops, cap_bottoms, page_w, page_h,
+                                           words=cap_words)
                 if box is None and idx + 1 < limit and float(cap["top"]) >= page_h * 0.65:
                     box = _following_page_figure_box(pdf.pages[idx + 1])
                     if box is not None:
