@@ -5,12 +5,24 @@
 
 ## Prompt 文件清单
 
-- `prompts/base.system.md` —— 共通基底（方案 B 契约：正文零产品、配图来自 PDF、结尾一句点名固定产品）
+- `prompts/base.system.md` —— 共通基底（全文零产品、配图来自 PDF、公众号与 Blog 共用的 SEO 内容组织）
 - `prompts/lines/aav.md` —— AAV 工艺智库线写作侧重
 - `prompts/lines/solidex.md` —— Solidex 肿瘤免疫线写作侧重
+- `prompts/translation.system.md` —— 英 / 日 / 韩 / 俄翻译契约及搜索友好的本地化表达
 
 > 注：各 line 绑定的**风格模板**（`inputs/style_templates/*.yaml`）和**产品**（`inputs/products/*.yaml`）
 > 是用户数据、被 gitignore，不在此版本管理范围内；它们的字数 / 禁用词等约束按篇维护。
+
+---
+
+## 2026-09-29 · 公众号与多语言 Blog 的内容 SEO
+
+- 共通提示词按论文真实主题组织标题、首段摘要、具体章节、术语和可追溯的研究证据；图注兼作描述准确的图片 alt 文本。
+- AAV / Solidex 内容线增加按实际研究选择主题词的要求，避免强行覆盖无关工艺或适应证。
+- 翻译提示词允许自然的目标语言表达，保留相同搜索主题、研究范围、科学限定和 Markdown / 图片契约；中文标题字数限制不套用到外语。
+- 生成任务明确共用公众号与 Blog，并禁止额外输出 SEO 元数据；原有正文格式、模板篇幅、零产品和真实配图要求继续生效。
+- 本次仅调整新生成内容及后续翻译的提示词，不自动重写历史稿件；网站 meta、canonical、hreflang 和结构化数据仍由发布端管理。
+- 依据 Google Search Central 的 [有用内容指南](https://developers.google.com/search/docs/fundamentals/creating-helpful-content)、[标题建议](https://developers.google.com/search/docs/appearance/title-link) 和 [图片建议](https://developers.google.com/search/docs/appearance/google-images)，不设关键词密度，不强制增加 FAQ 或无来源内容。
 
 ---
 
