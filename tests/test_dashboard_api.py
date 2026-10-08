@@ -50,6 +50,35 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["status"], "ok")
 
+    def test_notice_retry_enforces_business_line_and_kicks_only_success(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+                "utils.blog_notifications.retry", return_value={"ok": True}) as retry, patch(
+                "utils.auto_blog.kick") as kick:
+            denied = self.client.post("/api/blog-notifications/retry", json={"job_id": "solidex-job"},
+                                      headers={"X-GM-LAB-Username": "hqq"})
+            self.assertEqual(denied.status_code, 403)
+            retry.assert_not_called()
+            kick.assert_not_called()
+            allowed = self.client.post("/api/blog-notifications/retry", json={"job_id": "aav-job"},
+                                       headers={"X-GM-LAB-Username": "hqq"})
+        self.assertEqual(allowed.status_code, 202)
+        retry.assert_called_once_with(self.db, "aav-job")
+        kick.assert_called_once_with(self.db)
+
+    def test_automatic_workflow_status_is_line_scoped(self):
+        from db.database import AutoBlogTask
+        with self.db.get_session() as session:
+            for job_id, owner_line in (("aav-paper", "aav"), ("private-paper", "solidex")):
+                session.add(AutoBlogTask(job_pk=self.db.find_job_pk("job1"), job_id=job_id,
+                    lang="en", source_sha256=job_id, owner_line=owner_line, error=f"{job_id} error"))
+            session.commit()
+        with patch("utils.auto_blog.kick") as kick:
+            response = self.client.get("/api/workflow/status", headers={"X-GM-LAB-Username": "hqq"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["auto"]["total"], 1)
+        self.assertNotIn("private-paper", response.get_data(as_text=True))
+        kick.assert_called_once()
+
     def test_wechat_preview_reads_actual_draft_without_local_markdown(self):
         with patch("app.WeChatClient") as factory:
             factory.return_value.get_draft.return_value = {"news_item": [{

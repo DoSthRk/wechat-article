@@ -125,6 +125,9 @@ function updateSelection() {
 }
 
 function languageProgress(file, lang) {
+  const automatic = workflowState.auto?.items?.findLast((item) => item.job_id === file.job_id && item.lang === lang);
+  if (automatic?.status === "queued") return { state: "running", text: "自动发布排队中", action: "" };
+  if (automatic?.status === "running") return { state: "running", text: automatic.phase === "publish" ? "自动发布中" : "自动翻译中", action: "" };
   const translating = workflowState.translate;
   if (translating?.status === "running" && translating.current?.job_id === file.job_id && translating.current?.lang === lang) {
     return { state: "running", text: "翻译中", action: "" };
@@ -136,6 +139,7 @@ function languageProgress(file, lang) {
   const translated = translationState(file, lang);
   const published = cmsState(file, lang);
   if (published === "done") return { state: "done", text: "已发布", action: "" };
+  if (automatic?.status === "failed") return { state: "failed", text: "自动发布失败", action: translated === "done" ? "publish" : "translate" };
   if (published === "running") return { state: "running", text: "发布中", action: "" };
   if (translated === "running") return { state: "running", text: "翻译中", action: "" };
   if (translated === "done") return { state: published === "failed" ? "failed" : "ready", text: published === "failed" ? "发布失败" : "已翻译", action: "publish" };
@@ -151,7 +155,7 @@ function renderLanguagePanel(file) {
     else expandedLanguageJobs.delete(file.job_id);
   });
   const summary = el("summary");
-  summary.innerHTML = `<span>多语言发布 <em>可选</em></span><small>${publishedCount}/4 已发布</small>`;
+  summary.innerHTML = `<span>多语言发布 <em>草稿成功后自动执行</em></span><small>${publishedCount}/4 已发布</small>`;
   details.appendChild(summary);
   const list = el("div", "language-list");
   for (const lang of TRANSLATION_LANGS) {
@@ -176,6 +180,31 @@ function renderLanguagePanel(file) {
     list.appendChild(row);
   }
   details.appendChild(list);
+  const notices = new Map((workflowState.auto?.notifications || []).filter((item) => item.job_id === file.job_id).map((item) => [item.recipient_key || "primary", item]));
+  for (const notice of notices.values()) {
+    const labels = {waiting: "等待完整发布", sending: "发送中", retry: "重试中", sent: "已通知", failed: "通知失败", uncertain: "发送结果待确认", cancelled: "已取消"};
+    const row = el("div", "language-row");
+    const who = notice.recipient_key === "self" ? "默认收件人" : "张晓妍";
+    row.appendChild(el("span", "", `飞书（${who}）：${labels[notice.status] || notice.status}`));
+    if (notice.error) row.title = notice.error;
+    if (notice.status === "failed") {
+      const button = el("button", "text-action", "重试通知");
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/blog-notifications/retry", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({job_id: file.job_id})});
+          const data = await response.json();
+          if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          poll();
+        } catch (error) {
+          setStatus(`通知重试失败：${error.message}`, "failed");
+          button.disabled = false;
+        }
+      });
+      row.appendChild(button);
+    }
+    details.appendChild(row);
+  }
   return details;
 }
 
@@ -397,7 +426,7 @@ async function runWorkflow(stage, selections) {
 }
 
 function workflowIsActive(states = workflowState) {
-  return states.translate?.status === "running" || states.publish?.status === "running";
+  return states.translate?.status === "running" || states.publish?.status === "running" || states.auto?.status === "running";
 }
 
 async function poll(forceSources = false) {
@@ -430,7 +459,7 @@ async function loadPreflight() {
   try {
     preflight = await fetch("/api/workflow/preflight").then((response) => response.json());
   } catch (_error) {
-    /* 多语言是可选能力，预检失败不影响中文主流程。 */
+    /* 自动多语言的预检失败不影响公众号草稿流程。 */
   }
 }
 

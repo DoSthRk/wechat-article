@@ -274,7 +274,30 @@ def create_app(testing: bool = False) -> Flask:
                     current_job = str((state.get("current") or {}).get("job_id") or "")
                     if not current_job or _job_line_index().get(current_job) not in allowed:
                         state.update(current=None, errors=[])
+        from utils import auto_blog
+        try:
+            auto_blog.kick()
+        except Exception:
+            app.logger.exception("Automatic Blog worker launch failed; queue retained")
+        states["auto"] = auto_blog.status(allowed=allowed)
         return jsonify(states)
+
+    @app.post("/api/blog-notifications/retry")
+    def api_blog_notification_retry():
+        from utils import auto_blog, blog_notifications
+        data = request.get_json(silent=True) or {}
+        job_id = str(data.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        _require_job(job_id)
+        db = get_db_manager()
+        result = blog_notifications.retry(db, job_id)
+        if result.get("ok"):
+            try:
+                auto_blog.kick(db)
+            except Exception:
+                app.logger.exception("Notification retry worker launch failed; queue retained")
+        return jsonify(result), (202 if result.get("ok") else 409)
 
     @app.post("/api/source-pdf/provision")
     def api_source_pdf_provision():
@@ -518,6 +541,12 @@ def create_app(testing: bool = False) -> Flask:
         content = md_lib.markdown(md_text, extensions=["tables", "fenced_code", "sane_lists"])
         return render_template("markdown_preview.html", job_id=job_id, content=content, wechat=wechat)
 
+    if not testing:
+        from utils import auto_blog
+        try:
+            auto_blog.kick()
+        except Exception:
+            app.logger.exception("Automatic Blog recovery failed; queue retained")
     return app
 
 

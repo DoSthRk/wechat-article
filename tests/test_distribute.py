@@ -96,8 +96,11 @@ class TestDistributeOne(unittest.TestCase):
             ),
         )
         self._source_pdf_guide.start()
+        self._auto_blog = patch.object(bp, "enqueue_auto_blog", return_value=4)
+        self.auto_blog_mock = self._auto_blog.start()
 
     def tearDown(self):
+        self._auto_blog.stop()
         self._source_pdf_guide.stop()
         self._source_pdf.stop()
         self._blog_url.stop()
@@ -124,6 +127,36 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(len(fake.created), 1)
         self.assertEqual(len(fake.updated), 1)
         self.assertEqual(fake.updated[0][0], "media-NEW")
+        self.assertEqual(self.auto_blog_mock.call_count, 2)
+        self.auto_blog_mock.assert_called_with(self.db, self.job_pk, "j1", owner_line="")
+
+    def test_async_launch_failure_keeps_successful_draft(self):
+        self.auto_blog_mock.side_effect = OSError("worker unavailable")
+        fake = FakeWeChat()
+        self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        self.assertEqual(self.db.get_job(self.job_pk).status, JobStatus.PUBLISHED)
+        self.assertEqual(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh").wechat_media_id, "media-NEW")
+
+    def test_wechat_failure_does_not_enqueue(self):
+        fake = FakeWeChat()
+        with patch.object(fake, "create_draft", side_effect=WeChatAPIError("draft failed")):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        self.auto_blog_mock.assert_not_called()
+
+    def test_draft_success_persists_async_outbox_without_inline_translation(self):
+        from utils import auto_blog
+        from db.database import AutoBlogTask
+        self.db.ensure_blog_versions(self.job_pk, self.db.get_article(self.job_pk).content_dir)
+        self.auto_blog_mock.side_effect = auto_blog.enqueue
+        fake = FakeWeChat()
+        with patch.object(auto_blog, "kick") as kick, patch.object(auto_blog.BlogWorkflow, "translate") as translate:
+            self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        with self.db.get_session() as session:
+            rows = session.query(AutoBlogTask).all()
+            self.assertEqual(len(rows), 4)
+            self.assertTrue(all(r.status == "queued" for r in rows))
+        kick.assert_called_once_with(self.db)
+        translate.assert_not_called()
 
     def test_stale_media_id_recreates(self):
         # 已有 media_id 的 distribution，但微信侧草稿已被删 → update 报 40007 → 回退新建
@@ -176,6 +209,7 @@ class TestDistributeOne(unittest.TestCase):
         self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         self.assertEqual(len(fake.created), 0)
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
+        self.auto_blog_mock.assert_not_called()
 
     def test_missing_required_figure_does_not_block_draft_write(self):
         content_dir = Path(self.db.get_article(self.job_pk).content_dir)
@@ -214,6 +248,7 @@ class TestDistributeOne(unittest.TestCase):
         job_row = self.db.get_job(self.job_pk)
         self.assertEqual(job_row.status, JobStatus.FAILED)
         self.assertIn("原文 PDF 上传失败", job_row.error_message or "")
+        self.auto_blog_mock.assert_not_called()
 
     def test_missing_blog_blocks_before_pdf_or_draft_write(self):
         fake = FakeWeChat()

@@ -52,5 +52,16 @@ vm.runInContext(`
   assert.equal(requiresCoreAction(failed), true);
   generationState = {current: {jobs: ["active"]}};
   assert.equal(coreStatus({...uploaded, job_id: "active"})[0], "running");
+  workflowState = {auto: {status: "running", items: [
+    {job_id: "active", lang: "en", status: "queued"},
+    {job_id: "active", lang: "ja", status: "running", phase: "publish"},
+  ]}};
+  assert.equal(workflowIsActive(), true);
+  assert.equal(languageProgress({job_id: "active"}, "en").text, "自动发布排队中");
+  assert.equal(languageProgress({job_id: "active"}, "ja").text, "自动发布中");
+  workflowState = {auto: {status: "idle", items: [
+    {job_id: "active", lang: "en", status: "failed"},
+  ]}};
+  assert.equal(languageProgress({job_id: "active"}, "en").action, "translate");
 `, context);
 '''], cwd=root, check=True, text=True, timeout=15)

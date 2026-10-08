@@ -2,12 +2,12 @@
 
 阶段（``--stage``）：
     generate  ：jobs.yaml → 逐 job 生成基准正文（方案 B）→ 落盘 + 写 articles 表
-    distribute：逐 job 取基准正文 → 投放到平台 distribution（当前只接公众号 wechat；
-                blog / linkedin 是 Phase 4）。account 从 line 配置的 wechat_account 取。
-    all       ：先 generate，再发布中文 Blog，最后创建公众号草稿（默认）
+    distribute：发布中文 Blog → 上传公众号草稿 → 入队异步多语言 Blog。
+                account 从 line 配置的 wechat_account 取。
+    all       ：先 generate，再执行 distribute（默认）；不会群发公众号。
 
 内容与投放解耦：一篇基准文章（article）可扇出到多个 distribution（platform × account × lang）。
-当前 distribute 只实现公众号单平台；产品模块组装（Phase 3）、多平台（Phase 4）后续接入。
+多语言入队仅由成功的草稿创建/更新触发，不回扫历史草稿。
 
 用法：
     python batch_processor.py                       # generate + distribute
@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
+from utils.auto_blog import enqueue as enqueue_auto_blog
 from utils.blog_urls import BlogUrlError, resolve_published_blog_url
 from utils.figure_strategy import (
     FigureKey,
@@ -448,6 +449,12 @@ def _distribute_one(
         assembled_dir=article.content_dir,
     )
     db.update_job_status(job_pk, JobStatus.PUBLISHED)
+    try:
+        count = enqueue_auto_blog(db, job_pk, job.job_id, owner_line=job.line or "")
+        logger.info("[%s] 公众号草稿成功，多语言后台队列新增 %s 个版本", job.job_id, count)
+    except Exception:
+        # A Blog failure must not undo a valid WeChat draft or its success state.
+        logger.exception("[%s] 多语言后台队列启动失败；公众号草稿已保留，可手动重试", job.job_id)
     return True
 
 

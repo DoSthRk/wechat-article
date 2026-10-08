@@ -112,6 +112,33 @@ A：DB 里 `article_drafts.wechat_media_id` 非空时走 `draft/update`（更新
 
 ### 原文 PDF 与“阅读原文”
 
+成功创建或更新公众号草稿后，默认进入异步多语言节点：依次自动翻译并公开发布
+英文、日文、韩文、俄文 Blog。草稿上传不等待这个节点，也不会自动群发公众号。
+后台队列存入 `auto_blog_tasks`，服务重启会恢复已入队但未完成的任务；不回扫历史草稿。
+已有翻译会复用，已发布版本不会重复发布；每个语言独立失败，仍保留图片和质量校验。
+看板显示排队/翻译/发布状态，失败可用原有翻译和发布按钮重试。
+`AUTO_BLOG_ENABLED=false` 可暂停自动处理；`AUTO_BLOG_EXCLUDED_JOBS` 为暂缓名单，
+默认保留 `免疫客文章-4-3`、`免疫客文章-4-4`。人工发布入口不受自动暂缓名单影响。
+
+自动节点还会为每篇文章、每位收件人建立一条飞书通知：中文及四个外语版本均确认发布后，
+机器人私信张晓妍“Blog 已发布”，附上这篇文章的五个实际发布链接。
+配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 及已确认的
+`FEISHU_BLOG_RECIPIENT_OPEN_ID`（推荐使用已验证的同一应用 open_id）。
+也可配置 `FEISHU_BLOG_RECIPIENT_EMAIL`，但必须是飞书通讯录 `email`，
+不能把 `enterprise_email` 当作已匹配的收件人；姓名不会自动解析。
+`FEISHU_BLOG_COPY_RECIPIENT_EMAIL`（或 `_OPEN_ID`）可增加本人作为收件人，
+每人分别私信、独立保存回执和重试；一人失败不会重发另一人已收到的消息。
+本人专属项未填时可直接复用同一飞书应用的 `FEISHU_RECIPIENT_EDM_OPS_OPEN_ID`，
+即现有通知服务的默认个人收件人 `edm.ops`。
+`blog_notifications` 保存通知状态及飞书消息回执，重复提交草稿不重复通知，
+通知失败不回滚 Blog。临时故障最多自动重试五次，使用固定 UUID；中断恢复若已超过
+55 分钟安全去重窗口，会标记结果待确认而非盲目重发。配置/权限错误修正后可在看板
+点击“重试通知”；结果待确认的消息先人工核对，不提供盲目重发入口。
+
+线上 `gm-blog.service` 保留原有私有 `EnvironmentFile`。若部署账号不能编辑它，
+可将飞书补充配置放在独立的受限文件，发布目录 `.env` 链接到该文件；
+`python-dotenv` 只补充未设置的环境变量，不覆盖服务已有配置。凭据不入 Git。
+
 中文 Blog 发布前会默认发布任务对应的原文 PDF，并把已通过公网校验的 HTTPS 地址写入
 CMS `field_source_pdf_url`。默认 `SOURCE_PDF_STORAGE=ssh`，以内容哈希命名上传到
 `genemedi.net`；容量不足时可切换为 `oss`。公众号草稿的 `content_source_url` 指向

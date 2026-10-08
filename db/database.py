@@ -291,6 +291,51 @@ class Distribution(Base):
         }
 
 
+class AutoBlogTask(Base):
+    """Durable outbox created only after a successful WeChat draft upload."""
+    __tablename__ = "auto_blog_tasks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_pk = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String(128), nullable=False)
+    lang = Column(String(16), nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    owner_line = Column(String(64), default="", nullable=False)
+    status = Column(String(16), default="queued", nullable=False)
+    phase = Column(String(16), default="", nullable=False)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("job_pk", "lang", "source_sha256", name="uq_auto_blog_revision"),
+        Index("ix_auto_blog_status", "status"),
+    )
+
+
+class BlogNotification(Base):
+    """One receipt per article/source revision/recipient; no historical scan."""
+    __tablename__ = "blog_notifications"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_pk = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String(128), nullable=False)
+    source_sha256 = Column(String(64), nullable=False)
+    recipient_key = Column(String(16), default="primary", nullable=False)
+    owner_line = Column(String(64), default="", nullable=False)
+    status = Column(String(16), default="waiting", nullable=False)
+    delivery_uuid = Column(String(64), nullable=False)
+    recipient_id = Column(String(255))
+    recipient_type = Column(String(16))
+    message_id = Column(String(128))
+    attempts = Column(Integer, default=0, nullable=False)
+    first_attempt_at = Column(DateTime)
+    retry_at = Column(DateTime)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("job_pk", "source_sha256", "recipient_key", name="uq_blog_notice_recipient"),
+    )
+
+
 # ----------------- Manager -----------------
 
 class DatabaseManager:

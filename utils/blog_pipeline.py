@@ -1,7 +1,7 @@
 """Independent translation and GeneMedi Blog publication workflow.
 
-Generation creates queue rows only. Translation and Blog publication are
-explicit admin actions and never run from the PDF/WeChat batch processor.
+Generation creates version rows. Successful WeChat draft uploads enqueue
+asynchronous translation/publication; manual actions remain available.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import markdown as md_lib
 
 from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
 from utils.blog_urls import blog_slug, public_blog_url, verify_public_blog_url
+from utils.blog_task_lock import serialized_version
 from utils.figure_strategy import figure_key_from_description
 from utils.job_loader import Job as SourceJob
 from utils.logger import setup_logger
@@ -260,10 +261,11 @@ class BlogWorkflow:
         except Exception as exc:
             raise BlogPipelineError(f"Blog client configuration failed: {exc}") from exc
 
-    def translate(self, job_id: str, lang: str = "en") -> Dict[str, Any]:
+    @serialized_version
+    def translate(self, job_id: str, lang: str = "en", *, job_pk: Optional[int] = None) -> Dict[str, Any]:
         if lang not in BLOG_TARGET_LANGS:
             raise BlogPipelineError(f"Unsupported translation language: {lang}")
-        job_pk = self.db.find_job_pk(job_id)
+        job_pk = self._resolve_job_pk(job_id, job_pk)
         if job_pk is None:
             raise BlogPipelineError(f"Unknown job: {job_id}")
         source = self.db.get_article_version(job_pk, BLOG_SOURCE_LANG)
@@ -297,8 +299,17 @@ class BlogWorkflow:
         self.db.upsert_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang, publish_status="pending", publish_error=None)
         return {"job_id": job_id, "lang": lang, "status": "translated", "tokens": result.total_tokens}
 
-    def publish(self, job_id: str, lang: str, *, force: bool = False) -> Dict[str, Any]:
-        job_pk = self.db.find_job_pk(job_id)
+    def _resolve_job_pk(self, job_id: str, job_pk: Optional[int]) -> Optional[int]:
+        if job_pk is None:
+            return self.db.find_job_pk(job_id)
+        job = self.db.get_job(job_pk)
+        if job is None or job.job_id != job_id:
+            raise BlogPipelineError(f"Unknown job revision: {job_id} / {job_pk}")
+        return job_pk
+
+    @serialized_version
+    def publish(self, job_id: str, lang: str, *, force: bool = False, job_pk: Optional[int] = None) -> Dict[str, Any]:
+        job_pk = self._resolve_job_pk(job_id, job_pk)
         if job_pk is None:
             raise BlogPipelineError(f"Unknown job: {job_id}")
         article = self.db.get_article(job_pk)
