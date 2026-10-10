@@ -50,6 +50,24 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["status"], "ok")
 
+    def test_image_repair_checks_business_line_before_writing(self):
+        with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
+                "utils.wechat_draft_repair.repair_images", return_value={"ok": True, "verified": True}) as repair:
+            denied = self.client.post("/api/wechat/repair-images", json={"job_id": "solidex-job"},
+                                      headers={"X-GM-LAB-Username": "hqq"})
+            self.assertEqual(denied.status_code, 403)
+            repair.assert_not_called()
+            allowed = self.client.post("/api/wechat/repair-images", json={"job_id": "aav-job"},
+                                       headers={"X-GM-LAB-Username": "hqq"})
+        self.assertEqual(allowed.status_code, 200)
+        repair.assert_called_once_with(self.db, "aav-job")
+
+    def test_image_repair_does_not_expose_remote_credentials(self):
+        with patch("utils.wechat_draft_repair.repair_images", side_effect=RuntimeError("secret-token")):
+            response = self.client.post("/api/wechat/repair-images", json={"job_id": "job1"})
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("secret-token", response.get_data(as_text=True))
+
     def test_notice_retry_enforces_business_line_and_kicks_only_success(self):
         with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
                 "utils.blog_notifications.retry", return_value={"ok": True}) as retry, patch(

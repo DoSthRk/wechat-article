@@ -88,6 +88,25 @@ class TestPlaceholderAndSafety(unittest.TestCase):
         self.assertIn('<img src="https://mmbiz.qpic.cn/p.png"', out)
         self.assertNotIn("[图片:a]", out)
 
+    def test_linked_markers_remain_replaceable_in_source_order(self):
+        descriptions = [f"Figure {number} 结果" for number in (1, 5, 3, 6)]
+        source = "\n\n".join(f"[图片:{desc}](Figure {desc.split()[1]})" for desc in descriptions)
+        html = markdown_to_wechat_html(source)
+        self.assertEqual(find_image_placeholders(html), descriptions)
+        self.assertNotIn('<a href="Figure', html)
+        for index, desc in enumerate(descriptions):
+            html = replace_image_placeholder(html, desc, f"https://mmbiz.qpic.cn/{index}.png")
+        self.assertEqual(html.count('<img '), 4)
+        self.assertEqual(find_image_placeholders(html), [])
+
+    def test_full_width_and_localized_markers_are_normalized(self):
+        html = markdown_to_wechat_html("[图片：Figure 1 结果](Figure 1)\n\n[Image:Figure 2 result]")
+        self.assertEqual(find_image_placeholders(html), ["Figure 1 结果", "Figure 2 result"])
+
+    def test_normal_markdown_links_are_not_unwrapped(self):
+        html = markdown_to_wechat_html("[研究原文](https://example.com/paper)")
+        self.assertIn('<a href="https://example.com/paper">研究原文</a>', html)
+
     def test_strips_dangerous_tags(self):
         html = markdown_to_wechat_html("# T\n\n<script>alert(1)</script>\n\n正文段落内容。")
         self.assertNotIn("<script", html)

@@ -150,6 +150,10 @@ Blog 任一质量门失败，都会在公众号草稿发生任何创建或覆盖
 上传地址按公众号账号和图片 SHA-256 缓存在 `runtime/wechat_template_asset_urls.json`，
 同一版本不会在批量任务中重复上传；引导图失败同样会在草稿写入前终止投放。
 
+公众号渲染与 Blog 共用图片标记规范化，兼容误写成 Markdown 链接的占位符。
+历史草稿需明确调用 `POST /api/wechat/repair-images`（`job_id`）补图；只替换与源稿
+唯一对应的图片段落，保留现有正文及字段，先备份再更新并回读，不重建草稿或触发 Blog 发布。
+
 **Q：thumb_media_id 必须自己手动准备一个？**
 A：Phase 0 是。Phase 1 加图片管线后会自动从 image_pool 选一张当封面，自动上传。
 

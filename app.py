@@ -336,6 +336,22 @@ def create_app(testing: bool = False) -> Flask:
             "sha256": published.sha256, "size": published.size,
         })
 
+    @app.post("/api/wechat/repair-images")
+    def api_wechat_repair_images():
+        from utils.wechat_draft_repair import DraftImageRepairError, repair_images
+        data = request.get_json(silent=True) or {}
+        job_id = str(data.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "缺少 job_id"}), 400
+        _require_job(job_id)
+        try:
+            return jsonify(repair_images(get_db_manager(), job_id))
+        except DraftImageRepairError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except Exception:
+            # Remote exceptions may contain credentials; never echo them.
+            return jsonify({"ok": False, "error": "图片修复未确认，请先核对现有草稿和备份，不要盲目重试"}), 502
+
     @app.post("/api/source-pdf/apply-to-draft")
     def api_source_pdf_apply_to_draft():
         """Point 阅读原文 to the verified Chinese Blog and keep the footer guide."""

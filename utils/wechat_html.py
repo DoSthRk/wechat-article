@@ -19,6 +19,7 @@ from typing import List
 
 import markdown as md_lib
 
+from utils.image_placeholders import normalize_image_placeholders, unwrap_linked_image_placeholders
 from utils.logger import setup_logger
 
 logger = setup_logger("wechat_html")
@@ -109,6 +110,10 @@ def markdown_to_wechat_html(markdown_text: str) -> str:
     """主入口：markdown → 公众号可用 HTML，保留图片占位符。"""
     if not markdown_text or not markdown_text.strip():
         return ""
+
+    # Match the Blog renderer: linked/localized markers must stay markers,
+    # otherwise Markdown consumes their brackets before figure replacement.
+    markdown_text = unwrap_linked_image_placeholders(normalize_image_placeholders(markdown_text))
 
     # 1. 基础渲染（开启表格、围栏代码、自动链接等常用扩展）
     html = md_lib.markdown(
