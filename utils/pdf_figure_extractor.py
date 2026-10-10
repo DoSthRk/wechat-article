@@ -48,7 +48,7 @@ _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
 _DETACHED_FIGPAGE_MAX_WORDS = 1000  # 文末整页科研图可含大量坐标轴/图例文字
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
 _CONTENT_PAD = 6          # 文本/图形并集外留白，避免坐标轴文字贴边
-_CROP_VERSION = 3         # v3: text-anchored publisher header cleanup
+_CROP_VERSION = 4         # v4: repeated JEM vector-logo header evidence
 
 
 @dataclass

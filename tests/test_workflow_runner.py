@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -45,6 +46,32 @@ class WorkflowRunnerTests(unittest.TestCase):
             {"job_id": "paper-1", "lang": "en", "force": True},
             {"job_id": "paper-2", "lang": "ja"},
         ])
+
+    def test_image_only_repair_flag_is_preserved_only_for_publish(self):
+        item = {'job_id': 'paper', 'lang': 'en', 'repair_images': True}
+        self.assertEqual(workflow_runner._normalize('publish', [item]), [item])
+        self.assertEqual(workflow_runner._normalize('translate', [item]), [{'job_id': 'paper', 'lang': 'en'}])
+
+    def test_worker_repairs_only_selected_language_without_republishing_or_translating(self):
+        import workflow_worker
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            selections, state, lock = [root / name for name in ('selections.json', 'state.json', 'publish.lock')]
+            selections.write_text(json.dumps([{'job_id': 'paper', 'lang': 'zh', 'repair_images': True}]))
+            state.write_text(json.dumps({'completed': 0, 'failed': 0, 'errors': []}))
+            lock.touch()
+            workflow = Mock()
+            argv = ['worker', '--stage', 'publish', '--selections', str(selections), '--state', str(state), '--lock', str(lock)]
+            with patch('sys.argv', argv), patch.object(workflow_worker, 'get_db_manager'), patch.object(
+                    workflow_worker, 'BlogWorkflow', return_value=workflow), patch(
+                    'utils.blog_image_repair.repair_images', return_value={'verified': True}) as repair:
+                self.assertEqual(workflow_worker.main(), 0)
+                repair.assert_called_once_with(workflow, 'paper', 'zh')
+                workflow.publish.assert_not_called()
+                workflow.translate.assert_not_called()
+                result = json.loads(state.read_text())
+                self.assertEqual(result['status'], 'done')
+                self.assertEqual(result['results'], [{'verified': True}])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,13 @@ from genemedi_blog.genemedi_blog import BlogConfig, GeneMediBlogClient, build_pa
 
 
 class GeneMediCmsConfigTests(unittest.TestCase):
+    def test_get_preserves_language_specific_jsonapi_route(self):
+        client = GeneMediBlogClient(BlogConfig('https://hub.genemedi.net', '', ''))
+        document = {'data': {'attributes': {'langcode': 'zh-hans'}}}
+        with patch.object(client, '_request', return_value=(200, document, {})) as request:
+            self.assertEqual(client.get('00000000-0000-0000-0000-000000000123', langcode='zh-hans'), document)
+            self.assertEqual(request.call_args.args[1], '/zh-hans/jsonapi/node/article/00000000-0000-0000-0000-000000000123')
+
     def test_default_target_is_hub_cms(self):
         config = BlogConfig.from_env({}, require_credentials=False)
         self.assertEqual(config.base_url, "https://hub.genemedi.net")

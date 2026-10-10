@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 6     # v6: right-column legends beside full-height left-column figures
+_CAPTION_VERSION = 7     # v7: evidence-based repeated JEM vector-logo removal
 
 
 def caption_enabled() -> bool:

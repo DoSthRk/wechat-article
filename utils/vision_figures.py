@@ -245,7 +245,7 @@ def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
 # 裁剪逻辑版本：升级裁剪算法时 +1。缓存命中但版本陈旧 → 按缓存的 page 就地重切（不重调 VLM）。
 # v3: 算并集前剔除「贯穿大半页的细规则线」（分栏线/页眉页脚横线），避免裁进正文
 # v4: 四条抽图路径共用边缘杂志页眉/Logo 清理器
-_CROP_VERSION = 5
+_CROP_VERSION = 6
 
 
 def _crop_version_path(out: Path) -> Path:

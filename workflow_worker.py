@@ -37,6 +37,10 @@ def main() -> int:
             try:
                 if args.stage == "translate":
                     workflow.translate(item["job_id"], item["lang"])
+                elif item.get('repair_images') is True:
+                    from utils.blog_image_repair import repair_images
+                    result = repair_images(workflow, item['job_id'], item['lang'])
+                    state.setdefault('results', []).append(result)
                 else:
                     workflow.publish(item["job_id"], item["lang"], force=bool(item.get("force")))
                 state["completed"] += 1

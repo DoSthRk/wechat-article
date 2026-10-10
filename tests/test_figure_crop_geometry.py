@@ -172,3 +172,42 @@ class TestOutlinedPublisherBanners(unittest.TestCase):
             for curve in p.curves:
                 curve['non_stroking_color'] = (0, 0, 0, 1)
         self.assertEqual(figure_crop_words(pages[0]), [])
+
+
+class TestRepeatedJemLogo(unittest.TestCase):
+    def pages(self, count=3, footer=True, altered=False):
+        from types import SimpleNamespace
+        pages = []
+        for index in range(count):
+            curves = [dict(_el(480 + i * 6, 15, 485 + i * 6, 39),
+                           pts=[(480 + i * 6, 15), (485 + i * 6, 39)]) for i in range(10)]
+            if altered and index:
+                curves[0]['pts'][0] = (481 + index, 15)
+            words = [dict(_el(380, 750, 550, 760), text='Journal of Experimental Medicine')] if footer else []
+            pages.append(SimpleNamespace(width=600, height=800, rects=[], curves=curves,
+                         extract_words=lambda words=words: words))
+        for page in pages:
+            page.pdf = SimpleNamespace(pages=pages)
+        return pages
+
+    def test_identifies_jem_logo_only_with_three_identical_outlines_and_footer(self):
+        from utils.figure_crop_geometry import figure_crop_words, publisher_header_bottom
+        for count, footer, altered, expected in ((3, True, False, 39), (2, True, False, 0),
+                                                (3, False, False, 0), (3, True, True, 0)):
+            with self.subTest(count=count, footer=footer, altered=altered):
+                page = self.pages(count, footer, altered)[0]
+                self.assertEqual(publisher_header_bottom(figure_crop_words(page), 800), expected)
+
+    def test_removes_logo_and_intervening_prose_keeps_complete_raster_and_panel_label(self):
+        from utils.figure_crop_geometry import figure_crop_words, sanitize_figure_region
+        page = self.pages()[0]
+        raster = dict(_el(90, 330, 530, 676), object_type='image')
+        prose = dict(_el(50, 160, 550, 172), text='Previous caption and two-column prose')
+        panel = dict(_el(83, 328, 89, 338), text='A')
+        box = sanitize_figure_region(page.curves + [raster], figure_crop_words(page) + [prose, panel],
+                                     (90, 15, 550, 676), 600, 800)
+        self.assertLessEqual(box[0], 83)
+        self.assertLessEqual(box[1], 328)
+        self.assertGreater(box[1], 172)
+        self.assertGreaterEqual(box[2], 530)
+        self.assertGreaterEqual(box[3], 676)

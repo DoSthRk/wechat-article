@@ -378,6 +378,14 @@ class GeneMediBlogClient:
         )
         return self._normalize_write_result("update", status, document)
 
+    def get(self, uuid: str, *, langcode: str = 'en') -> Dict[str, Any]:
+        normalized_uuid = str(uuid_lib.UUID(uuid))
+        if not isinstance(langcode, str) or not langcode or not all(c.isalnum() or c == '-' for c in langcode):
+            raise BlogPublisherError('Invalid language code')
+        prefix = f'/{langcode}' if langcode != 'en' else ''
+        _, document, _ = self._request('GET', f'{prefix}{ARTICLE_ENDPOINT}/{normalized_uuid}', expected_statuses=(200,))
+        return document
+
     def probe(self) -> Dict[str, Any]:
         root_status, root_document, _ = self._request(
             "GET", "/jsonapi", expected_statuses=(200,)

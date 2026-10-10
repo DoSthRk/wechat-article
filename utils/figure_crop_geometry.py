@@ -138,7 +138,7 @@ def publisher_header_bottom(words: Iterable[Mapping], page_h: float) -> float:
     end = 0.0
     for line in lines:
         text = ' '.join(str(w.get('text', '')) for w in sorted(line, key=lambda w: float(w['x0'])))
-        if (re.search(r'\b(?:open\s+access|cell\s*press|journal\s+pre-proof|please\s+cite\s+this\s+article|J\s+ALLERGY\s+CLIN\s+IMMUNOL)\b', text, re.I)
+        if (re.search(r'\b(?:open\s+access|cell\s*press|journal\s+pre-proof|journal\s+of\s+experimental\s+medicine|please\s+cite\s+this\s+article|J\s+ALLERGY\s+CLIN\s+IMMUNOL)\b', text, re.I)
                 or re.match(r'^(?:Letter|Article)\s+https?://doi\.org/', text, re.I)
                 or re.fullmatch(r'(?:ll\s+)?(?:article|correction|letter)(?:\s+open\s+access)?', text.strip(), re.I)):
             end = max(end, max(float(w['bottom']) for w in line))
@@ -186,7 +186,30 @@ def figure_crop_words(page) -> list:
             found[signature] = rect
         return found
 
-    candidates = signatures(page)
+    def jem_logo(pg):
+        # JEM uses outlined letters, without a searchable header or rectangle.
+        # Require the journal's footer AND the same complete outlines on three
+        # pages; arbitrary repeated scientific keys are not publisher evidence.
+        footer = ' '.join(str(w.get('text', '')) for w in pg.extract_words() or []
+                          if float(w['top']) > float(pg.height) * .9)
+        if 'Journal of Experimental Medicine' not in footer:
+            return {}
+        outlines = [e for e in (pg.curves or [])
+                    if 0 <= float(e['top']) and float(e['bottom']) <= 45
+                    and float(e['x0']) >= float(pg.width) * .75]
+        if len(outlines) < 8:
+            return {}
+        box = {k: fn(float(e[k]) for e in outlines) for k, fn in
+               (('x0', min), ('top', min), ('x1', max), ('bottom', max))}
+        if not (30 < box['x1'] - box['x0'] < 120 and 8 < box['bottom'] - box['top'] < 35):
+            return {}
+        signature = ('jem_logo', tuple(
+            (tuple(round(float(e[k]), 2) for k in ('x0', 'top', 'x1', 'bottom')),
+             tuple(tuple(round(float(v), 2) for v in point) for point in e.get('pts', [])))
+            for e in outlines))
+        return {signature: box}
+
+    candidates = {**signatures(page), **jem_logo(page)}
     if not candidates:
         return words
     cache = getattr(pdf, '_figure_banner_evidence', None)
@@ -201,13 +224,15 @@ def figure_crop_words(page) -> list:
             nearby = pdf.pages[max(0, index - 4):index + 5]
             samples = list({id(p): p for p in nearby + pdf.pages[:10]}.values())
             for other in samples:
-                if signature in signatures(other):
+                if signature in (jem_logo(other) if signature[0] == 'jem_logo' else signatures(other)):
                     matches += 1
                 if matches >= 3:
                     break
             cache[signature] = matches >= 3
         if cache[signature]:
-            words = words + [dict(rect, text='Journal Pre-proof', crop_evidence='repeated_vector_banner')]
+            logo = signature[0] == 'jem_logo'
+            words = words + [dict(rect, text='Journal of Experimental Medicine' if logo else 'Journal Pre-proof',
+                                  crop_evidence='repeated_jem_logo' if logo else 'repeated_vector_banner')]
     return words
 
 
