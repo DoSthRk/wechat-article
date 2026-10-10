@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from html import escape, unescape
 from typing import List
 
 import markdown as md_lib
@@ -65,6 +66,37 @@ INLINE_STYLES = {
     "pre": "background:#f6f8fa;padding:10px;border-radius:5px;overflow-x:auto;",
     "hr": "border:none;border-top:1px solid #d0d7de;margin:18px 0;",
 }
+
+
+def prepare_wechat_update_html(content: str) -> str:
+    """Normalize editor-serialized CSS before resubmitting a draft.
+
+    Decode attributes only, never body text. Unquoted font names avoid sending
+    entity-encoded quotes back through WeChat's style sanitizer.
+    """
+    def tag(match):
+        def style(attribute):
+            css = unescape(attribute.group(2))
+            css = re.sub(r"(font-family\s*:)([^;]+)",
+                         lambda m: m.group(1) + m.group(2).replace("'", "").replace('"', ""),
+                         css, flags=re.I)
+            return 'style="' + escape(css, quote=True) + '"'
+        return re.sub(r'(?<![\w-])style\s*=\s*([\"\'])(.*?)\1', style, match.group(), flags=re.I | re.S)
+    return re.sub(r'<[a-z][^>]*>', tag, content, flags=re.I)
+
+
+def restore_wechat_body_styles(content: str) -> str:
+    """Restore missing paragraph/subheading styles, without adding a body H1."""
+    def tag(match):
+        opening = match.group()
+        existing = re.search(r'(?<![\w-])style\s*=\s*([\"\'])(.*?)\1', opening, re.I | re.S)
+        if existing and unescape(existing.group(2)).strip():
+            return opening
+        styled = f'style="{INLINE_STYLES[match.group(1).lower()]}"'
+        if existing:
+            return opening[:existing.start()] + styled + opening[existing.end():]
+        return opening[:-1] + ' ' + styled + '>'
+    return prepare_wechat_update_html(re.sub(r'<(p|h[234])\b[^>]*>', tag, content, flags=re.I))
 
 # 列表项样式：与正文同字号，悬挂缩进让换行对齐到符号后（公众号里好看）
 _LIST_ITEM_STYLE = (

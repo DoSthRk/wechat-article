@@ -61,6 +61,17 @@ class TestWeChatClientAccounts(unittest.TestCase):
         self.assertEqual(c.app_id, "x")
         self.assertTrue(str(c.token_cache_path).endswith("wechat_token_custom.json"))
 
+    def test_update_normalizes_editor_css_without_mutating_original_payload(self):
+        c = WeChatClient(app_id='x', app_secret='y')
+        c.get_access_token = lambda: 'test-token'
+        c._http_post_json = MagicMock(return_value=(200, '{"errcode":0}'))
+        article = {'title': '标题', 'content': '<p style="font-family:&#39;Microsoft YaHei&#39;;font-size:14px;">&lt;正文&gt;</p>'}
+        c.update_draft('existing', 0, article)
+        payload = c._http_post_json.call_args.args[1]
+        self.assertIn('font-family:Microsoft YaHei;', payload['articles']['content'])
+        self.assertIn('&lt;正文&gt;', payload['articles']['content'])
+        self.assertIn('&#39;', article['content'])
+
     @patch("utils.wechat_client.os.chmod")
     def test_token_cache_is_owner_only(self, chmod):
         os.environ["WECHAT_IMMUNE_APP_ID"] = "i"

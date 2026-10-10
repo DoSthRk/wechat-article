@@ -122,5 +122,23 @@ class TestTitleDigest(unittest.TestCase):
         self.assertIn("首段摘要", d)
 
 
+class TestUpdateStyles(unittest.TestCase):
+    def test_decode_styles_only_and_keep_manual_font_size(self):
+        from utils.wechat_html import prepare_wechat_update_html
+        content = '<p style="font-family:&#39;Microsoft YaHei&#39;,&#39;微软雅黑&#39;;font-size:16px;">&lt;保留文字&gt;</p>'
+        updated = prepare_wechat_update_html(content)
+        self.assertIn('font-family:Microsoft YaHei,微软雅黑;font-size:16px;', updated)
+        self.assertIn('&lt;保留文字&gt;', updated)
+        self.assertEqual(prepare_wechat_update_html(updated), updated)
+
+    def test_empty_styles_restored_without_adding_title_or_overwriting_manual_styles(self):
+        from utils.wechat_html import restore_wechat_body_styles
+        updated = restore_wechat_body_styles('<h2 style="">标题</h2><p>正文</p><p style="font-size:16px;">手工字号</p>')
+        self.assertNotIn('<h1', updated)
+        self.assertIn('font-size:15px;font-weight:700;color:#ab1942;', updated)
+        self.assertIn('font-size:14px;line-height:1.75;', updated)
+        self.assertIn('<p style="font-size:16px;">手工字号</p>', updated)
+
+
 if __name__ == "__main__":
     unittest.main()

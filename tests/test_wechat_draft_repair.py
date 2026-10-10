@@ -127,6 +127,66 @@ class DraftImageRepairTests(unittest.TestCase):
             self.run_repair()
         self.client.create_draft.assert_not_called()
 
+    def formatting_content(self):
+        return ('<p style=""><span leaf="">手工正文 &lt;实验&gt;</span></p>'
+                '<h2 style=""><span leaf="">小标题一</span></h2>'
+                '<p style=""><img data-src="https://mmbiz.qpic.cn/figure/640"></p>'
+                '<h2 style=""><span leaf="">小标题二</span></h2>'
+                '<p style="">【相关产品推荐】</p><p style="">保留产品模块</p>'
+                '<img data-src="https://mmbiz.qpic.cn/footer/640">')
+
+    def test_formatting_restores_headings_without_body_title_or_regeneration(self):
+        self.current['content'] = self.formatting_content()
+        original = dict(self.current)
+        result = repair.repair_formatting(self.db, 'paper', client_factory=self.factory)
+        self.assertEqual(result['styled_headings'], 2)
+        self.assertFalse(result['body_h1'])
+        self.assertTrue(result['verified'])
+        content = self.current['content']
+        self.assertNotIn('<h1', content)
+        self.assertIn('font-size:15px;font-weight:700;color:#ab1942', content)
+        self.assertIn('font-size:14px;line-height:1.75', content)
+        self.assertIn('&lt;实验&gt;', content)
+        self.assertEqual(repair._text(content), repair._text(original['content']))
+        self.assertTrue(content.endswith('<p style="">【相关产品推荐】</p><p style="">保留产品模块</p>'
+                                         '<img data-src="https://mmbiz.qpic.cn/footer/640">'))
+        self.assertEqual({k: v for k, v in self.current.items() if k != 'content'},
+                         {k: v for k, v in original.items() if k != 'content'})
+        self.client.create_draft.assert_not_called()
+        self.upload.assert_not_called()
+
+    def test_formatting_readback_losing_styles_is_not_success(self):
+        self.current['content'] = self.formatting_content()
+        def lose_style(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['content'] = re.sub(r'<h2 style="[^"]*"', '<h2 style=""', self.current['content'])
+        self.client.update_draft.side_effect = lose_style
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '格式回读校验未通过'):
+            repair.repair_formatting(self.db, 'paper', client_factory=self.factory)
+        self.client.update_draft.assert_called_once()
+        self.assertEqual(json.loads(next((self.root / 'backups').glob('*.json')).read_text())['status'], 'needs_review')
+
+    def test_image_repair_rejects_typography_loss(self):
+        self.current['content'] = '<h2 style="font-size:15px;color:#ab1942;">现有标题</h2>' + self.current['content']
+        def lose_style(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['content'] = re.sub(r'<h2 style="[^"]*"', '<h2 style=""', self.current['content'])
+        self.client.update_draft.side_effect = lose_style
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '格式回读校验未通过'):
+            self.run_repair()
+
+    def test_formatting_concurrent_edits_are_not_overwritten(self):
+        original = {**self.original, 'content': self.formatting_content()}
+        self.client.get_draft.side_effect = [{'news_item': [original]},
+            {'news_item': [{**original, 'title': '刚改的标题'}]}]
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '未覆盖新内容'):
+            repair.repair_formatting(self.db, 'paper', client_factory=self.factory)
+        self.client.update_draft.assert_not_called()
+
+    def test_css_readback_tolerates_wechat_serialization(self):
+        self.assertTrue(repair._styles_preserved('<h2 style="font-size:15px;font-weight:700;color:#ab1942;">标题</h2>',
+            '<h2 style="font-size: 15px; font-weight:bold; color:rgb(171, 25, 66);"><span leaf="">标题</span></h2>'))
+
 
 if __name__ == '__main__':
     unittest.main()

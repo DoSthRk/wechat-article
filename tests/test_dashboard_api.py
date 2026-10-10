@@ -68,6 +68,19 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertNotIn("secret-token", response.get_data(as_text=True))
 
+    def test_formatting_repair_uses_same_business_line_guard(self):
+        with patch('utils.panel_runner.list_sources', return_value=self._access_lines()), patch(
+                'utils.wechat_draft_repair.repair_formatting', return_value={'ok': True, 'body_h1': False}) as repair:
+            denied = self.client.post('/api/wechat/repair-formatting', json={'job_id': 'solidex-job'},
+                                      headers={'X-GM-LAB-Username': 'hqq'})
+            self.assertEqual(denied.status_code, 403)
+            repair.assert_not_called()
+            allowed = self.client.post('/api/wechat/repair-formatting', json={'job_id': 'aav-job'},
+                                       headers={'X-GM-LAB-Username': 'hqq'})
+            self.assertEqual(allowed.status_code, 200)
+            self.assertFalse(allowed.get_json()['body_h1'])
+            repair.assert_called_once_with(self.db, 'aav-job')
+
     def test_notice_retry_enforces_business_line_and_kicks_only_success(self):
         with patch("utils.panel_runner.list_sources", return_value=self._access_lines()), patch(
                 "utils.blog_notifications.retry", return_value={"ok": True}) as retry, patch(

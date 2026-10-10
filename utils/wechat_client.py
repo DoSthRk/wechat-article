@@ -189,6 +189,10 @@ class WeChatClient:
 
     def update_draft(self, media_id: str, index: int, article: Dict[str, Any]) -> None:
         """PATCH 已存在草稿的某一篇（index 从 0 起）。复刻 target-running 的 PATCH 思路。"""
+        from utils.wechat_html import prepare_wechat_update_html
+        article = dict(article)
+        if isinstance(article.get("content"), str):
+            article["content"] = prepare_wechat_update_html(article["content"])
         token = self.get_access_token()
         url = f"{WECHAT_API_BASE}/cgi-bin/draft/update?access_token={token}"
         payload = {"media_id": media_id, "index": int(index), "articles": article}

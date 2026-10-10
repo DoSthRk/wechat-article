@@ -13,7 +13,8 @@ import uuid
 from utils.blog_task_lock import version_lock
 from utils.image_placeholders import normalize_image_placeholders, unwrap_linked_image_placeholders
 from utils.wechat_client import WeChatClient
-from utils.wechat_html import find_image_placeholders, replace_image_placeholder
+from utils.wechat_html import (find_image_placeholders, replace_image_placeholder,
+                               prepare_wechat_update_html, restore_wechat_body_styles)
 
 BACKUP_DIR = Path(__file__).resolve().parent.parent / "runtime" / "wechat_repairs"
 _PARAGRAPH = re.compile(r"<p\b[^>]*>.*?</p>", re.I | re.S)
@@ -55,6 +56,81 @@ def _first(draft):
     if not items:
         raise DraftImageRepairError("现有草稿没有图文内容，未更新")
     return {key: items[0][key] for key in _FIELDS if key in items[0]}
+
+
+def _style_blocks(content):
+    """Critical visible typography, tolerating WeChat's CSS serialization."""
+    result = []
+    for match in re.finditer(r'<(p|h[234])\b([^>]*)>(.*?)</\1>', content, re.I | re.S):
+        attribute = re.search(r'(?<![\w-])style\s*=\s*([\"\'])(.*?)\1', match.group(2), re.I | re.S)
+        css = {}
+        for declaration in unescape(attribute.group(2) if attribute else '').split(';'):
+            key, sep, value = declaration.partition(':')
+            if sep and key.strip().lower() in {'font-size', 'font-weight', 'color', 'line-height'}:
+                value = re.sub(r'\s+', '', value.lower())
+                value = {'bold': '700', 'normal': '400', 'rgb(171,25,66)': '#ab1942',
+                         'rgb(51,51,51)': '#333333'}.get(value, value)
+                css[key.strip().lower()] = value
+        result.append((match.group(1).lower(), _text(match.group(3)), css))
+    return result
+
+
+def _styles_preserved(expected, actual):
+    wanted, found = _style_blocks(expected), _style_blocks(actual)
+    return len(wanted) == len(found) and all(
+        tag == other_tag and text == other_text and all(other_css.get(k) == v for k, v in css.items())
+        for (tag, text, css), (other_tag, other_text, other_css) in zip(wanted, found))
+
+
+def _update_verified(client, job_id, draft_ref, original, updated, expected_text, urls=(), operation='images'):
+    content = str(original.get('content') or '')
+    updated = prepare_wechat_update_html(updated)
+    if _first(client.get_draft(draft_ref['media_id'])) != original:
+        raise DraftImageRepairError('草稿刚被修改，请重新核对后修复；未覆盖新内容')
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup = BACKUP_DIR / f'{uuid.uuid4().hex}.json'
+    record = {'job_id': job_id, **draft_ref, 'created_at': datetime.utcnow().isoformat(),
+              'original': original, 'uploaded_images': list(urls), 'operation': operation, 'status': 'prepared'}
+    with backup.open('x', encoding='utf-8') as stream:
+        os.chmod(backup, 0o600)
+        json.dump(record, stream, ensure_ascii=False, indent=2)
+    # No create fallback, regeneration, Blog requeue, or mass-publication call.
+    client.update_draft(draft_ref['media_id'], 0, {**original, 'content': updated})
+    actual = _first(client.get_draft(draft_ref['media_id']))
+    actual_body = str(actual.get('content') or '')
+    image_keys = {_image_key(url) for url in _Body(actual_body).images}
+    verified = (all(_image_key(url) in image_keys for url in list(urls) + _Body(content).images)
+                and _text(actual_body) == expected_text
+                and _styles_preserved(updated, actual_body)
+                and not (re.search(r'<h1\b', actual_body, re.I) and not re.search(r'<h1\b', content, re.I))
+                and all(actual.get(key) == value for key, value in original.items() if key != 'content'))
+    record.update(status='verified' if verified else 'needs_review',
+                  actual_content_sha256=hashlib.sha256(actual_body.encode()).hexdigest())
+    backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+    if not verified:
+        raise DraftImageRepairError('草稿已更新，但文字、图片或格式回读校验未通过；已保留备份，请核对，不要盲目重试')
+    return {'ok': True, **draft_ref, 'verified': True, 'backup_id': backup.stem}
+
+
+def repair_formatting(db, job_id, *, client_factory=WeChatClient):
+    with version_lock(job_id, 'wechat_repair'):
+        draft_ref = db.latest_wechat_draft(job_id)
+        if not draft_ref:
+            raise DraftImageRepairError('没有现有草稿，未更新')
+        client = client_factory(account=draft_ref['account'])
+        original = _first(client.get_draft(draft_ref['media_id']))
+        content = str(original.get('content') or '')
+        headings = re.findall(r'<h[234]\b[^>]*>.*?</h[234]>', content, re.I | re.S)
+        if not headings or re.search(r'<h1\b', content, re.I):
+            raise DraftImageRepairError('现有正文标题结构需人工核对，未更新')
+        # Keep the manually edited product/footer module byte-for-byte in the payload.
+        footer = next((m.start() for m in _PARAGRAPH.finditer(content)
+                       if '【相关产品推荐】' in _text(m.group())), len(content))
+        updated = restore_wechat_body_styles(content[:footer]) + content[footer:]
+        if _text(updated) != _text(content):
+            raise DraftImageRepairError('格式修复会改变正文文字，未更新')
+        result = _update_verified(client, job_id, draft_ref, original, updated, _text(content), operation='formatting')
+        return {**result, 'styled_headings': len(headings), 'body_h1': False}
 
 
 def repair_images(db, job_id, *, client_factory=WeChatClient):
@@ -108,29 +184,5 @@ def repair_images(db, job_id, *, client_factory=WeChatClient):
             without_markers = without_markers[:match.start()] + without_markers[match.end():]
         if _text(updated) != _text(without_markers):
             raise DraftImageRepairError("修复会改变正文文字，未更新")
-        if _first(client.get_draft(draft_ref["media_id"])) != original:
-            raise DraftImageRepairError("草稿刚被修改，请重新核对后修复；未覆盖新内容")
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        backup = BACKUP_DIR / f"{uuid.uuid4().hex}.json"
-        record = {"job_id": job_id, **draft_ref, "created_at": datetime.utcnow().isoformat(),
-                  "original": original, "uploaded_images": urls, "status": "prepared"}
-        with backup.open("x", encoding="utf-8") as stream:
-            os.chmod(backup, 0o600)
-            json.dump(record, stream, ensure_ascii=False, indent=2)
-        payload = {**original, "content": updated}
-        # No create fallback, regeneration, Blog requeue, or mass-publication call.
-        client.update_draft(draft_ref["media_id"], 0, payload)
-        actual = _first(client.get_draft(draft_ref["media_id"]))
-        actual_body = str(actual.get("content") or "")
-        image_keys = {_image_key(url) for url in _Body(actual_body).images}
-        verified = (all(_image_key(url) in image_keys for url in urls)
-                    and all(_image_key(url) in image_keys for url in _Body(content).images)
-                    and _text(actual_body) == _text(without_markers)
-                    and all(actual.get(key) == value for key, value in original.items() if key != "content"))
-        record.update(status="verified" if verified else "needs_review",
-                      actual_content_sha256=hashlib.sha256(actual_body.encode()).hexdigest())
-        backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-        if not verified:
-            raise DraftImageRepairError("草稿已更新，但回读校验未通过；已保留备份，请核对，不要盲目重试")
-        return {"ok": True, **draft_ref, "inserted_images": len(urls), "verified": True,
-                "backup_id": backup.stem}
+        return {**_update_verified(client, job_id, draft_ref, original, updated, _text(without_markers), urls),
+                'inserted_images': len(urls)}
