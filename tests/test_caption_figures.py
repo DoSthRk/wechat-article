@@ -108,6 +108,31 @@ class _FakePdf:
 
 
 class TestCrossPageCaption(unittest.TestCase):
+    def test_shaded_legend_is_not_a_figure_and_uses_previous_raster_page(self):
+        previous = _FakePage(_words('A B C D', 50), images=[_el(60, 70, 535, 680)])
+        caption = _FakePage(_words('Figure 1. Experimental results', 85))
+        caption.rects = [_el(42, 75, 560, 275), _el(42, 270, 560, 285)]
+        with patch('pdfplumber.open', return_value=_FakePdf([previous, caption])):
+            boxes = cf.find_figure_boxes('paper.pdf')
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][2], 0)
+        self.assertLess(boxes[0][3][1], 80)
+        self.assertGreater(boxes[0][3][3], 670)
+
+    def test_previous_article_legend_does_not_win_same_number(self):
+        unrelated = _FakePage(_words('Figure 1 (facing page). Dengue trial', 65))
+        unrelated.rects = [_el(40, 55, 400, 330)]
+        # Left prose crosses the page midpoint, before a real right-column caption.
+        caption_words = [dict(w, x0=w['x0']+280, x1=w['x1']+280)
+                         for w in _words('Figure 1 (facing page). AAV', 205)]
+        correct = _FakePage([{'text': 'for', 'x0': 300, 'x1': 320, 'top': 205, 'bottom': 215}] + caption_words)
+        correct.rects = [_el(325, 195, 595, 680)]
+        figure = _FakePage(_words('A B C', 65), images=[_el(60, 55, 535, 680)])
+        with patch('pdfplumber.open', return_value=_FakePdf([unrelated, correct, figure])):
+            boxes = cf.find_figure_boxes('paper.pdf')
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][2], 2)
+
     def test_caption_on_next_page_uses_previous_full_page_figure(self):
         previous = _FakePage(
             _words("(caption on next page)", 740),

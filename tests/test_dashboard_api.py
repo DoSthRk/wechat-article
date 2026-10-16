@@ -68,6 +68,19 @@ class TestDashboardApi(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertNotIn("secret-token", response.get_data(as_text=True))
 
+    def test_inspect_existing_images_is_read_only_and_line_scoped(self):
+        with patch('utils.panel_runner.list_sources', return_value=self._access_lines()), patch(
+                'utils.wechat_draft_repair.repair_existing_images', return_value={'ok': True}) as inspect:
+            denied = self.client.post('/api/wechat/inspect-image-repair', json={'job_id': 'solidex-job'},
+                                      headers={'X-GM-LAB-Username': 'hqq'})
+            self.assertEqual(denied.status_code, 403)
+            inspect.assert_not_called()
+            allowed = self.client.post('/api/wechat/inspect-image-repair',
+                json={'job_id': 'aav-job', 'dry_run': False, 'repair_cover': True},
+                headers={'X-GM-LAB-Username': 'hqq'})
+            self.assertEqual(allowed.status_code, 200)
+            inspect.assert_called_once_with(self.db, 'aav-job', dry_run=True, repair_cover=True)
+
     def test_formatting_repair_uses_same_business_line_guard(self):
         with patch('utils.panel_runner.list_sources', return_value=self._access_lines()), patch(
                 'utils.wechat_draft_repair.repair_formatting', return_value={'ok': True, 'body_h1': False}) as repair:

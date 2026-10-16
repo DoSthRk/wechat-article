@@ -40,12 +40,14 @@ from utils.auto_blog import enqueue as enqueue_auto_blog
 from utils.blog_urls import BlogUrlError, resolve_published_blog_url
 from utils.figure_strategy import (
     FigureKey,
+    FigureSignals,
     figure_key_from_description,
     inspect_pdf_figure_signals as _inspect_pdf_figure_signals,
     merge_preferred_figures,
     missing_figure_keys,
     planned_figure_strategies,
 )
+from utils.figure_quality import QUALITY_VERSION, filter_candidates
 from utils.health_check import markdown_health_score
 from utils.image_placeholders import deduplicate_image_placeholders
 from utils.job_loader import Job, load_jobs
@@ -63,10 +65,6 @@ from utils.wechat_client import WeChatAPIError, WeChatClient
 from utils.wechat_template_assets import TemplateAssetError, append_source_pdf_guide
 from utils.pdf_figure_extractor import (
     Figure,
-    extract_figures,
-    extract_figures_from_legend_pages,
-    figure_number,
-    match_figure,
 )
 from utils.wechat_html import (
     extract_title_and_digest,
@@ -228,10 +226,16 @@ def _publish_chinese_blog(db, job_pk: int, job: Job) -> bool:
 def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
     """生成阶段：方案 B 出基准正文 → 落盘 → 写 articles 表。"""
     db.update_job_status(job_pk, JobStatus.GENERATING)
+    generation_source = _figure_source_fingerprint(job)
     result = analyzer.analyze(job)
     if not result.success:
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=result.error_message)
         logger.error("[%s] generate failed: %s", job.job_id, result.error_message)
+        return False
+    if _figure_source_fingerprint(job) != generation_source:
+        error = "generate: 原文 PDF 在生成过程中发生变化，请重新生成正文"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] %s", job.job_id, error)
         return False
 
     result.markdown, duplicate_figures = deduplicate_image_placeholders(result.markdown)
@@ -269,6 +273,7 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
     (out_dir / "meta.json").write_text(
         json.dumps({
             "job_id": job.job_id, "line": job.line, "title": title, "digest": digest,
+            "source_pdf_sha256": generation_source.get("sha256", ""),
             "model": result.model, "tokens": result.total_tokens,
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
@@ -346,18 +351,14 @@ def _distribute_one(
         return False
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
     required_figure_keys = _required_figure_keys(html)
-    resolved_figures = _resolve_job_figures(job, required_figure_keys)
-    missing_required = missing_figure_keys(required_figure_keys, resolved_figures[0])
-    if missing_required:
-        missing_labels = ", ".join(
-            f"{'Extended Data ' if extended else ''}Figure {label}"
-            for label, extended in sorted(missing_required)
-        )
-        logger.warning(
-            "[%s] 必需配图未解析，移除对应占位并继续生成草稿：%s",
-            job.job_id,
-            missing_labels,
-        )
+    try:
+        resolved_figures = _resolve_job_figures(job, required_figure_keys)
+        _preflight_figure_paths(html, resolved_figures)
+    except Exception as exc:
+        error = f"distribute: 配图质量闸拦下：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] %s", job.job_id, error)
+        return False
     try:
         blog_url = resolve_published_blog_url(db, job_pk, job.job_id, lang="zh")
     except BlogUrlError as exc:
@@ -390,10 +391,19 @@ def _distribute_one(
         )
         return False
 
-    html, n_figs = _apply_figures(html, job, client, account, resolved=resolved_figures)
+    try:
+        html, n_figs = _apply_figures(html, job, client, account, resolved=resolved_figures)
+    except (ValueError, OSError, WeChatAPIError) as exc:
+        error = f"distribute: 配图失败，未创建/更新公众号草稿：{exc}"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] %s", job.job_id, error)
+        return False
     leftover = len(find_image_placeholders(html))
-    if n_figs or leftover:
-        logger.info("[%s] 配图：替换 %d 张，剩 %d 个占位符未配（无对应图）", job.job_id, n_figs, leftover)
+    if leftover or n_figs < len(required_figure_keys):
+        error = "distribute: 必需配图未完整插入，未创建/更新公众号草稿"
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
+        logger.error("[%s] %s", job.job_id, error)
+        return False
     if n_figs < 1:
         logger.warning("[%s] 正文没有成功配图，继续生成草稿并保留阅读原文入口", job.job_id)
 
@@ -700,6 +710,8 @@ def _run_pdf_figure_worker(
                 image_path=str(item.get("image_path") or ""),
                 width=int(item.get("width") or 0),
                 height=int(item.get("height") or 0),
+                bbox=tuple(item["bbox"]) if item.get("bbox") else None,
+                source_sha256=str(item.get("source_sha256") or ""),
             ))
         except (AttributeError, TypeError, ValueError):
             continue
@@ -707,15 +719,28 @@ def _run_pdf_figure_worker(
 
 
 def _resolve_figure_path(description: str, figures_dir: Path, extracted) -> Optional[str]:
-    """占位符 → 图片本地路径：优先人工放的 figures/fig{N}.{png,jpg}，否则自动抽取的匹配图。"""
-    num = figure_number(description)
-    if num:
-        for ext in (".png", ".jpg", ".jpeg"):
-            p = figures_dir / f"fig{num}{ext}"
-            if p.exists():
-                return str(p)
-    fig = match_figure(extracted, description)
-    return fig.image_path if fig else None
+    """仅接受已通过来源和质量检查的匹配图，不凭文件名信任手工缓存。"""
+    key = figure_key_from_description(description)
+    return next((figure.image_path for figure in extracted
+                 if key == (figure.label, figure.is_extended)), None) if key else None
+
+
+def _preflight_figure_paths(html: str, resolved: Tuple[List[Figure], Path]) -> dict[str, str]:
+    """上传任何资源之前，确认每个占位符可用且不同图号不复用同一张图。"""
+    figures, directory = resolved
+    paths: dict[str, str] = {}
+    content_keys: dict[str, FigureKey | None] = {}
+    for description in find_image_placeholders(html):
+        path = _resolve_figure_path(description, directory, figures)
+        if not path or not Path(path).is_file():
+            raise ValueError(f"缺少经校验的配图：{description}")
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        key = figure_key_from_description(description)
+        if digest in content_keys and content_keys[digest] != key:
+            raise ValueError(f"不同图号不能使用同一张图片：{description}")
+        content_keys[digest] = key
+        paths[description] = path
+    return paths
 
 
 def _upload_cached(client: WeChatClient, account: str, local_path: str) -> str:
@@ -760,11 +785,11 @@ def _upload_cover_cached(client: WeChatClient, account: str, local_path: str) ->
     return media_id
 
 
-def _load_pool_figures(job: Job) -> List[Figure]:
+def _load_pool_figures(job: Job, *, rejections: Optional[list[dict]] = None) -> List[Figure]:
     """从 image_pool 的 figures_manifest.json 载入预备配图（按图号匹配 ``[图片:Figure N]``）。
 
-    image_pool 是人工/预抽取放好的配图目录，优先于 PDF 自动抽取。caption 里的 FIG{N}
-    解析出图号喂 match_figure。无 pool / 无 manifest / 解析失败都回 []（由 PDF 抽取兜底）。
+    人工素材必须声明同一 PDF 的 SHA256、图片文件 SHA256 和 reviewed=true。
+    旧的无来源图片池不再可信，忽略后由 PDF 抽取兜底。
     """
     if not job.image_pool:
         return []
@@ -777,8 +802,17 @@ def _load_pool_figures(job: Job) -> List[Figure]:
     except (ValueError, OSError) as exc:
         logger.warning("[%s] image_pool manifest 解析失败：%s", job.job_id, exc)
         return []
+    source_sha = _figure_source_fingerprint(job).get("sha256")
+    if not source_sha or not isinstance(data, dict) or data.get("source_sha256") != source_sha:
+        rejection = {"strategy": "pool", "reason": "pool_source_mismatch", "path": str(manifest)}
+        if rejections is not None:
+            rejections.append(rejection)
+        logger.warning("[%s] image_pool 未绑定当前 PDF，忽略旧图片池", job.job_id)
+        return []
     figs: List[Figure] = []
     for item in data.get("figures", []):
+        if not isinstance(item, dict):
+            continue
         rel = str(item.get("path") or "").replace("\\", "/")
         if not rel:
             continue
@@ -788,11 +822,19 @@ def _load_pool_figures(job: Job) -> List[Figure]:
         if not p.exists():
             logger.warning("[%s] image_pool 图缺失：%s", job.job_id, rel)
             continue
+        if item.get("reviewed") is not True or item.get("sha256") != hashlib.sha256(p.read_bytes()).hexdigest():
+            if rejections is not None:
+                rejections.append({"strategy": "pool", "reason": "pool_unreviewed_or_hash_mismatch", "path": str(p)})
+            logger.warning("[%s] image_pool 图未经审核或文件已变化：%s", job.job_id, rel)
+            continue
         caption = str(item.get("caption") or "")
+        key = figure_key_from_description(caption)
         figs.append(Figure(
-            label=figure_number(caption), is_extended=False, caption=caption,
+            label=key[0] if key else "", is_extended=key[1] if key else False, caption=caption,
             page=int(item.get("page") or 0), image_path=str(p),
             width=int(item.get("width") or 0), height=int(item.get("height") or 0),
+            bbox=tuple(item["bbox"]) if item.get("bbox") else None,
+            source_sha256=source_sha,
         ))
     return figs
 
@@ -815,7 +857,7 @@ def _figure_source_fingerprint(job: Job) -> dict:
 
 
 def _prepare_figure_cache(job: Job, figures_dir: Path) -> dict:
-    """PDF 内容变动时清理自动生成物，但保留人工 ``figN.*`` 配图。"""
+    """PDF 内容变动时清理自动生成物；未声明来源的手工文件不会被解析器使用。"""
     figures_dir.mkdir(parents=True, exist_ok=True)
     source = _figure_source_fingerprint(job)
     if not source:
@@ -844,18 +886,60 @@ def _prepare_figure_cache(job: Job, figures_dir: Path) -> dict:
     return source
 
 
+def _article_source_binding(job: Job, source: dict, *, warn: bool = True) -> str:
+    """已绑定的正文不能静默改用另一份同名 PDF 的图片。"""
+    meta_path = Path(ARTICLE_CONTENT_DIR) / job.job_id / "meta.json"
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        metadata = {}
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"无法核对正文的原文来源：{exc}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError("正文元数据格式错误，无法核对原文来源")
+    expected = metadata.get("source_pdf_sha256")
+    if expected:
+        if source.get("sha256") != expected:
+            raise ValueError("正文生成后原文 PDF 已变化，须重新生成或人工核对来源，不能继续发布配图")
+        return "verified"
+    if warn:
+        logger.warning("[%s] 旧正文没有原文 SHA256，来源尚未绑定；本次配图报告保留审计标记", job.job_id)
+    return "legacy_unbound"
+
+
 def _resolution_complete(figures: List[Figure], required_keys: set[FigureKey]) -> bool:
     return bool(figures) if not required_keys else not missing_figure_keys(required_keys, figures)
+
+
+def _merge_accepted_figures(preferred: List[Figure], fallback: List[Figure]) -> Tuple[List[Figure], list[dict]]:
+    """跨策略也不能把相同文件内容当作不同图号。"""
+    merged = merge_preferred_figures(preferred, fallback)
+    hashes: dict[str, list[Figure]] = {}
+    for figure in merged:
+        digest = hashlib.sha256(Path(figure.image_path).read_bytes()).hexdigest()
+        hashes.setdefault(digest, []).append(figure)
+    rejected = []
+    for group in hashes.values():
+        if len({(figure.label, figure.is_extended) for figure in group}) > 1:
+            for figure in group:
+                merged.remove(figure)
+                rejected.append({"label": figure.label, "path": figure.image_path,
+                                 "reason": "cross_strategy_duplicate_image", "quality_version": QUALITY_VERSION})
+    return merged, rejected
 
 
 def _write_figure_resolution_report(
     figures_dir: Path, job: Job, source: dict, required_keys: set[FigureKey], signals, attempts: list[dict], figures: List[Figure],
 ) -> None:
     """保留机器报告，面板和排障可区分空结果、超时与覆盖不足。"""
+    if _figure_source_fingerprint(job) != source:
+        raise ValueError("配图处理期间原文 PDF 已变化，请重试并核对来源")
     report = {
         "job_id": job.job_id,
+        "quality_version": QUALITY_VERSION,
         "pdf": str(job.pdf or ""),
         "source": source,
+        "article_source_binding": _article_source_binding(job, source, warn=False),
         "required": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(required_keys)],
         "signals": {
             "caption": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(signals.caption_keys)],
@@ -866,7 +950,9 @@ def _write_figure_resolution_report(
         "attempts": attempts,
         "selected": [
             {"label": figure.label, "extended": figure.is_extended, "page": figure.page,
-             "path": figure.image_path, "width": figure.width, "height": figure.height}
+             "path": figure.image_path, "width": figure.width, "height": figure.height,
+             "bbox": figure.bbox, "source_sha256": figure.source_sha256,
+             "sha256": hashlib.sha256(Path(figure.image_path).read_bytes()).hexdigest()}
             for figure in figures
         ],
         "missing": [
@@ -879,70 +965,33 @@ def _write_figure_resolution_report(
     )
 
 
-def _legacy_resolve_job_figures(job: Job) -> Tuple[List[Figure], Path]:
-    """该 job 的配图来源：image_pool 能按图号匹配则优先，否则回落 PDF 自动抽取。
-
-    关键：pool 的 figures_manifest 若 caption 没有 FIG{N}（图号解析为空，如 AAV 池
-    caption 全空），这些图无法和正文 ``[图片:Figure N]`` 占位符匹配 —— 这时必须回落到
-    带图号的 PDF 抽取图，否则正文会漏掉所有配图。
-    """
-    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
-    pool_figs = _load_pool_figures(job)
-    if any(f.label for f in pool_figs):  # pool 里至少有一张能按图号匹配才用 pool
-        return pool_figs, figures_dir
-    if not _auto_pdf_figures_enabled():
-        logger.warning("[%s] PDF 自动配图已关闭，跳过 PDF 裁剪；仅使用人工/预置配图", job.job_id)
-        return [], figures_dir
-    # 题注锚定抽图（移植 pdffigures2 思路）：最稳、纯 Python 不耗 VLM；题注定图号+边界，多面板算一张、
-    # 正文/页脚天然在框外。找不到题注（如 Cell 图文摘要无 Figure N 题注）→ 回落 VLM。
-    try:
-        from utils.caption_figures import caption_enabled
-        if caption_enabled() and job.pdf and Path(job.pdf).exists():
-            cfigs = _run_pdf_figure_worker("caption", job, figures_dir)
-            if cfigs:
-                return cfigs, figures_dir
-    except Exception as exc:  # noqa: BLE001 - 题注抽图失败回落 VLM
-        logger.warning("[%s] 题注抽图失败，回落 VLM：%s", job.job_id, exc)
-    # 投稿稿 / early-view PDF 常见：Figure legends 在正文末尾，真正图页在后面且页内无 Figure 编号。
-    # 只在明确识别到 FIGURE LEGENDS 时按顺序配后续连续图页，避免 VLM 把无编号图页误标。
-    if job.pdf and Path(job.pdf).exists():
-        try:
-            lfigs = _run_pdf_figure_worker("legend", job, figures_dir)
-            if lfigs:
-                return lfigs, figures_dir
-        except Exception as exc:  # noqa: BLE001 - 文末图例配对失败回落 VLM
-            logger.warning("[%s] 文末图例抽图失败，回落 VLM：%s", job.job_id, exc)
-    # VLM 视觉抽图：渲染含图页 → 模型给图号+整图 bbox（密集多面板图也能按图号抽，启发式做不到）
-    try:
-        from utils.vision_figures import extract_figures_via_vision, vision_enabled
-        if vision_enabled() and job.pdf and Path(job.pdf).exists():
-            vfigs = _run_pdf_figure_worker("vision", job, figures_dir)
-            if vfigs:
-                return vfigs, figures_dir
-    except Exception as exc:  # noqa: BLE001 - VLM 失败回落启发式
-        logger.warning("[%s] VLM 抽图失败，回落启发式：%s", job.job_id, exc)
-    if job.pdf and Path(job.pdf).exists():
-        try:
-            return _run_pdf_figure_worker("heuristic", job, figures_dir), figures_dir
-        except Exception as exc:  # noqa: BLE001 - 抽图失败不阻断投放
-            logger.warning("[%s] 抽图失败：%s", job.job_id, exc)
-    return [], figures_dir
-
-
 def _resolve_job_figures(
     job: Job, required_keys: Optional[set[FigureKey]] = None,
 ) -> Tuple[List[Figure], Path]:
     """按文章实际所需图号选择抽图器，合并回退结果并保留策略报告。"""
     figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
     required_keys = set(required_keys or set())
-    figures = merge_preferred_figures([], _load_pool_figures(job))
     source = _prepare_figure_cache(job, figures_dir)
+    _article_source_binding(job, source)
+    rejected: list[dict] = []
+    pool = _load_pool_figures(job, rejections=rejected)
+    accepted, quality_rejections = filter_candidates(job.pdf, pool, "pool") if pool else ([], [])
+    rejected.extend(quality_rejections)
+    figures = merge_preferred_figures([], accepted)
+    attempts: list[dict] = [{
+        "strategy": "pool", "status": "success" if accepted else "rejected" if rejected else "empty",
+        "result_count": len(accepted), "rejected": rejected,
+    }]
+    signals = FigureSignals(frozenset(), False, 0)
     if _resolution_complete(figures, required_keys):
+        _write_figure_resolution_report(figures_dir, job, source, required_keys, signals, attempts, figures)
         return figures, figures_dir
     if not _auto_pdf_figures_enabled():
         logger.warning("[%s] PDF 自动配图已关闭，跳过 PDF 裁剪；仅使用人工/预置配图", job.job_id)
+        _write_figure_resolution_report(figures_dir, job, source, required_keys, signals, attempts, figures)
         return figures, figures_dir
     if not (job.pdf and Path(job.pdf).exists()):
+        _write_figure_resolution_report(figures_dir, job, source, required_keys, signals, attempts, figures)
         return figures, figures_dir
     try:
         from utils.caption_figures import caption_enabled
@@ -960,7 +1009,6 @@ def _resolve_job_figures(
         kind for kind in planned_figure_strategies(signals, vision_available)
         if kind != "caption" or caption_available
     ]
-    attempts: list[dict] = []
     budget = _figure_total_budget_seconds()
     started = time.monotonic()
     for kind in strategies:
@@ -985,14 +1033,23 @@ def _resolve_job_figures(
                 raise
             logger.warning("[%s] %s 抽图异常：%s", job.job_id, kind, exc)
             extracted = []
-        figures = merge_preferred_figures(figures, extracted)
+        accepted, rejected = filter_candidates(job.pdf, extracted, kind)
+        if any(item.get('reason') == 'ambiguous_figure_number_across_regions'
+               and (not required_keys or (item.get('label'), bool(item.get('extended'))) in required_keys)
+               for item in rejected):
+            from utils.figure_crop_geometry import UnsafeFigureCrop
+            raise UnsafeFigureCrop('同一 PDF 的图号对应多个区域，须人工确认来源，不能用其他策略猜选首图')
+        figures, duplicate_rejections = _merge_accepted_figures(figures, accepted)
+        rejected.extend(duplicate_rejections)
         missing = missing_figure_keys(required_keys, figures)
         attempts.append({
             "strategy": kind,
-            "status": "success" if extracted else "empty",
+            "status": "success" if accepted else "rejected" if rejected else "empty",
             "seconds": round(time.monotonic() - attempt_started, 3),
-            "result_count": len(extracted),
-            "labels": [f"{'extended:' if figure.is_extended else ''}{figure.label}" for figure in extracted],
+            "result_count": len(accepted),
+            "candidate_count": len(extracted),
+            "rejected": rejected,
+            "labels": [f"{'extended:' if figure.is_extended else ''}{figure.label}" for figure in accepted],
             "missing": [f"{'extended:' if ext else ''}{label}" for label, ext in sorted(missing)],
         })
     _write_figure_resolution_report(figures_dir, job, source, required_keys, signals, attempts, figures)
@@ -1004,32 +1061,8 @@ def _resolve_job_figures(
     return figures, figures_dir
 
 
-def _render_pdf_cover(job: Job, figures_dir: Path) -> Optional[str]:
-    """兜底封面：把 PDF 首页渲染成 PNG（期刊/综述 PDF 抽不到插图时用）。取不到回 None。
-
-    这些来源 PDF 常无 Nature 式题注、抽图为 0，又没配固定封面 —— 渲染首页保证有封面可发。
-    首页截图当封面只是占位，建议给该账户设固定品牌封面（WECHAT_{ACCOUNT}_THUMB_MEDIA_ID 优先）。
-    """
-    if not (job.pdf and Path(job.pdf).exists()):
-        return None
-    try:
-        import pypdfium2 as pdfium  # 已是依赖（pdf_figure_extractor 用）
-        doc = pdfium.PdfDocument(job.pdf)
-        try:
-            pil = doc[0].render(scale=2.0).to_pil()
-        finally:
-            doc.close()
-        figures_dir.mkdir(parents=True, exist_ok=True)
-        out = figures_dir / "_cover_page1.png"
-        pil.save(str(out))
-        return _fit_wechat_cover(out, figures_dir)
-    except Exception as exc:  # noqa: BLE001 - 兜底失败不阻断（回落空串→上层报缺封面）
-        logger.warning("[%s] 兜底封面（PDF 首页）渲染失败：%s", job.job_id, exc)
-        return None
-
-
 def _fit_wechat_cover(source_path: str | Path, figures_dir: Path) -> Optional[str]:
-    """生成公众号所需 900x383 封面副本，不改变正文使用的原始图片。"""
+    """完整保留论文图的所有面板，等比缩放并留白到公众号 900x383 尺寸。"""
     try:
         from PIL import Image, ImageOps
 
@@ -1037,21 +1070,20 @@ def _fit_wechat_cover(source_path: str | Path, figures_dir: Path) -> Optional[st
         with Image.open(source) as image:
             if image.size == (900, 383):
                 return str(source)
-            cover = ImageOps.fit(
+            contained = ImageOps.contain(
                 image.convert("RGB"),
                 (900, 383),
                 method=Image.Resampling.LANCZOS,
-                centering=(0.5, 0.15),
             )
+            cover = Image.new("RGB", (900, 383), "white")
+            cover.paste(contained, ((900 - contained.width) // 2, (383 - contained.height) // 2))
         figures_dir.mkdir(parents=True, exist_ok=True)
         out = figures_dir / "_wechat_cover.jpg"
         cover.save(str(out), quality=92)
         return str(out)
     except Exception as exc:  # noqa: BLE001 - 由上层回落缺封面处理
         logger.warning("公众号封面适配失败 %s：%s", source_path, exc)
-        # 保持历史图片池的直传兼容：少数旧素材无法被 Pillow 解码，
-        # 交由公众号接口继续按原逻辑校验，不能因此阻断整篇草稿。
-        return str(source_path)
+        return None
 
 
 def _required_figure_keys(html: str) -> set[FigureKey]:
@@ -1079,9 +1111,7 @@ def _auto_cover_media_id(
     if not cover_path and extracted:
         cover_path = extracted[0].image_path
     if not cover_path:
-        cover_path = _render_pdf_cover(job, figures_dir)  # 兜底：渲染 PDF 首页当封面
-    if not cover_path:
-        logger.warning("[%s] 自动封面：没抽到可用图、PDF 首页也渲染失败", job.job_id)
+        logger.warning("[%s] 自动封面：没有经校验的图片，仅可使用账户固定封面", job.job_id)
         return ""
     cover_path = _fit_wechat_cover(cover_path, figures_dir)
     if not cover_path:
@@ -1099,37 +1129,26 @@ def _apply_figures(
     html: str, job: Job, client: WeChatClient, account: str,
     resolved: Optional[Tuple[List[Figure], Path]] = None,
 ) -> Tuple[str, int]:
-    """把 [图片:Figure N …] 占位符替换为真实公众号图（人工放的 fig{N}.png 优先，自动抽取兜底）。"""
+    """全部占位符通过检查后才上传；任何必需图缺失或上传失败都不生成残缺正文。"""
     placeholders = find_image_placeholders(html)
     if not placeholders:
         return html, 0
-    extracted, figures_dir = resolved or _resolve_job_figures(job)
+    resolved = resolved or _resolve_job_figures(job)
+    paths = _preflight_figure_paths(html, resolved)
     used = 0
-    missing = 0
     used_paths: set = set()
     for desc in placeholders:
-        path = _resolve_figure_path(desc, figures_dir, extracted)
-        if not path:
-            # 配不到图：删掉占位符，不在草稿里留 [图片:…] 方括号文字
-            html = html.replace(f"[图片:{desc}]", "", 1)
-            missing += 1
-            continue
+        path = paths[desc]
         if path in used_paths:
             # 同一张图已用过（如 Figure 1 与 Figure 1e 都指向 Fig 1）→ 删掉重复占位符，不重复插图
             html = html.replace(f"[图片:{desc}]", "", 1)
             continue
-        try:
-            url = _upload_cached(client, account, path)
-        except WeChatAPIError as exc:
-            logger.warning("[%s] 配图上传失败 %s：%s", job.job_id, path, exc)
-            html = html.replace(f"[图片:{desc}]", "", 1)
-            missing += 1
-            continue
+        url = _upload_cached(client, account, path)
+        if not url:
+            raise ValueError(f"配图上传未返回图片地址：{desc}")
         html = replace_image_placeholder(html, desc, url)
         used_paths.add(path)
         used += 1
-    if missing:
-        logger.warning("[%s] 配图：%d 个图片占位符未配到图片，已从草稿正文移除", job.job_id, missing)
     return html, used
 
 

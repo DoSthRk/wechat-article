@@ -188,5 +188,219 @@ class DraftImageRepairTests(unittest.TestCase):
             '<h2 style="font-size: 15px; font-weight:bold; color:rgb(171, 25, 66);"><span leaf="">标题</span></h2>'))
 
 
+class ExistingDraftImageRepairTests(unittest.TestCase):
+    def setUp(self):
+        DraftImageRepairTests.setUp(self)
+        self.original['content'] = ('<h2 style="font-size:15px;font-weight:700;color:#ab1942;">保留小标题</h2>'
+            '<p style="font-size:14px;line-height:1.75;">手工修改的正文 &lt;实验&gt;</p>' + ''.join(
+                f'<p style="text-align:center"><img data-src="https://mmbiz.qpic.cn/oldfigure{i}/640" '
+                f'alt="{desc}" style="max-width:100%"></p>' for i, desc in enumerate(self.descriptions))
+            + '<section>原产品模块<img data-src="https://mmbiz.qpic.cn/footer/640"></section>'
+            + '<img data-src="https://mmbiz.qpic.cn/guide/640" alt="阅读原文">')
+        self.current = dict(self.original)
+        self.cover = self.root / 'contained-cover.jpg'
+        self.cover.write_bytes(b'contained full figure cover')
+        self.cover_patches = [patch('batch_processor._fit_wechat_cover', return_value=str(self.cover)),
+                              patch('batch_processor._upload_cover_cached', return_value='new-contained-cover')]
+        self.fit_cover, self.upload_cover = [item.start() for item in self.cover_patches]
+        self.patches.extend(self.cover_patches)
+
+    tearDown = DraftImageRepairTests.tearDown
+    update = DraftImageRepairTests.update
+
+    def run_repair(self, **kwargs):
+        return repair.repair_existing_images(self.db, 'paper', client_factory=self.factory, **kwargs)
+
+    def test_replaces_data_src_only_preserving_text_styles_and_all_other_images(self):
+        result = self.run_repair()
+        self.assertTrue(result['verified'])
+        self.assertEqual(result['replaced_images'], 4)
+        self.assertEqual(result['unique_images'], 4)
+        self.assertEqual(result['match_methods'], ['alt'] * 4)
+        self.client.update_draft.assert_called_once()
+        self.client.create_draft.assert_not_called()
+        self.assertEqual(repair._text(self.current['content']), repair._text(self.original['content']))
+        self.assertTrue(repair._styles_preserved(self.original['content'], self.current['content']))
+        self.assertNotIn('oldfigure', self.current['content'])
+        self.assertIn('https://mmbiz.qpic.cn/footer/640', self.current['content'])
+        self.assertIn('https://mmbiz.qpic.cn/guide/640', self.current['content'])
+        self.assertEqual({k: v for k, v in self.current.items() if k != 'content'},
+                         {k: v for k, v in self.original.items() if k != 'content'})
+        self.fit_cover.assert_not_called()
+        self.upload_cover.assert_not_called()
+        saved = json.loads((self.root / 'backups' / (result['backup_id'] + '.json')).read_text())
+        self.assertEqual(saved['original'], self.original)
+        self.assertEqual(saved['operation'], 'replace_images')
+        self.assertEqual(saved['status'], 'verified')
+
+    def test_explicit_cover_repair_contains_first_figure_and_only_overrides_thumb(self):
+        self.run_repair(repair_cover=True)
+        self.fit_cover.assert_called_once_with(self.paths[0], self.root)
+        self.upload_cover.assert_called_once_with(self.client, 'aav', str(self.cover))
+        self.assertEqual(self.current['thumb_media_id'], 'new-contained-cover')
+        self.assertEqual({k: v for k, v in self.current.items() if k not in {'content', 'thumb_media_id'}},
+                         {k: v for k, v in self.original.items() if k not in {'content', 'thumb_media_id'}})
+
+    def test_dry_run_does_not_upload_patch_or_create_backup(self):
+        result = self.run_repair(repair_cover=True, dry_run=True)
+        self.assertEqual(result['status'], 'dry_run')
+        self.assertTrue(result['dry_run'])
+        self.assertEqual(result['matched_images'], 4)
+        self.assertEqual(len(result['figures']), 4)
+        self.assertIn('cover_sha256', result)
+        self.fit_cover.assert_called_once_with(self.paths[0], self.root)
+        self.upload.assert_not_called()
+        self.upload_cover.assert_not_called()
+        self.client.update_draft.assert_not_called()
+        self.client.create_draft.assert_not_called()
+        self.assertFalse((self.root / 'backups').exists())
+        self.client.get_draft.assert_called_once_with('existing')
+
+    def test_source_repeated_figure_may_be_deduplicated_in_existing_draft(self):
+        (self.root / 'article.md').write_text('\n\n'.join(
+            f'[图片:{desc}]' for desc in [self.descriptions[0], *self.descriptions]))
+        result = self.run_repair()
+        self.assertEqual(result['replaced_images'], 4)
+        self.assertEqual(self.upload.call_count, 4)
+        for index, description in enumerate(self.descriptions):
+            self.assertIn(f'data-src="https://mmbiz.qpic.cn/figure{index}/640?from=appmsg" alt="{description}"',
+                          self.current['content'])
+
+    def test_repeated_existing_source_figure_reuses_one_upload(self):
+        descriptions = [self.descriptions[0], self.descriptions[0], *self.descriptions[1:]]
+        (self.root / 'article.md').write_text('\n\n'.join(f'[图片:{desc}]' for desc in descriptions))
+        first_image = f'<img data-src="https://mmbiz.qpic.cn/oldrepeat/640" alt="{self.descriptions[0]}">'
+        self.current['content'] = first_image + self.current['content']
+        result = self.run_repair()
+        self.assertEqual(result['replaced_images'], 5)
+        self.assertEqual(self.upload.call_count, 4)
+        self.assertEqual(repair._Body(self.current['content']).images.count('https://mmbiz.qpic.cn/figure0/640?from=appmsg'), 2)
+
+    def test_missing_alt_does_not_fall_back_to_image_order(self):
+        self.current['content'] = self.current['content'].replace(f' alt="{self.descriptions[0]}"', '')
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '身份与源稿不能唯一对应'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_saved_source_matched_alt_and_url_can_recover_stripped_alt(self):
+        (self.root / 'article.html').write_text(self.original['content'])
+        self.current['content'] = self.current['content'].replace(f' alt="{self.descriptions[0]}"', '')
+        result = self.run_repair()
+        self.assertEqual(result['match_methods'], ['saved_url', 'alt', 'alt', 'alt'])
+        self.assertNotIn('oldfigure', self.current['content'])
+
+    def test_ambiguous_saved_url_binding_is_rejected(self):
+        (self.root / 'article.html').write_text(self.original['content'].replace('oldfigure1', 'oldfigure0'))
+        self.current['content'] = self.current['content'].replace(f' alt="{self.descriptions[0]}"', '')
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '地址对应多个图号'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_unknown_description_for_known_figure_is_rejected(self):
+        self.current['content'] = self.current['content'].replace(self.descriptions[0], 'Figure 1 人工新增未知图')
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '描述与源稿不能唯一对应'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_extra_matching_figure_is_rejected(self):
+        self.current['content'] += f'<img data-src="https://mmbiz.qpic.cn/extra/640" alt="{self.descriptions[0]}">'
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '次数、顺序或身份'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_disagreeing_src_and_data_src_are_rejected(self):
+        self.current['content'] = self.current['content'].replace('data-src="https://mmbiz.qpic.cn/oldfigure0/640"',
+            'data-src="https://mmbiz.qpic.cn/oldfigure0/640" src="https://mmbiz.qpic.cn/different/640"')
+        with self.assertRaisesRegex(repair.DraftImageRepairError, 'src 与 data-src 不一致'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_concurrent_edit_is_not_overwritten(self):
+        self.client.get_draft.side_effect = [{'news_item': [dict(self.original)]},
+            {'news_item': [{**self.original, 'title': '刚改的标题'}]}]
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '未覆盖新内容'):
+            self.run_repair()
+        self.client.update_draft.assert_not_called()
+
+    def test_replacing_images_must_preserve_footer_and_sequence_on_readback(self):
+        def lose_footer(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['content'] = self.current['content'].replace('https://mmbiz.qpic.cn/footer/640', 'https://mmbiz.qpic.cn/lost/640')
+        self.client.update_draft.side_effect = lose_footer
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '不要盲目重试'):
+            self.run_repair()
+        self.client.update_draft.assert_called_once()
+        saved = json.loads(next((self.root / 'backups').glob('*.json')).read_text())
+        self.assertEqual(saved['status'], 'needs_review')
+
+    def test_readback_image_reordering_is_rejected(self):
+        def reorder_images(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['content'] = self.current['content'].replace('figure0/', 'swap/').replace(
+                'figure1/', 'figure0/').replace('swap/', 'figure1/')
+        self.client.update_draft.side_effect = reorder_images
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '不要盲目重试'):
+            self.run_repair()
+        self.client.update_draft.assert_called_once()
+
+    def test_cover_readback_must_equal_intended_material(self):
+        def lose_cover(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['thumb_media_id'] = 'old-cover'
+        self.client.update_draft.side_effect = lose_cover
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '不要盲目重试'):
+            self.run_repair(repair_cover=True)
+        self.client.update_draft.assert_called_once()
+
+    def test_stale_draft_failure_is_backed_up_without_recreation(self):
+        self.client.update_draft.side_effect = WeChatAPIError('stale', errcode=40007)
+        with self.assertRaises(WeChatAPIError):
+            self.run_repair()
+        self.client.create_draft.assert_not_called()
+        self.assertEqual(json.loads(next((self.root / 'backups').glob('*.json')).read_text())['status'], 'needs_review')
+
+    def test_duplicate_figure_bytes_are_rejected_before_uploads(self):
+        Path(self.paths[1]).write_bytes(Path(self.paths[0]).read_bytes())
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '多个图号对应同一张图片'):
+            self.run_repair()
+        self.upload.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_duplicate_uploaded_images_are_rejected_before_patch(self):
+        self.upload.side_effect = ['https://mmbiz.qpic.cn/samefigure/0'] * 4
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '没有对应到独立图片'):
+            self.run_repair(repair_cover=True)
+        self.upload_cover.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_cover_containment_failure_prevents_all_uploads(self):
+        self.fit_cover.return_value = None
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '完整图片封面适配失败'):
+            self.run_repair(repair_cover=True)
+        self.upload.assert_not_called()
+        self.upload_cover.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_cover_only_repair_is_not_a_noop(self):
+        self.upload.side_effect = [f'https://mmbiz.qpic.cn/oldfigure{i}/640' for i in range(4)]
+        result = self.run_repair(repair_cover=True)
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(self.current['content'], self.original['content'])
+        self.assertEqual(self.current['thumb_media_id'], 'new-contained-cover')
+        self.client.update_draft.assert_called_once()
+
+    def test_already_repaired_avoids_patch(self):
+        self.upload.side_effect = [f'https://mmbiz.qpic.cn/oldfigure{i}/640' for i in range(4)]
+        result = self.run_repair()
+        self.assertEqual(result['status'], 'already_repaired')
+        self.client.update_draft.assert_not_called()
+        self.assertFalse((self.root / 'backups').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

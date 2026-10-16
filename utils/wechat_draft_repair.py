@@ -1,7 +1,8 @@
-"""Replace only source-matched figure paragraphs in an existing WeChat draft."""
+"""Repair source-matched figures or typography in an existing WeChat draft."""
+from collections import Counter
 from datetime import datetime
 import hashlib
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 import json
 import os
@@ -18,6 +19,8 @@ from utils.wechat_html import (find_image_placeholders, replace_image_placeholde
 
 BACKUP_DIR = Path(__file__).resolve().parent.parent / "runtime" / "wechat_repairs"
 _PARAGRAPH = re.compile(r"<p\b[^>]*>.*?</p>", re.I | re.S)
+_IMAGE = re.compile(r"<img\b[^>]*>", re.I | re.S)
+_IMAGE_URL_ATTRIBUTE = re.compile(r'''(?<![\w-])(?:data-src|src)\s*=\s*(["'])(.*?)\1''', re.I | re.S)
 _FIELDS = ("title", "author", "digest", "content", "content_source_url", "thumb_media_id",
            "show_cover_pic", "pic_crop_235_1", "pic_crop_1_1", "need_open_comment", "only_fans_can_comment")
 
@@ -39,6 +42,17 @@ class _Body(HTMLParser):
         if tag == "img":
             attrs = dict(attrs)
             self.images.append(attrs.get("data-src") or attrs.get("src") or "")
+
+
+class _ImageTag(HTMLParser):
+    def __init__(self, content):
+        super().__init__(convert_charrefs=True)
+        self.attrs = {}
+        self.feed(content)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'img':
+            self.attrs = dict(attrs)
 
 
 def _text(content):
@@ -82,7 +96,8 @@ def _styles_preserved(expected, actual):
         for (tag, text, css), (other_tag, other_text, other_css) in zip(wanted, found))
 
 
-def _update_verified(client, job_id, draft_ref, original, updated, expected_text, urls=(), operation='images'):
+def _update_verified(client, job_id, draft_ref, original, updated, expected_text, urls=(), operation='images',
+                     *, expected_images=None, thumb_media_id=None):
     content = str(original.get('content') or '')
     updated = prepare_wechat_update_html(updated)
     if _first(client.get_draft(draft_ref['media_id'])) != original:
@@ -91,25 +106,176 @@ def _update_verified(client, job_id, draft_ref, original, updated, expected_text
     backup = BACKUP_DIR / f'{uuid.uuid4().hex}.json'
     record = {'job_id': job_id, **draft_ref, 'created_at': datetime.utcnow().isoformat(),
               'original': original, 'uploaded_images': list(urls), 'operation': operation, 'status': 'prepared'}
+    if expected_images is not None:
+        record['expected_image_keys'] = [_image_key(url) for url in expected_images]
+    if thumb_media_id is not None:
+        record['replacement_thumb_media_id'] = thumb_media_id
     with backup.open('x', encoding='utf-8') as stream:
         os.chmod(backup, 0o600)
         json.dump(record, stream, ensure_ascii=False, indent=2)
-    # No create fallback, regeneration, Blog requeue, or mass-publication call.
-    client.update_draft(draft_ref['media_id'], 0, {**original, 'content': updated})
-    actual = _first(client.get_draft(draft_ref['media_id']))
-    actual_body = str(actual.get('content') or '')
-    image_keys = {_image_key(url) for url in _Body(actual_body).images}
-    verified = (all(_image_key(url) in image_keys for url in list(urls) + _Body(content).images)
-                and _text(actual_body) == expected_text
-                and _styles_preserved(updated, actual_body)
-                and not (re.search(r'<h1\b', actual_body, re.I) and not re.search(r'<h1\b', content, re.I))
-                and all(actual.get(key) == value for key, value in original.items() if key != 'content'))
-    record.update(status='verified' if verified else 'needs_review',
-                  actual_content_sha256=hashlib.sha256(actual_body.encode()).hexdigest())
-    backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+    payload = {**original, 'content': updated}
+    if thumb_media_id is not None:
+        payload['thumb_media_id'] = thumb_media_id
+    try:
+        # No create fallback, regeneration, Blog requeue, or mass-publication call.
+        client.update_draft(draft_ref['media_id'], 0, payload)
+        actual = _first(client.get_draft(draft_ref['media_id']))
+        actual_body = str(actual.get('content') or '')
+        image_keys = [_image_key(url) for url in _Body(actual_body).images]
+        images_verified = (image_keys == [_image_key(url) for url in expected_images]
+                           if expected_images is not None else
+                           all(_image_key(url) in image_keys for url in list(urls) + _Body(content).images))
+        verified = (images_verified
+                    and _text(actual_body) == expected_text
+                    and _styles_preserved(updated, actual_body)
+                    and not (re.search(r'<h1\b', actual_body, re.I) and not re.search(r'<h1\b', content, re.I))
+                    and all(actual.get(key) == value for key, value in payload.items() if key != 'content'))
+        record.update(status='verified' if verified else 'needs_review',
+                      actual_content_sha256=hashlib.sha256(actual_body.encode()).hexdigest())
+    except Exception:
+        record['status'] = 'needs_review'
+        raise
+    finally:
+        backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
     if not verified:
         raise DraftImageRepairError('草稿已更新，但文字、图片或格式回读校验未通过；已保留备份，请核对，不要盲目重试')
     return {'ok': True, **draft_ref, 'verified': True, 'backup_id': backup.stem}
+
+
+def _wechat_image_url(attrs):
+    urls = [attrs[name] for name in ('data-src', 'src') if attrs.get(name)]
+    if not urls or any(urlsplit(url).scheme not in {'http', 'https'}
+                       or urlsplit(url).hostname not in {'mmbiz.qpic.cn', 'mmbiz.qlogo.cn'} for url in urls):
+        raise DraftImageRepairError('现有配图缺少可核对的微信图片地址，未更新')
+    if len({_image_key(url) for url in urls}) != 1:
+        raise DraftImageRepairError('现有配图 src 与 data-src 不一致，未更新')
+    return urls[0]
+
+
+def _saved_image_bindings(path, allowed_descriptions):
+    """Only a source-matched saved alt plus an exact WeChat URL can supply a fallback."""
+    from utils.figure_strategy import figure_key_from_description
+
+    bindings = {}
+    if not path.is_file():
+        return bindings
+    for match in _IMAGE.finditer(path.read_text(encoding='utf-8')):
+        attrs = _ImageTag(match.group()).attrs
+        description = str(attrs.get('alt') or '').strip()
+        key = figure_key_from_description(description)
+        if key not in allowed_descriptions or description not in allowed_descriptions[key]:
+            continue
+        try:
+            image_key = _image_key(_wechat_image_url(attrs))
+        except DraftImageRepairError:
+            continue
+        bindings.setdefault(image_key, set()).add(key)
+    return bindings
+
+
+def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, client_factory=WeChatClient):
+    """Replace existing figure URLs only; never infer figure identity from its position."""
+    from batch_processor import (_resolve_job_figures, _resolve_figure_path, _upload_cached,
+                                 _fit_wechat_cover, _upload_cover_cached)
+    from utils.blog_pipeline import _build_source_job
+    from utils.figure_strategy import figure_key_from_description
+
+    with version_lock(job_id, 'wechat_repair'):
+        job_pk = db.find_job_pk(job_id)
+        job = db.get_job(job_pk) if job_pk is not None else None
+        article = db.get_article(job_pk) if job else None
+        draft_ref = db.latest_wechat_draft(job_id)
+        if not article or article.publish_blocked or not draft_ref:
+            raise DraftImageRepairError('文章不存在、质量检查未通过或没有现有草稿，未更新')
+        directory = Path(article.content_dir)
+        descriptions = find_image_placeholders(unwrap_linked_image_placeholders(
+            normalize_image_placeholders((directory / 'article.md').read_text(encoding='utf-8'))))
+        source_keys = [figure_key_from_description(desc) for desc in descriptions]
+        if not source_keys or None in source_keys:
+            raise DraftImageRepairError('源稿图片标记无法对应图号，未更新')
+        by_key, allowed = {}, {}
+        for key, description in zip(source_keys, descriptions):
+            by_key.setdefault(key, description)
+            allowed.setdefault(key, set()).add(description)
+        saved_bindings = _saved_image_bindings(directory / 'article.html', allowed)
+        client = client_factory(account=draft_ref['account'])
+        original = _first(client.get_draft(draft_ref['media_id']))
+        content = str(original.get('content') or '')
+        patches, matched_keys, methods = [], [], []
+        for match in _IMAGE.finditer(content):
+            attrs = _ImageTag(match.group()).attrs
+            description = str(attrs.get('alt') or '').strip()
+            key = figure_key_from_description(description)
+            method = 'alt'
+            if key in allowed:
+                if description not in allowed[key]:
+                    raise DraftImageRepairError('草稿配图描述与源稿不能唯一对应，未更新')
+            elif not description:
+                old_url = attrs.get('data-src') or attrs.get('src') or ''
+                candidates = saved_bindings.get(_image_key(old_url), set())
+                if len(candidates) > 1:
+                    raise DraftImageRepairError('已存配图地址对应多个图号，未更新')
+                key = next(iter(candidates), None)
+                method = 'saved_url'
+            else:
+                continue
+            if key is None:
+                continue
+            _wechat_image_url(attrs)
+            if not _IMAGE_URL_ATTRIBUTE.search(match.group()):
+                raise DraftImageRepairError('现有配图缺少可替换的地址属性，未更新')
+            patches.append(match)
+            matched_keys.append(key)
+            methods.append(method)
+        source_counts, matched_counts = Counter(source_keys), Counter(matched_keys)
+        remaining = iter(source_keys)
+        if (set(matched_keys) != set(source_keys)
+                or any(count > source_counts[key] for key, count in matched_counts.items())
+                or not all(any(candidate == key for candidate in remaining) for key in matched_keys)):
+            raise DraftImageRepairError('草稿配图次数、顺序或身份与源稿不能唯一对应，未更新')
+        figures, figures_dir = _resolve_job_figures(_build_source_job(job), set(by_key))
+        paths = [_resolve_figure_path(desc, figures_dir, figures) for desc in by_key.values()]
+        if (any(not path or not Path(path).is_file() for path in paths)
+                or len({Path(path).resolve() for path in paths}) != len(paths)):
+            raise DraftImageRepairError('真实图片缺失或重复，未更新')
+        hashes = [hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths]
+        if len(set(hashes)) != len(hashes):
+            raise DraftImageRepairError('多个图号对应同一张图片，未更新')
+        cover_path = _fit_wechat_cover(paths[0], figures_dir) if repair_cover else None
+        if repair_cover and (not cover_path or not Path(cover_path).is_file()):
+            raise DraftImageRepairError('完整图片封面适配失败，未更新')
+        plan = {'job_id': job_id, **draft_ref, 'matched_images': len(patches), 'unique_images': len(paths),
+                'match_methods': methods, 'repair_cover': bool(repair_cover),
+                'figures': [{'label': key[0], 'is_extended': key[1], 'occurrences': matched_counts[key],
+                             'sha256': digest} for key, digest in zip(by_key, hashes)]}
+        if cover_path:
+            plan['cover_sha256'] = hashlib.sha256(Path(cover_path).read_bytes()).hexdigest()
+        if dry_run:
+            return {'ok': True, 'status': 'dry_run', 'dry_run': True, **plan,
+                    'current_cover_crop': {key: original.get(key) for key in ('pic_crop_235_1', 'pic_crop_1_1')}}
+        urls = [_upload_cached(client, draft_ref['account'], path) for path in paths]
+        for url in urls:
+            _wechat_image_url({'src': url})
+        if len({_image_key(url) for url in urls}) != len(urls):
+            raise DraftImageRepairError('上传结果没有对应到独立图片，未更新')
+        urls_by_key = dict(zip(by_key, urls))
+        updated = content
+        for match, key in reversed(list(zip(patches, matched_keys))):
+            tag = match.group()
+            for attr in reversed(list(_IMAGE_URL_ATTRIBUTE.finditer(tag))):
+                tag = tag[:attr.start(2)] + escape(urls_by_key[key], quote=True) + tag[attr.end(2):]
+            updated = updated[:match.start()] + tag + updated[match.end():]
+        if _text(updated) != _text(content) or not _styles_preserved(content, updated):
+            raise DraftImageRepairError('修复会改变正文文字或样式，未更新')
+        thumb = _upload_cover_cached(client, draft_ref['account'], cover_path) if cover_path else None
+        if cover_path and not thumb:
+            raise DraftImageRepairError('完整图片封面上传失败，未更新')
+        if updated == content and (thumb is None or thumb == original.get('thumb_media_id')):
+            return {'ok': True, 'status': 'already_repaired', 'verified': True, **plan}
+        result = _update_verified(client, job_id, draft_ref, original, updated, _text(content), urls,
+                                  operation='replace_images', expected_images=_Body(updated).images,
+                                  thumb_media_id=thumb)
+        return {**result, **plan, 'status': 'repaired', 'replaced_images': len(patches)}
 
 
 def repair_formatting(db, job_id, *, client_factory=WeChatClient):

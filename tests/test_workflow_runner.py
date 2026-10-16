@@ -52,6 +52,13 @@ class WorkflowRunnerTests(unittest.TestCase):
         self.assertEqual(workflow_runner._normalize('publish', [item]), [item])
         self.assertEqual(workflow_runner._normalize('translate', [item]), [{'job_id': 'paper', 'lang': 'en'}])
 
+    def test_explicit_cover_and_wechat_repair_flags(self):
+        blog = {'job_id': 'p1', 'lang': 'en', 'repair_images': True, 'repair_cover': True}
+        wechat = {'job_id': 'p2', 'lang': 'zh', 'repair_wechat_images': True, 'repair_cover': True}
+        self.assertEqual(workflow_runner._normalize('publish', [blog, wechat]), [blog, wechat])
+        self.assertEqual(workflow_runner._normalize('publish', [{'job_id': 'p3', 'lang': 'zh', 'repair_cover': True}]),
+                         [{'job_id': 'p3', 'lang': 'zh'}])
+
     def test_worker_repairs_only_selected_language_without_republishing_or_translating(self):
         import workflow_worker
         with tempfile.TemporaryDirectory() as temp:

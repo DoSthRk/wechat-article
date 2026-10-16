@@ -64,6 +64,8 @@ def _normalize(stage: str, selections: Iterable[Dict[str, Any]]) -> List[Dict[st
         job_id = str(item.get("job_id") or "").strip()
         lang = str(item.get("lang") or "").strip().lower()
         key = (job_id, lang)
+        if item.get('repair_wechat_images') is True and (lang != 'zh' or item.get('repair_images') is True):
+            raise ValueError('公众号图片修复只支持 zh，且不能与 Blog 修复混在同一项')
         if not job_id or lang not in allowed or key in seen:
             continue
         seen.add(key)
@@ -72,6 +74,12 @@ def _normalize(stage: str, selections: Iterable[Dict[str, Any]]) -> List[Dict[st
             normalized_item["force"] = True
         if stage == "publish" and item.get("repair_images") is True:
             normalized_item["repair_images"] = True
+            if item.get("repair_cover") is True:
+                normalized_item["repair_cover"] = True
+        if stage == "publish" and lang == "zh" and item.get("repair_wechat_images") is True:
+            normalized_item["repair_wechat_images"] = True
+            if item.get("repair_cover") is True:
+                normalized_item["repair_cover"] = True
         normalized.append(normalized_item)
     return normalized
 

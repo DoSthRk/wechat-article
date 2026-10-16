@@ -37,7 +37,7 @@ _LEGEND_CAP_RE = re.compile(
     re.I,
 )
 _NUM_RE = re.compile(
-    r"(?:(?:Extended Data\s+)?Fig(?:ure)?\.?|图|図|그림|Рисунок|Рис\.?)\s*(\d+)",
+    r"(?:(?:(?:Extended Data|Supplementary|Supplemental|Suppl\.?)\s+)?Fig(?:ure)?\.?|图|図|그림|Рисунок|Рис\.?)\s*(\d+)",
     re.I,
 )
 _DPI = 170
@@ -48,7 +48,7 @@ _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
 _DETACHED_FIGPAGE_MAX_WORDS = 1000  # 文末整页科研图可含大量坐标轴/图例文字
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
 _CONTENT_PAD = 6          # 文本/图形并集外留白，避免坐标轴文字贴边
-_CROP_VERSION = 4         # v4: repeated JEM vector-logo header evidence
+_CROP_VERSION = 5         # v5: include source crop geometry for shared acceptance gate
 
 
 @dataclass
@@ -60,6 +60,8 @@ class Figure:
     image_path: str
     width: int
     height: int
+    bbox: Optional[Tuple[float, float, float, float]] = None  # PDF points, top-left origin
+    source_sha256: str = ""
 
 
 def _manifest_version_path(manifest: Path) -> Path:
@@ -88,7 +90,7 @@ def match_figure(figures: List[Figure], description: str) -> Optional[Figure]:
     num = figure_number(description)
     if not num:
         return None
-    want_ext = bool(re.search(r"extended\s*data|附录|扩展数据", description or "", re.I))
+    want_ext = bool(re.search(r"extended\s*data|supplementary|supplemental|suppl\.?|附录|扩展数据", description or "", re.I))
     pool = [f for f in figures if f.label == num and f.is_extended == want_ext]
     return pool[0] if pool else None
 
@@ -346,6 +348,7 @@ def extract_figures_from_legend_pages(
                     label=num, is_extended=is_ext, caption="",
                     page=fp + 1, image_path=str(out / fname),
                     width=crop.width, height=crop.height,
+                    bbox=tuple(region),
                 ))
                 used_pages.add(fp)
     finally:
@@ -440,6 +443,7 @@ def extract_figures(
                         label=num, is_extended=is_ext, caption="",
                         page=fp + 1, image_path=str(out / fname),
                         width=crop.width, height=crop.height,
+                        bbox=tuple(region),
                     ))
     finally:
         doc.close()

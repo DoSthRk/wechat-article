@@ -57,6 +57,8 @@ class TestDistributeOne(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         base = Path(self._tmp.name)
+        self._content_root = patch.object(bp, "ARTICLE_CONTENT_DIR", str(base / "jobs"))
+        self._content_root.start()
         self.db = DatabaseManager(database_url=f"sqlite:///{(base / 't.db').as_posix()}")
         task = self.db.get_or_create_task("t")
         self.job_pk = self.db.upsert_job(
@@ -105,6 +107,7 @@ class TestDistributeOne(unittest.TestCase):
         self._source_pdf.stop()
         self._blog_url.stop()
         self._apply_figures.stop()
+        self._content_root.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
 
@@ -211,19 +214,41 @@ class TestDistributeOne(unittest.TestCase):
         self.assertIsNone(self.db.get_distribution(self.job_pk, "wechat", account="default", lang="zh"))
         self.auto_blog_mock.assert_not_called()
 
-    def test_missing_required_figure_does_not_block_draft_write(self):
+    def test_missing_required_figure_blocks_before_any_upload_or_draft_write(self):
         content_dir = Path(self.db.get_article(self.job_pk).content_dir)
         (content_dir / "article.md").write_text(
             "# 标题\n\n正文。\n\n[图片:Figure 1 关键结果]", encoding="utf-8",
         )
         fake = FakeWeChat()
-        with patch.object(bp, "_resolve_job_figures", return_value=([], content_dir / "figures")):
-            self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        with patch.object(bp, "_resolve_job_figures", return_value=([], content_dir / "figures")), \
+             patch.object(bp, "_auto_cover_media_id") as cover:
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
 
-        self.assertEqual(len(fake.created), 1)
+        self.assertEqual(fake.created, [])
         self.assertEqual(fake.updated, [])
         job_row = self.db.get_job(self.job_pk)
-        self.assertEqual(job_row.status, JobStatus.PUBLISHED)
+        self.assertEqual(job_row.status, JobStatus.FAILED)
+        self.source_pdf_mock.assert_not_called()
+        cover.assert_not_called()
+        self.auto_blog_mock.assert_not_called()
+
+    def test_source_binding_error_marks_failed_without_uploading(self):
+        fake = FakeWeChat()
+        with patch.object(bp, "_resolve_job_figures", side_effect=ValueError("原文 PDF 已变化")):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        self.assertEqual(self.db.get_job(self.job_pk).status, JobStatus.FAILED)
+        self.assertEqual(fake.created, [])
+        self.source_pdf_mock.assert_not_called()
+        self.auto_blog_mock.assert_not_called()
+
+    def test_failed_figure_upload_does_not_write_incomplete_draft(self):
+        fake = FakeWeChat()
+        with patch.object(bp, "_apply_figures", side_effect=WeChatAPIError("image upload failed")):
+            self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+        self.assertEqual(self.db.get_job(self.job_pk).status, JobStatus.FAILED)
+        self.assertEqual(fake.created, [])
+        self.assertEqual(fake.updated, [])
+        self.auto_blog_mock.assert_not_called()
 
     def test_zero_successful_body_images_does_not_block_draft_write(self):
         fake = FakeWeChat()

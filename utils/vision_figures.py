@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import re
 import time
@@ -139,16 +140,22 @@ def _ask_page(client, model: str, pil) -> Optional[dict]:
     raise last_exc  # type: ignore[misc]
 
 
-def _crop_bbox(pil, bbox) -> "Optional[object]":
-    """按归一化 bbox 裁图（VLM bbox 回落用）；越界/过小则回落整页。"""
+def _crop_bbox(pil, bbox):
+    """只接受明确、有效的模型图框；失败绝不包装成整页图片。"""
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4 or any(isinstance(v, bool) for v in bbox):
+        raise UnsafeFigureCrop("Vision figure bbox is missing or malformed")
     try:
         x0, y0, x1, y1 = (float(v) for v in bbox)
-    except (TypeError, ValueError):
-        return pil
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise UnsafeFigureCrop("Vision figure bbox is not numeric") from exc
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)) or not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        raise UnsafeFigureCrop("Vision figure bbox is outside the page or inverted")
+    if (x1 - x0) * (y1 - y0) >= 0.95:
+        raise UnsafeFigureCrop("Vision figure bbox is effectively a full page; figure review required")
     w, h = pil.size
-    box = (max(0, int(x0 * w)), max(0, int(y0 * h)), min(w, int(x1 * w)), min(h, int(y1 * h)))
+    box = (int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h))
     if box[2] - box[0] < _MIN_CROP_PX or box[3] - box[1] < _MIN_CROP_PX:
-        return pil
+        raise UnsafeFigureCrop("Vision figure bbox is too small; figure review required")
     return pil.crop(box)
 
 
@@ -225,27 +232,16 @@ def _graphics_crop_box(pdf_path: str, idx: int):
 
 
 def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
-    """优先用确定性图形框裁剪（排除题注/页脚/正文/顶部 Logo）；失败回落 VLM bbox。"""
-    box_pt = None
-    try:
-        box_pt = _graphics_crop_box(pdf_path, idx)
-    except UnsafeFigureCrop:
-        raise  # Never bypass a known unsafe crop by returning a full-page VLM fallback.
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("graphics 裁剪失败，回落 VLM bbox：%s", exc)
-    if box_pt:
-        w, h = pil.size
-        x0, y0, x1, y1 = (int(v * _RENDER_SCALE) for v in box_pt)
-        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
-        if x1 - x0 >= _MIN_CROP_PX and y1 - y0 >= _MIN_CROP_PX:
-            return pil.crop((x0, y0, x1, y1))
-    return _crop_bbox(pil, vlm_bbox or [0, 0, 1, 1])
+    """采用模型确认的整图边界，不能被全页图形/图注背景的并集覆盖。
+
+    后续统一质量门禁负责核对这个候选框与 PDF 内容。此处不再把无效边界
+    变成整页，也不扩大到与该候选无关的其他图形。
+    """
+    return _crop_bbox(pil, vlm_bbox)
 
 
-# 裁剪逻辑版本：升级裁剪算法时 +1。缓存命中但版本陈旧 → 按缓存的 page 就地重切（不重调 VLM）。
-# v3: 算并集前剔除「贯穿大半页的细规则线」（分栏线/页眉页脚横线），避免裁进正文
-# v4: 四条抽图路径共用边缘杂志页眉/Logo 清理器
-_CROP_VERSION = 6
+# v7: honor explicit model bbox; old page/label guesses must be detected again.
+_CROP_VERSION = 7
 
 
 def _crop_version_path(out: Path) -> Path:
@@ -266,28 +262,13 @@ def _write_manifest(manifest: Path, figs: List[Figure]) -> None:
     _crop_version_path(manifest.parent).write_text(str(_CROP_VERSION), encoding="utf-8")
 
 
-def _recrop_cached(pdf_path: str, figs: List[Figure]) -> List[Figure]:
-    """裁剪逻辑升级后，用缓存图的 page 信息就地重切（覆盖 jpg、更新尺寸）；不重调 VLM。"""
-    for f in figs:
-        try:
-            pil = _render(pdf_path, f.page - 1)
-            crop = _make_crop(pdf_path, f.page - 1, pil, [0, 0, 1, 1])
-            crop.save(f.image_path, quality=85)
-            f.width, f.height = crop.width, crop.height
-        except Exception:
-            # Never bless stale image bytes with the new crop version.
-            logger.exception("重切图%s(p%d)失败，保留旧缓存版本以便重试", f.label, f.page)
-            raise
-    return figs
-
-
 def extract_figures_via_vision(
     pdf_path: str, out_dir: str, *, max_pages: Optional[int] = None, use_cache: bool = True,
 ) -> List[Figure]:
     """渲染含图页 → VLM 给图号+bbox → 裁整图 → 返回 Figure 列表（按图号，可喂 match_figure）。
 
     缓存到 out_dir/vision_figures_manifest.json；同图号只取首张。VLM/网络失败的页跳过。
-    裁剪逻辑升级（``_CROP_VERSION`` 变化）时，缓存命中也会就地重切（不重调 VLM）。
+    裁剪逻辑升级（``_CROP_VERSION`` 变化）时重新识别图号和边界，不再相信旧页码。
     """
     out = Path(out_dir)
     manifest = out / "vision_figures_manifest.json"
@@ -297,28 +278,28 @@ def extract_figures_via_vision(
         except Exception:  # noqa: BLE001
             figs = None
         if figs is not None:
-            if _read_crop_version(out) == _CROP_VERSION:
+            if (_read_crop_version(out) == _CROP_VERSION
+                    and all(f.bbox and Path(f.image_path).is_file() for f in figs)):
                 return figs
-            logger.info("裁剪逻辑已升级(v%s)，就地重切 %d 张缓存图（不调 VLM）", _CROP_VERSION, len(figs))
-            figs = _recrop_cached(pdf_path, figs)
-            _write_manifest(manifest, figs)
-            return figs
+            logger.info("裁剪缓存待重新验证(v%s)，重新识别图号和 bbox，不复用旧页码", _CROP_VERSION)
     out.mkdir(parents=True, exist_ok=True)
     client = _client()
     model = os.getenv("VISION_MODEL", "kimi-k2.6").strip()
     figs: List[Figure] = []
-    seen: set = set()
+    detection_failed = False
     for idx in _image_pages(pdf_path, max_pages):
         pil = _render(pdf_path, idx)
         try:
             info = _ask_page(client, model, pil)
         except Exception as exc:  # noqa: BLE001 - 单页失败不阻断
             logger.warning("VLM 第 %d 页失败：%s", idx + 1, exc)
+            detection_failed = True
             continue
-        if not info or not info.get("has_figure"):
+        if not isinstance(info, dict) or info.get("has_figure") is not True:
             continue
-        num = re.sub(r"[^0-9]", "", str(info.get("figure_number") or ""))
-        if not num or num in seen:
+        label = re.fullmatch(r"(?:fig(?:ure)?\.?\s*)?([1-9][0-9]*)", str(info.get("figure_number") or "").strip(), re.I)
+        num = label.group(1) if label else ""
+        if not num:
             continue
         crop = _make_crop(pdf_path, idx, pil, info.get("bbox"))
         fp = out / f"figvis{num}_p{idx + 1}.jpg"
@@ -326,9 +307,13 @@ def extract_figures_via_vision(
         figs.append(Figure(
             label=num, is_extended=False, caption=str(info.get("caption") or ""),
             page=idx + 1, image_path=str(fp), width=crop.width, height=crop.height,
+            bbox=tuple(float(v) * pil.size[index % 2] / _RENDER_SCALE
+                       for index, v in enumerate(info["bbox"])),
         ))
-        seen.add(num)
         logger.info("VLM 第 %d 页 → 图%s（%s）", idx + 1, num, str(info.get("caption") or "")[:30])
-    _write_manifest(manifest, figs)
+    if not detection_failed:
+        _write_manifest(manifest, figs)
+    else:
+        logger.warning("部分页面视觉识别失败，本次结果不写入成功缓存，保留重试机会")
     logger.info("VLM 抽到 %d 张图：%s", len(figs), sorted(f.label for f in figs))
     return figs

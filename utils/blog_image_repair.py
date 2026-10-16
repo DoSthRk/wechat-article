@@ -1,4 +1,5 @@
 """Patch only figure URLs in an existing published CMS article, with backup/readback."""
+from collections import Counter
 from datetime import datetime
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -29,11 +30,12 @@ class _Image(HTMLParser):
 
 
 @serialized_version
-def repair_images(workflow, job_id, lang='zh'):
+def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
+    """Repair figure URLs; opt in to replacing a custom cover with the first figure."""
     from batch_processor import _resolve_job_figures, _resolve_figure_path
     from utils.blog_pipeline import BlogPipelineError, _build_source_job
     from utils.blog_urls import public_blog_url
-    from db.database import BLOG_LANGS
+    from db.database import BLOG_LANGS, BLOG_SOURCE_LANG
 
     if lang not in BLOG_LANGS:
         raise BlogPipelineError('不支持的 Blog 语言，未更新')
@@ -48,8 +50,26 @@ def repair_images(workflow, job_id, lang='zh'):
     source = Path(article.content_dir) / 'article.md'
     descriptions = find_image_placeholders(unwrap_linked_image_placeholders(normalize_image_placeholders(source.read_text(encoding='utf-8'))))
     keys = [figure_key_from_description(desc) for desc in descriptions]
-    if not keys or None in keys or len(set(keys)) != len(keys):
-        raise BlogPipelineError('源稿图片标记无法唯一对应，未更新')
+    if not keys or None in keys:
+        raise BlogPipelineError('源稿图片标记无法对应图号，未更新')
+    # Reusing a figure in multiple sections is valid. Resolve/upload once per
+    # figure key, but retain every source occurrence for CMS alignment checks.
+    descriptions_by_key = {}
+    for key, description in zip(keys, descriptions):
+        descriptions_by_key.setdefault(key, description)
+    unique_keys = list(descriptions_by_key)
+    target_descriptions = descriptions
+    if lang != BLOG_SOURCE_LANG:
+        version = workflow.db.get_article_version(job_pk, lang)
+        if version is None or not Path(version.content_path).is_file():
+            raise BlogPipelineError('目标语言稿件缺失，无法核对 CMS 配图，未更新')
+        target_descriptions = find_image_placeholders(unwrap_linked_image_placeholders(
+            normalize_image_placeholders(Path(version.content_path).read_text(encoding='utf-8'))))
+        if [figure_key_from_description(desc) for desc in target_descriptions] != keys:
+            raise BlogPipelineError('目标语言稿件图号与源稿不匹配，未更新')
+    allowed_descriptions = {}
+    for key, description in zip(keys, target_descriptions):
+        allowed_descriptions.setdefault(key, set()).add(description)
     client = workflow.blog_client_factory()
     langcode = workflow._drupal_language(lang)
     original = client.get(dist.external_id, langcode=langcode)['data']['attributes']
@@ -58,15 +78,31 @@ def repair_images(workflow, job_id, lang='zh'):
     if original.get('langcode') != langcode or not original.get('status') or body.get('format') != 'full_html':
         raise BlogPipelineError('CMS 语言、发布状态或正文格式不匹配，未更新')
     matches = []
-    for key in keys:
-        candidates = [m for m in re.finditer(r'<img\b[^>]*>', content, re.I)
-                      if figure_key_from_description(_Image(m.group()).attrs.get('alt') or '') == key]
-        if len(candidates) != 1:
-            raise BlogPipelineError('CMS 配图与源稿不能唯一对应，未更新')
-        matches.append(candidates[0])
-    figures, directory = _resolve_job_figures(_build_source_job(job), set(keys))
-    paths = [_resolve_figure_path(desc, directory, figures) for desc in descriptions]
-    if any(not path or not Path(path).is_file() for path in paths) or len(set(paths)) != len(paths):
+    cms_keys = []
+    for match in re.finditer(r'<img\b[^>]*>', content, re.I):
+        alt = str(_Image(match.group()).attrs.get('alt') or '').strip()
+        key = figure_key_from_description(alt)
+        if key in descriptions_by_key:
+            if alt not in allowed_descriptions[key]:
+                raise BlogPipelineError('CMS 配图描述与稿件不能唯一对应，未更新')
+            matches.append(match)
+            cms_keys.append(key)
+    # The Blog renderer removes repeat uses of the same image. Permit that
+    # deduplication without permitting additional or reordered CMS figures.
+    source_counts, cms_counts = Counter(keys), Counter(cms_keys)
+    remaining_keys = iter(keys)
+    if (set(cms_keys) != set(keys)
+            or any(count > source_counts[key] for key, count in cms_counts.items())
+            or not all(any(candidate == key for candidate in remaining_keys) for key in cms_keys)):
+        raise BlogPipelineError('CMS 配图次数或顺序与源稿不能唯一对应，未更新')
+    source_attrs = [re.search(r'(?<![\w-])src\s*=\s*([\"\'])(.*?)\1', match.group(), re.I | re.S)
+                    for match in matches]
+    if any(attr is None for attr in source_attrs):
+        raise BlogPipelineError('CMS 图片缺少可替换的 src，未更新')
+    figures, directory = _resolve_job_figures(_build_source_job(job), set(unique_keys))
+    paths = [_resolve_figure_path(desc, directory, figures) for desc in descriptions_by_key.values()]
+    if (any(not path or not Path(path).is_file() for path in paths)
+            or len({Path(path).resolve() for path in paths}) != len(paths)):
         raise BlogPipelineError('真实图片缺失或重复，未更新')
     hashes = [hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths]
     if len(set(hashes)) != len(hashes):
@@ -75,21 +111,21 @@ def repair_images(workflow, job_id, lang='zh'):
     urls = [store.upload(path) for path in paths]  # Store verifies public asset bytes before CMS writes.
     if len(set(urls)) != len(urls):
         raise BlogPipelineError('上传图片没有唯一对应，未更新')
+    urls_by_key = dict(zip(unique_keys, urls))
     updated = content
     replacements = {}
-    for match, url in sorted(zip(matches, urls), key=lambda item: item[0].start(), reverse=True):
-        attr = re.search(r'(?<![\w-])src\s*=\s*([\"\'])(.*?)\1', match.group(), re.I | re.S)
-        if not attr:
-            raise BlogPipelineError('CMS 图片缺少可替换的 src，未更新')
+    for match, attr, key in reversed(list(zip(matches, source_attrs, cms_keys))):
+        url = urls_by_key[key]
         replacements[unescape(attr.group(2))] = url
         tag = match.group()[:attr.start(2)] + escape(url, quote=True) + match.group()[attr.end(2):]
         updated = updated[:match.start()] + tag + updated[match.end():]
-    if updated == content:
+    cover = original.get('field_cover_url')
+    updated_cover = urls[0] if repair_cover else replacements.get(cover, cover)
+    if updated == content and updated_cover == cover:
         return {'job_id': job_id, 'lang': lang, 'status': 'already_repaired', 'verified': True, 'url': dist.external_url}
     payload = {'body': updated, 'body_format': body['format'], 'langcode': langcode}
-    cover = original.get('field_cover_url')
-    if cover in replacements:
-        payload['cover_url'] = replacements[cover]
+    if updated_cover != cover:
+        payload['cover_url'] = updated_cover
     if client.get(dist.external_id, langcode=langcode)['data']['attributes'] != original:
         raise BlogPipelineError('CMS 文章刚被修改，未覆盖新内容')
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)

@@ -354,6 +354,23 @@ def create_app(testing: bool = False) -> Flask:
             # Remote exceptions may contain credentials; never echo them.
             return jsonify({"ok": False, "error": "草稿修复未确认，请先核对现有草稿和备份，不要盲目重试"}), 502
 
+    @app.post("/api/wechat/inspect-image-repair")
+    def api_wechat_inspect_image_repair():
+        """Read-only remote draft preflight. Writes use the durable workflow."""
+        from utils.wechat_draft_repair import DraftImageRepairError, repair_existing_images
+        data = request.get_json(silent=True) or {}
+        job_id = str(data.get('job_id') or '').strip()
+        if not job_id:
+            return jsonify({'ok': False, 'error': '缺少 job_id'}), 400
+        _require_job(job_id)
+        try:
+            return jsonify(repair_existing_images(get_db_manager(), job_id, dry_run=True,
+                                                   repair_cover=data.get('repair_cover') is True))
+        except DraftImageRepairError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 409
+        except Exception:
+            return jsonify({'ok': False, 'error': '图片检查失败，未更新草稿'}), 502
+
     @app.post("/api/source-pdf/apply-to-draft")
     def api_source_pdf_apply_to_draft():
         """Point 阅读原文 to the verified Chinese Blog and keep the footer guide."""

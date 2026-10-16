@@ -25,7 +25,7 @@ def test_vision_does_not_fallback_to_whole_page_after_unsafe_geometry():
             vf._make_crop('source.pdf', 0, Image.new('RGB', (600, 800)), [0, 0, 1, 1])
 
 
-def test_failed_cached_recrop_does_not_mark_stale_bytes_current():
+def test_failed_cached_redetection_does_not_mark_stale_bytes_current():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         figure = Figure('1', False, '', 1, str(root / 'old.jpg'), 600, 800)
@@ -33,7 +33,7 @@ def test_failed_cached_recrop_does_not_mark_stale_bytes_current():
         vf._write_manifest(root / 'vision_figures_manifest.json', [figure])
         version = root / '.crop_version'
         version.write_text('0')
-        with patch.object(vf, '_render', return_value=Image.new('RGB', (600, 800))), patch.object(vf, '_make_crop', side_effect=UnsafeFigureCrop('overlap')):
+        with patch.object(vf, '_client'), patch.object(vf, '_image_pages', return_value=[0]), patch.object(vf, '_ask_page', return_value={'has_figure': True, 'figure_number': '1', 'bbox': [0, 0, 1, 1]}), patch.object(vf, '_render', return_value=Image.new('RGB', (600, 800))), patch.object(vf, '_make_crop', side_effect=UnsafeFigureCrop('overlap')):
             with pytest.raises(UnsafeFigureCrop):
                 vf.extract_figures_via_vision('source.pdf', tmp)
         assert version.read_text() == '0'

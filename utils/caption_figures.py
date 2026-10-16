@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 7     # v7: evidence-based repeated JEM vector-logo removal
+_CAPTION_VERSION = 8     # v8: reject legend backgrounds; pair detached raster figures
 
 
 def caption_enabled() -> bool:
@@ -69,11 +69,13 @@ def _group_lines(page) -> List[dict]:
         lines.append(_mk_line(row))
         # In two-column papers a right-column caption can share a baseline with
         # left-column prose. Preserve that caption as its own line.
-        right = [word for word in row if float(word["x0"]) >= float(page.width) * 0.5]
-        if right:
-            right_line = _mk_line(right)
-            if _CAPTION_RE.match(right_line["text"]):
-                lines.append(right_line)
+        ordered = sorted(row, key=lambda word: float(word["x0"]))
+        for pos, word in enumerate(ordered):
+            if pos and float(word["x0"]) >= float(page.width) * 0.45:
+                right_line = _mk_line(ordered[pos:])
+                if _CAPTION_RE.match(right_line["text"]):
+                    lines.append(right_line)
+                    break
 
     for w in words:
         if cur and float(w["top"]) - float(cur[0]["top"]) > _LINE_TOL:
@@ -157,7 +159,8 @@ def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, floa
     """Accept a graphics-dominant figure page following a bottom-of-page caption."""
     page_w, page_h = float(page.width), float(page.height)
     clean = [e for e in _gfx(page) if not is_rule_line(e, page_w, page_h)]
-    if len(clean) < 250:
+    raster_area = sum((e['x1'] - e['x0']) * (e['bottom'] - e['top']) for e in (page.images or []))
+    if len(clean) < 150 and raster_area < page_w * page_h * 0.20:
         return None
     box = _union_box(clean)
     if box is None or box[1] > page_h * 0.35 or box[3] - box[1] < page_h * 0.35:
@@ -166,6 +169,38 @@ def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, floa
         clean, figure_crop_words(page), box, page_w, page_h,
     )
     return x0, top, x1, min(page_h * 0.95, bottom + 7)
+
+
+def _without_caption_backgrounds(page, cap, gfx):
+    """Shaded legend boxes are graphics, but not scientific figures.
+
+    Exclude the enclosing box AND decorations inside it, not only its border.
+    The caption must be near its top; a figure frame enclosing a bottom legend
+    must not hide actual panels.
+    """
+    regions = [r for r in (page.rects or [])
+               if r['x0'] <= cap['x0'] + 2 and r['x1'] >= cap['x1'] - 2
+               and r['top'] - 2 <= cap['top'] <= r['top'] + 20
+               and r['bottom'] > cap['bottom'] + 20]
+    # Some publishers draw the final legend line in a second overlapping box.
+    for _ in range(2):
+        for rect in page.rects or []:
+            if any(abs(rect['x0'] - r['x0']) < 2 and abs(rect['x1'] - r['x1']) < 2
+                   and r['top'] <= rect['top'] <= r['bottom'] for r in regions):
+                if rect not in regions:
+                    regions.append(rect)
+    return [e for e in gfx if not any(
+        e['x0'] >= r['x0'] - 2 and e['x1'] <= r['x1'] + 2
+        and e['top'] >= r['top'] - 2 and e['bottom'] <= r['bottom'] + 2
+        for r in regions)]
+
+
+def _detached_preceding_box(page):
+    """Only pair an immediately preceding graphics-only page, never prose."""
+    from utils.figure_quality import prose_lines
+    if prose_lines(page.extract_words() or [], (0, 0, float(page.width), float(page.height))) >= 4:
+        return None
+    return _following_page_figure_box(page)
 
 
 def _left_figure_for_right_caption(page, cap: dict) -> Optional[Tuple[float, float, float, float]]:
@@ -210,20 +245,21 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                 num = re.sub(r"[^0-9]", "", m.group(2))
                 is_ext = bool(re.search(r"extended|sup", m.group(1), re.I))
                 key = (num, is_ext)
-                if not num or key in seen:
+                if not num:
                     continue
                 figure_idx = idx
-                cap_gfx = gfx
+                cap_gfx = _without_caption_backgrounds(page, cap, gfx)
                 cap_words = figure_crop_words(page)
                 if float(cap["x0"]) >= page_w * 0.5:
-                    cap_gfx = [e for e in gfx if float(e["x0"]) >= page_w * 0.5 - 10]
+                    cap_gfx = [e for e in cap_gfx if float(e["x0"]) >= page_w * 0.5 - 10]
                     cap_words = [w for w in cap_words if float(w["x0"]) >= page_w * 0.5 - 10]
                 box = _left_figure_for_right_caption(page, cap)
                 if box is None:
                     box = _box_for_caption(cap["top"], cap["bottom"], cap_gfx,
                                            cap_tops, cap_bottoms, page_w, page_h,
                                            words=cap_words)
-                if box is None and idx + 1 < limit and float(cap["top"]) >= page_h * 0.65:
+                facing = 'facing page' in cap['text'].lower()
+                if box is None and idx + 1 < limit and (facing or float(cap["top"]) >= page_h * 0.65):
                     box = _following_page_figure_box(pdf.pages[idx + 1])
                     if box is not None:
                         figure_idx = idx + 1
@@ -231,14 +267,20 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                     box is None
                     and idx > 0
                     and float(cap["top"]) <= page_h * 0.30
-                    and _has_next_page_caption_marker(_group_lines(pdf.pages[idx - 1]))
                 ):
-                    box = _full_page_figure_box(pdf.pages[idx - 1])
-                    figure_idx = idx - 1
+                    if _has_next_page_caption_marker(_group_lines(pdf.pages[idx - 1])):
+                        box = _full_page_figure_box(pdf.pages[idx - 1])
+                    else:
+                        box = _detached_preceding_box(pdf.pages[idx - 1])
+                    if box is not None:
+                        figure_idx = idx - 1
                 if box is None:
                     continue
+                candidate_key = (key, figure_idx, tuple(box))
+                if candidate_key in seen:
+                    continue
                 out.append((num, is_ext, figure_idx, box, cap["text"][:80]))
-                seen.add(key)
+                seen.add(candidate_key)
     return out
 
 
@@ -276,6 +318,9 @@ def extract_figures_by_caption(
         try:
             pil = _render(pdf_path, idx, _RENDER_SCALE)
             w, h = pil.size
+            # Keep antialiased edge labels and panel letters inside the crop.
+            box = (max(0, box[0] - 3), max(0, box[1] - 3),
+                   min(w / _RENDER_SCALE, box[2] + 3), min(h / _RENDER_SCALE, box[3] + 3))
             x0, y0, x1, y1 = (int(v * _RENDER_SCALE) for v in box)
             crop = pil.crop((max(0, x0), max(0, y0), min(w, x1), min(h, y1)))
             tag = f"cap{num}{'e' if is_ext else ''}_p{idx + 1}"
@@ -284,6 +329,7 @@ def extract_figures_by_caption(
             figs.append(Figure(
                 label=num, is_extended=is_ext, caption=caption,
                 page=idx + 1, image_path=str(fp), width=crop.width, height=crop.height,
+                bbox=tuple(box),
             ))
         except Exception as exc:  # noqa: BLE001 - 单图失败不阻断
             logger.warning("题注图%s(p%d)裁剪失败：%s", num, idx + 1, exc)

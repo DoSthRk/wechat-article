@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch, Mock
 
 from PIL import Image
 
@@ -77,13 +78,18 @@ class TestAutoCoverFromPool(unittest.TestCase):
         self.base = Path(self._tmp.name)
         pool = self.base / "inputs" / "image_pools" / "poolX"
         pool.mkdir(parents=True)
-        (pool / "fig00.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-jpg-bytes")
+        Image.new("RGB", (900, 383), "blue").save(pool / "fig00.jpg")
+        self.pdf = self.base / "source.pdf"
+        Image.new("RGB", (600, 800), "white").save(self.pdf, "PDF")
         (pool / "figures_manifest.json").write_text(
             json.dumps({
+                "source_sha256": hashlib.sha256(self.pdf.read_bytes()).hexdigest(),
                 "figures": [
                     {"page": 1, "index": 0,
                      "path": "inputs/image_pools/poolX/fig00.jpg",
                      "width": 100, "height": 80,
+                     "reviewed": True,
+                     "sha256": hashlib.sha256((pool / "fig00.jpg").read_bytes()).hexdigest(),
                      "caption": "FIG1. Patient disposition."},
                 ]
             }),
@@ -94,7 +100,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
         bp.PROJECT_ROOT = self.base
         bp.RUNTIME_DIR = self.base / "runtime"
         bp.ARTICLE_CONTENT_DIR = str(self.base / "outputs" / "jobs")
-        self.job = Job(job_id="j", pdf="nope.pdf", template="t", product="p",
+        self.job = Job(job_id="j", pdf=str(self.pdf), template="t", product="p",
                        line="solidex", image_pool="poolX")
 
     def tearDown(self):
@@ -111,38 +117,135 @@ class TestAutoCoverFromPool(unittest.TestCase):
         job = Job(job_id="j", pdf="nope.pdf", template="t", product="p", line="x", image_pool=None)
         self.assertEqual(bp._load_pool_figures(job), [])
 
+    def test_pool_requires_source_binding_review_and_unchanged_image(self):
+        manifest = self.base / "inputs/image_pools/poolX/figures_manifest.json"
+        original = json.loads(manifest.read_text())
+        for mutation in ("wrong_pdf", "unbound", "unreviewed", "changed_image"):
+            with self.subTest(mutation=mutation):
+                data = json.loads(json.dumps(original))
+                if mutation == "wrong_pdf":
+                    data["source_sha256"] = "0" * 64
+                elif mutation == "unbound":
+                    del data["source_sha256"]
+                elif mutation == "unreviewed":
+                    data["figures"][0].pop("reviewed")
+                else:
+                    data["figures"][0]["sha256"] = "0" * 64
+                manifest.write_text(json.dumps(data))
+                self.assertEqual(bp._load_pool_figures(self.job), [])
+
+    def test_arbitrary_fig_filename_cannot_bypass_accepted_candidates(self):
+        directory = self.base / "figures"
+        directory.mkdir()
+        (directory / "fig1.jpg").write_bytes(b"old unrelated image")
+        self.assertIsNone(bp._resolve_figure_path("Figure 1", directory, []))
+
+    def test_main_and_supplementary_figure_must_not_be_confused(self):
+        main = Figure("1", False, "", 1, "main.jpg", 100, 100)
+        supplementary = Figure("1", True, "", 2, "supplementary.jpg", 100, 100)
+        self.assertEqual(bp._resolve_figure_path("Figure 1 supplementary panel", self.base, [main, supplementary]),
+                         "supplementary.jpg")
+
+    def test_source_changed_since_generation_blocks_before_extract_or_upload(self):
+        content = Path(bp.ARTICLE_CONTENT_DIR) / self.job.job_id
+        content.mkdir(parents=True)
+        (content / "meta.json").write_text(json.dumps({"source_pdf_sha256": "0" * 64}))
+        with patch.object(bp, "_run_pdf_figure_worker") as worker:
+            with self.assertRaisesRegex(ValueError, "原文 PDF 已变化"):
+                bp._resolve_job_figures(self.job, {("1", False)})
+        worker.assert_not_called()
+
+    def test_generation_records_the_pdf_content_hash(self):
+        from core.main import AnalysisResult
+        analyzer = Mock()
+        analyzer.analyze.return_value = AnalysisResult(
+            job_id=self.job.job_id, success=True, markdown="# 标题\n\n正文。", model="fake",
+        )
+        self.assertTrue(bp._generate_one(Mock(), 1, self.job, analyzer))
+        metadata = json.loads((Path(bp.ARTICLE_CONTENT_DIR) / self.job.job_id / "meta.json").read_text())
+        self.assertEqual(metadata["source_pdf_sha256"], hashlib.sha256(self.pdf.read_bytes()).hexdigest())
+
+    def test_generation_rejects_pdf_changed_while_analyzing(self):
+        from core.main import AnalysisResult
+        def changed_source(_job):
+            self.pdf.write_bytes(b"replacement PDF")
+            return AnalysisResult(job_id=self.job.job_id, success=True, markdown="# 标题", model="fake")
+        analyzer = Mock()
+        analyzer.analyze.side_effect = changed_source
+        db = Mock()
+        self.assertFalse(bp._generate_one(db, 1, self.job, analyzer))
+        db.upsert_article.assert_not_called()
+        self.assertFalse((Path(bp.ARTICLE_CONTENT_DIR) / self.job.job_id / "article.md").exists())
+
+    def test_legacy_source_binding_is_explicit_in_resolution_report(self):
+        figures, directory = bp._resolve_job_figures(self.job, {("1", False)})
+        self.assertEqual(len(figures), 1)
+        report = json.loads((directory / "figure_resolution_report.json").read_text())
+        self.assertEqual(report["article_source_binding"], "legacy_unbound")
+        self.assertEqual(report["selected"][0]["source_sha256"], hashlib.sha256(self.pdf.read_bytes()).hexdigest())
+        self.assertEqual(report["quality_version"], bp.QUALITY_VERSION)
+
+    def test_rejected_candidate_does_not_satisfy_coverage_and_fallback_is_used(self):
+        image = self.base / "inputs/image_pools/poolX/fig00.jpg"
+        candidate = Figure("1", False, "", 1, str(image), 900, 383)
+        job = Job(job_id="rejected", pdf=str(self.pdf), template="t", product="p")
+        signals = bp.FigureSignals(frozenset({("1", False)}), False, 1)
+        rejection = {"label": "1", "reason": "caption_or_body_text_in_crop"}
+        with patch.object(bp, "_inspect_pdf_figure_signals", return_value=signals), \
+             patch.object(bp, "planned_figure_strategies", return_value=("caption", "heuristic")), \
+             patch.object(bp, "_run_pdf_figure_worker", return_value=[candidate]) as worker, \
+             patch.object(bp, "filter_candidates", side_effect=[([], [rejection]), ([candidate], [])]), \
+             patch.dict(os.environ, {"CAPTION_FIGURES_ENABLED": "1"}):
+            figures, directory = bp._resolve_job_figures(job, {("1", False)})
+        self.assertEqual([call.args[0] for call in worker.call_args_list], ["caption", "heuristic"])
+        self.assertEqual(figures, [candidate])
+        report = json.loads((directory / "figure_resolution_report.json").read_text())
+        self.assertEqual(report["attempts"][1]["status"], "rejected")
+        self.assertEqual(report["attempts"][1]["rejected"], [rejection])
+
+    def test_cross_strategy_identical_images_do_not_satisfy_distinct_figures(self):
+        image = self.base / "inputs/image_pools/poolX/fig00.jpg"
+        first = Figure("1", False, "", 1, str(image), 900, 383)
+        second = Figure("2", False, "", 2, str(image), 900, 383)
+        figures, rejected = bp._merge_accepted_figures([first], [second])
+        self.assertEqual(figures, [])
+        self.assertEqual(len(rejected), 2)
+
     def test_unlabeled_pool_falls_back_not_used(self):
         # caption 全空的 pool（如 AAV）→ 图号解析为空，无法匹配占位符；_resolve_job_figures
         # 不能用它，应回落（这里无真实 PDF → 返回空），避免正文漏掉所有配图。
         pool = self.base / "inputs" / "image_pools" / "poolX"
-        (pool / "figures_manifest.json").write_text(
-            json.dumps({"figures": [
-                {"page": 1, "index": 0, "path": "inputs/image_pools/poolX/fig00.jpg",
-                 "width": 100, "height": 80, "caption": ""},
-            ]}),
-            encoding="utf-8",
-        )
+        data = json.loads((pool / "figures_manifest.json").read_text())
+        data["figures"][0]["caption"] = ""
+        (pool / "figures_manifest.json").write_text(json.dumps(data), encoding="utf-8")
         loaded = bp._load_pool_figures(self.job)
         self.assertEqual([f.label for f in loaded], [""])      # 载入了，但无图号
         figs, _ = bp._resolve_job_figures(self.job)            # 无图号 + 无 PDF → 不用 pool
         self.assertEqual(figs, [])
 
-    def test_render_pdf_cover_missing_pdf_returns_none(self):
-        job = Job(job_id="j", pdf="does-not-exist.pdf", template="t", product="p",
-                  line="x", image_pool=None)
-        self.assertIsNone(bp._render_pdf_cover(job, self.base / "figs"))
+    def test_no_valid_figure_does_not_use_pdf_first_page_as_cover(self):
+        client = FakeMaterialClient()
+        media = bp._auto_cover_media_id(client, "immune", self.job, "<p>正文</p>",
+                                       resolved=([], self.base / "figs"))
+        self.assertEqual(media, "")
+        self.assertEqual(client.uploaded, [])
 
-    def test_render_pdf_cover_uses_wechat_headline_dimensions(self):
-        pdf = self.base / "portrait.pdf"
-        Image.new("RGB", (600, 800), "white").save(pdf, "PDF")
-        job = Job(job_id="j", pdf=str(pdf), template="t", product="p",
-                  line="x", image_pool=None)
-
-        cover_path = bp._render_pdf_cover(job, self.base / "figs")
-
-        self.assertIsNotNone(cover_path)
+    def test_cover_letterboxes_instead_of_clipping_panels(self):
+        source = self.base / "tall.png"
+        image = Image.new("RGB", (300, 600), "red")
+        image.paste("blue", (0, 550, 300, 600))
+        image.save(source)
+        cover_path = bp._fit_wechat_cover(source, self.base / "figs")
         with Image.open(cover_path) as cover:
             self.assertEqual(cover.size, (900, 383))
+            self.assertEqual(cover.getpixel((0, 100)), (255, 255, 255))
+            self.assertGreater(cover.getpixel((450, 5))[0], 240)
+            self.assertGreater(cover.getpixel((450, 378))[2], 240)
+
+    def test_invalid_cover_is_not_uploaded(self):
+        source = self.base / "broken.jpg"
+        source.write_bytes(b"not an image")
+        self.assertIsNone(bp._fit_wechat_cover(source, self.base / "figs"))
 
     def test_auto_cover_uploads_first_figure_then_caches(self):
         client = FakeMaterialClient()
@@ -212,11 +315,13 @@ class TestAutoCoverFromPool(unittest.TestCase):
         saved = {
             "load_pool": bp._load_pool_figures,
             "worker": bp._run_pdf_figure_worker,
+            "filter": bp.filter_candidates,
             "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
             "env_vision": os.environ.get("VISION_API_KEY"),
         }
         calls = []
-        bp._load_pool_figures = lambda job: []
+        bp._load_pool_figures = lambda job, **kwargs: []
+        bp.filter_candidates = lambda pdf, figures, strategy: (figures, [])
 
         def fake_worker(kind, job, figures_dir):
             calls.append(kind)
@@ -235,6 +340,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
         finally:
             bp._load_pool_figures = saved["load_pool"]
             bp._run_pdf_figure_worker = saved["worker"]
+            bp.filter_candidates = saved["filter"]
             if saved["env_caption"] is None:
                 os.environ.pop("CAPTION_FIGURES_ENABLED", None)
             else:
@@ -257,15 +363,19 @@ class TestAutoCoverFromPool(unittest.TestCase):
             label="2", is_extended=False, caption="", page=5,
             image_path=str(self.base / "fig2.jpg"), width=300, height=200,
         )
+        Path(fig1.image_path).write_bytes(b"first figure")
+        Path(fig2.image_path).write_bytes(b"second figure")
         saved = {
             "load_pool": bp._load_pool_figures,
             "worker": bp._run_pdf_figure_worker,
+            "filter": bp.filter_candidates,
             "signals": getattr(bp, "_inspect_pdf_figure_signals", None),
             "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
             "env_vision": os.environ.get("VISION_API_KEY"),
         }
         calls = []
-        bp._load_pool_figures = lambda job: []
+        bp._load_pool_figures = lambda job, **kwargs: []
+        bp.filter_candidates = lambda pdf, figures, strategy: (figures, [])
         bp._inspect_pdf_figure_signals = lambda pdf, max_pages=None: type(
             "Signals", (), {"caption_keys": frozenset({("1", False)}),
                               "has_legend_section": False, "page_count": 5,
@@ -287,6 +397,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
         finally:
             bp._load_pool_figures = saved["load_pool"]
             bp._run_pdf_figure_worker = saved["worker"]
+            bp.filter_candidates = saved["filter"]
             if saved["signals"] is None:
                 delattr(bp, "_inspect_pdf_figure_signals")
             else:
@@ -350,12 +461,12 @@ class TestAutoCoverFromPool(unittest.TestCase):
         self.assertEqual(figs, [])
         self.assertIn("抽图超时", "\n".join(logs.output))
 
-    def test_apply_figures_logs_missing_placeholders(self):
+    def test_apply_figures_rejects_missing_placeholders_before_upload(self):
         saved = bp._resolve_job_figures
         bp._resolve_job_figures = lambda job: ([], self.base / "figures")
         try:
-            with self.assertLogs("batch_processor", level="WARNING") as logs:
-                html, used = bp._apply_figures(
+            with self.assertRaisesRegex(ValueError, "缺少经校验的配图"):
+                bp._apply_figures(
                     "<p>[图片:Figure 1 机制图]</p><p>[图片:Figure 2 统计图]</p>",
                     Job(job_id="nofig", pdf="missing.pdf", template="t", product="p", line="aav"),
                     object(),
@@ -363,34 +474,20 @@ class TestAutoCoverFromPool(unittest.TestCase):
                 )
         finally:
             bp._resolve_job_figures = saved
-        self.assertEqual(used, 0)
-        self.assertNotIn("[图片:", html)
-        self.assertIn("2 个图片占位符未配到图片", "\n".join(logs.output))
 
     def test_pdf_auto_figures_can_be_disabled(self):
         pdf = self.base / "paper.pdf"
         pdf.write_bytes(b"%PDF-1.4\n")
-        called = {"legend": 0, "extract": 0}
         saved = {
             "load_pool": bp._load_pool_figures,
-            "legend": bp.extract_figures_from_legend_pages,
-            "extract": bp.extract_figures,
+            "worker": bp._run_pdf_figure_worker,
             "env_pdf": os.environ.get("PDF_AUTO_FIGURES_ENABLED"),
             "env_caption": os.environ.get("CAPTION_FIGURES_ENABLED"),
             "env_vision": os.environ.get("VISION_API_KEY"),
         }
-        bp._load_pool_figures = lambda job: []
-
-        def fail_legend(*args, **kwargs):
-            called["legend"] += 1
-            raise AssertionError("legend extraction should be skipped")
-
-        def fail_extract(*args, **kwargs):
-            called["extract"] += 1
-            raise AssertionError("heuristic extraction should be skipped")
-
-        bp.extract_figures_from_legend_pages = fail_legend
-        bp.extract_figures = fail_extract
+        bp._load_pool_figures = lambda job, **kwargs: []
+        worker = Mock(side_effect=AssertionError("extraction should be skipped"))
+        bp._run_pdf_figure_worker = worker
         os.environ["PDF_AUTO_FIGURES_ENABLED"] = "0"
         os.environ["CAPTION_FIGURES_ENABLED"] = "0"
         os.environ["VISION_API_KEY"] = "would-fail-if-called"
@@ -401,8 +498,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
             ))
         finally:
             bp._load_pool_figures = saved["load_pool"]
-            bp.extract_figures_from_legend_pages = saved["legend"]
-            bp.extract_figures = saved["extract"]
+            bp._run_pdf_figure_worker = saved["worker"]
             for key, env_name in (
                 ("env_pdf", "PDF_AUTO_FIGURES_ENABLED"),
                 ("env_caption", "CAPTION_FIGURES_ENABLED"),
@@ -416,7 +512,7 @@ class TestAutoCoverFromPool(unittest.TestCase):
         self.assertEqual(figs, [])
         self.assertEqual(figures_dir.name, "figures")
         self.assertEqual(figures_dir.parent.name, "skip-pdf")
-        self.assertEqual(called, {"legend": 0, "extract": 0})
+        worker.assert_not_called()
 
 
 if __name__ == "__main__":

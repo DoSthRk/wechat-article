@@ -3,10 +3,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from utils import vision_figures as vf
+from utils.figure_crop_geometry import UnsafeFigureCrop
 
 
 class TestParseJson(unittest.TestCase):
@@ -107,6 +109,29 @@ class TestRuleLine(unittest.TestCase):
         self.assertFalse(vf._is_rule_line(_el(100, 100, 500, 400), self.W, self.H))
 
 
+class TestSafeVisionCrop(unittest.TestCase):
+    def setUp(self):
+        self.page = Image.new("RGB", (600, 800), "white")
+
+    def test_model_box_is_not_overwritten_by_unrelated_page_graphics(self):
+        self.page.paste("red", (120, 160, 480, 480))
+        with patch.object(vf, "_graphics_crop_box", return_value=(0, 0, 375, 500)) as graphics:
+            crop = vf._make_crop("paper.pdf", 0, self.page, [0.2, 0.2, 0.8, 0.6])
+        self.assertEqual(crop.size, (360, 320))
+        self.assertEqual(crop.getpixel((0, 0)), (255, 0, 0))
+        graphics.assert_not_called()
+
+    def test_invalid_bbox_never_returns_full_page(self):
+        invalid = [None, [], [0, 0, 1], "0,0,1,1", [0, 0, 1, 1],
+                   [0, 0, 0.99, 0.99], [-0.1, 0.1, 0.9, 0.9],
+                   [0.1, 0.1, 1.1, 0.9], [0.8, 0.1, 0.2, 0.9],
+                   [0.1, 0.1, 0.11, 0.9], [float("nan"), 0.1, 0.9, 0.9],
+                   [0.1, 0.1, float("inf"), 0.9], [False, 0.1, 0.9, 0.9]]
+        for bbox in invalid:
+            with self.subTest(bbox=bbox), self.assertRaises(UnsafeFigureCrop):
+                vf._make_crop("paper.pdf", 0, self.page, bbox)
+
+
 class TestExtractFlow(unittest.TestCase):
     """mock _image_pages/_render/_client/_ask_page，验证抽取→裁剪→标号→manifest。"""
 
@@ -126,9 +151,10 @@ class TestExtractFlow(unittest.TestCase):
         vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "Figure 2", "caption": "cap", "bbox": [0.1, 0.1, 0.9, 0.9]}
         figs = vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
         labels = sorted(f.label for f in figs)
-        self.assertEqual(labels, ["2"])  # 同图号去重（两页都返回图2）
+        self.assertEqual(labels, ["2", "2"])  # Preserve ambiguity for the shared gate; never choose the first page.
         self.assertTrue(Path(figs[0].image_path).exists())
         self.assertTrue((Path(self.out) / "vision_figures_manifest.json").exists())
+        self.assertEqual(figs[0].bbox, (18.75, 18.75, 168.75, 168.75))
 
     def test_no_figure_returns_empty(self):
         vf._ask_page = lambda c, m, pil: {"has_figure": False}
@@ -139,7 +165,7 @@ class TestExtractFlow(unittest.TestCase):
 
         def counting(c, m, pil):
             calls["n"] += 1
-            return {"has_figure": True, "figure_number": "3", "bbox": [0, 0, 1, 1]}
+            return {"has_figure": True, "figure_number": "3", "bbox": [0.1, 0.1, 0.9, 0.9]}
 
         vf._ask_page = counting
         vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
@@ -148,24 +174,49 @@ class TestExtractFlow(unittest.TestCase):
         vf.extract_figures_via_vision("x.pdf", self.out, use_cache=True)  # 命中缓存
         self.assertEqual(calls["n"], first)  # 不再调用 VLM
 
-    def test_recrop_when_crop_version_stale(self):
-        """裁剪逻辑升级（version 陈旧）→ 命中缓存也就地重切，但不重调 VLM。"""
-        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2", "bbox": [0, 0, 1, 1]}
+    def test_redetect_when_crop_version_stale(self):
+        """旧缓存的图号和页码不可信，升级时必须重新识别。"""
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2", "bbox": [0.1, 0.1, 0.9, 0.9]}
         vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
         (Path(self.out) / ".crop_version").unlink()  # 模拟"旧裁剪产物"
         ask_calls = {"n": 0}
         vf._ask_page = lambda c, m, pil: ask_calls.__setitem__("n", ask_calls["n"] + 1) or {"has_figure": False}
-        recrop = {"n": 0}
-        real_make = vf._make_crop
-        vf._make_crop = lambda *a, **k: recrop.__setitem__("n", recrop["n"] + 1) or real_make(*a, **k)
-        try:
+        with patch.object(vf, "_make_crop") as crop:
             figs = vf.extract_figures_via_vision("x.pdf", self.out, use_cache=True)
-        finally:
-            vf._make_crop = real_make
-        self.assertEqual(ask_calls["n"], 0)            # 没重调 VLM
-        self.assertGreater(recrop["n"], 0)             # 触发了重切
+        self.assertEqual(ask_calls["n"], 2)
+        crop.assert_not_called()
         self.assertTrue((Path(self.out) / ".crop_version").exists())
-        self.assertEqual(len(figs), 1)
+        self.assertEqual(figs, [])
+
+    def test_stale_cache_is_not_blessed_after_detection_failure(self):
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2", "bbox": [0.1, 0.1, 0.9, 0.9]}
+        vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
+        version = Path(self.out) / ".crop_version"
+        version.write_text("0")
+        original_manifest = (Path(self.out) / "vision_figures_manifest.json").read_bytes()
+        with patch.object(vf, "_ask_page", side_effect=RuntimeError("service unavailable")):
+            self.assertEqual(vf.extract_figures_via_vision("x.pdf", self.out), [])
+        self.assertEqual(version.read_text(), "0")
+        self.assertEqual((Path(self.out) / "vision_figures_manifest.json").read_bytes(), original_manifest)
+
+    def test_bad_model_bbox_does_not_create_success_cache(self):
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2"}
+        with self.assertRaises(UnsafeFigureCrop):
+            vf.extract_figures_via_vision("x.pdf", self.out, use_cache=False)
+        self.assertFalse((Path(self.out) / ".crop_version").exists())
+        self.assertFalse((Path(self.out) / "vision_figures_manifest.json").exists())
+
+    def test_missing_cached_file_triggers_fresh_detection(self):
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2", "bbox": [0.1, 0.1, 0.9, 0.9]}
+        first = vf.extract_figures_via_vision("x.pdf", self.out)
+        Path(first[0].image_path).unlink()
+        with patch.object(vf, "_ask_page", return_value={"has_figure": False}) as ask:
+            self.assertEqual(vf.extract_figures_via_vision("x.pdf", self.out), [])
+        self.assertEqual(ask.call_count, 2)
+
+    def test_ambiguous_model_label_is_not_merged_into_another_number(self):
+        vf._ask_page = lambda c, m, pil: {"has_figure": True, "figure_number": "2 and 3", "bbox": [0.1, 0.1, 0.9, 0.9]}
+        self.assertEqual(vf.extract_figures_via_vision("x.pdf", self.out), [])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from db.database import get_db_manager
 from utils.blog_pipeline import BlogPipelineError, BlogWorkflow
+from utils.wechat_draft_repair import DraftImageRepairError
 
 
 def write_state(path: Path, state: dict) -> None:
@@ -37,15 +38,20 @@ def main() -> int:
             try:
                 if args.stage == "translate":
                     workflow.translate(item["job_id"], item["lang"])
+                elif item.get('repair_wechat_images') is True:
+                    from utils.wechat_draft_repair import repair_existing_images
+                    result = repair_existing_images(workflow.db, item['job_id'], repair_cover=bool(item.get('repair_cover')))
+                    state.setdefault('results', []).append(result)
                 elif item.get('repair_images') is True:
                     from utils.blog_image_repair import repair_images
-                    result = repair_images(workflow, item['job_id'], item['lang'])
+                    options = {'repair_cover': True} if item.get('repair_cover') is True else {}
+                    result = repair_images(workflow, item['job_id'], item['lang'], **options)
                     state.setdefault('results', []).append(result)
                 else:
                     workflow.publish(item["job_id"], item["lang"], force=bool(item.get("force")))
                 state["completed"] += 1
                 print(f"[workflow] {args.stage} {item['job_id']} {item['lang']} ok", flush=True)
-            except BlogPipelineError as exc:
+            except (BlogPipelineError, DraftImageRepairError) as exc:
                 state["failed"] += 1
                 state["errors"].append(f"{item['job_id']} / {item['lang']}: {exc}")
                 print(f"[workflow] {args.stage} {item['job_id']} {item['lang']} failed: {exc}", flush=True)
