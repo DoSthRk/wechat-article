@@ -65,8 +65,12 @@ function coreComplete(file) {
   return file.has_article && cmsState(file, "zh") === "done" && wechatState(file) === "done";
 }
 
+function imageReviewNeeded(file) {
+  return file.job_status === "needs_review" || file.image_status === "needs_review";
+}
+
 function requiresCoreAction(file) {
-  return needsAction(file) || !coreComplete(file);
+  return imageReviewNeeded(file) || needsAction(file) || !coreComplete(file);
 }
 
 function isCompleted(file) {
@@ -81,6 +85,7 @@ function coreStatus(file) {
   if ((generationState.current?.jobs || []).includes(file.job_id)) {
     return ["running", "中文内容处理中"];
   }
+  if (imageReviewNeeded(file)) return ["pending", "等待人工确认配图"];
   const recentRun = (generationState.history || []).find((run) => (run.jobs || []).includes(file.job_id));
   if (recentRun?.status === "failed" && requiresCoreAction(file)) {
     return ["failed", recentRun.summary?.message || "最近一次生成失败，请重试"];
@@ -117,7 +122,7 @@ function updateGenerateButton(card) {
   if (countNode) countNode.textContent = String(count);
   if (!button) return;
   button.disabled = generationBusy || !count;
-  button.textContent = count ? `生成并提交草稿（${count}）` : "生成并提交草稿";
+  button.textContent = count ? `生成待审核内容（${count}）` : "生成待审核内容";
 }
 
 function updateSelection() {
@@ -125,6 +130,8 @@ function updateSelection() {
 }
 
 function languageProgress(file, lang) {
+  if (cmsState(file, lang) === "done") return { state: "done", text: "已发布", action: "" };
+  if (imageReviewNeeded(file)) return { state: "pending", text: "等待配图审核", action: "" };
   const automatic = workflowState.auto?.items?.findLast((item) => item.job_id === file.job_id && item.lang === lang);
   if (automatic?.status === "queued") return { state: "running", text: "自动发布排队中", action: "" };
   if (automatic?.status === "running") return { state: "running", text: automatic.phase === "publish" ? "自动发布中" : "自动翻译中", action: "" };
@@ -223,8 +230,11 @@ function renderPendingRow(lineId, file) {
   });
   const actions = row.querySelector(".row-actions");
   if (file.has_article) {
+    const review = el("a", "text-action", imageReviewNeeded(file) ? "确认配图并继续" : "图片审核");
+    review.href = `/image-review/${encodeURIComponent(file.job_id)}`;
+    actions.appendChild(review);
     const preview = el("a", "text-action", "预览现有内容");
-    preview.href = `/preview/${encodeURIComponent(file.job_id)}?wechat=1`;
+    preview.href = `/preview/${encodeURIComponent(file.job_id)}${wechatState(file) === "done" ? "?wechat=1" : ""}`;
     preview.target = "_blank";
     actions.appendChild(preview);
   }
@@ -241,6 +251,9 @@ function renderCompletedCard(file) {
   const body = el("div", "completed-main");
   body.innerHTML = `<div><span class="complete-mark">✓</span><div class="completed-copy"><h3>${esc(file.title || file.name)}</h3><p>中文 Blog 已发布 · 已进入公众号草稿箱</p></div></div><div class="row-actions"></div>`;
   const actions = body.querySelector(".row-actions");
+  const review = el("a", "text-action", "图片审核");
+  review.href = `/image-review/${encodeURIComponent(file.job_id)}`;
+  actions.appendChild(review);
   const blog = distribution(file, "blog", "zh");
   if (blog?.external_url) {
     const openBlog = el("a", "btn secondary compact", "打开 Blog");
@@ -285,8 +298,8 @@ function renderLine(line) {
 
   const pendingSection = el("section", "work-section");
   const pendingHead = el("div", "section-head");
-  pendingHead.innerHTML = `<div><h3>待处理 PDF</h3><p>选择后一次完成中文 Blog、原文 PDF 和公众号草稿</p></div><div class="selection-actions"><span>已选 <b class="selected-count">0</b> 篇</span></div>`;
-  const generate = el("button", "btn primary generate-line", "生成并提交草稿");
+  pendingHead.innerHTML = `<div><h3>待处理 PDF</h3><p>先生成中文文章与候选图片；确认配图后继续自动发布</p></div><div class="selection-actions"><span>已选 <b class="selected-count">0</b> 篇</span></div>`;
+  const generate = el("button", "btn primary generate-line", "生成待审核内容");
   generate.disabled = true;
   generate.addEventListener("click", () => {
     const chosen = selectedFiles(line.line_id).filter(requiresCoreAction);
@@ -359,7 +372,7 @@ async function uploadPdfs(lineId, filesLike) {
     const uploadedKeys = (data.results || []).filter((item) => item.ok).map((item) => `${lineId}|${item.pdf}`);
     uploadedKeys.forEach((key) => selectedKeys.add(key));
     await loadSources();
-    setStatus(`上传完成，已自动选中 ${files.length} 个 PDF；点击“生成并提交草稿”继续`, "done");
+    setStatus(`上传完成，已自动选中 ${files.length} 个 PDF；点击“生成待审核内容”继续`, "done");
   } catch (error) {
     setStatus(`上传失败：${error.message}`, "failed");
   }
@@ -426,7 +439,7 @@ async function runWorkflow(stage, selections) {
 }
 
 function workflowIsActive(states = workflowState) {
-  return states.translate?.status === "running" || states.publish?.status === "running" || states.auto?.status === "running";
+  return [states.translate, states.publish, states.images, states.review_publish, states.auto].some((state) => state?.status === "running");
 }
 
 async function poll(forceSources = false) {

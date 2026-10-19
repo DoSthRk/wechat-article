@@ -33,6 +33,7 @@ def version_lock(job_id, lang):
 def serialized_version(function):
     @wraps(function)
     def wrapped(self, job_id, lang="en", *args, **kwargs):
-        with version_lock(job_id, lang):
+        # 与审核/撤销使用相同外层锁，防止已持语言锁再等待图片锁。
+        with version_lock(job_id, "image_job"), version_lock(job_id, lang):
             return function(self, job_id, lang, *args, **kwargs)
     return wrapped

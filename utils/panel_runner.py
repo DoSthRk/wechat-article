@@ -358,6 +358,8 @@ def list_sources() -> List[dict]:
                 "published": drafted,
                 "blocked": bool(info.get("publish_blocked")) if info else False,
                 "job_status": (info.get("status") if info else "pending"),
+                # Never retroactively mark all historical published jobs unreviewed.
+                "image_status": "needs_review" if info and info.get("image_review_required") else "",
                 "versions": (info.get("versions", []) if info else []),
                 "distributions": dists,
             })
@@ -527,6 +529,7 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
     """从原始日志尾部抽一个业务摘要；原始日志仍原样返回供排查。"""
     generated = sum(1 for ln in lines if " generated:" in ln)
     drafted = sum(1 for ln in lines if " POST wechat/" in ln)
+    awaiting_review = sum(1 for ln in lines if "等待首次人工审核" in ln)
     blocked = sum(1 for ln in lines if "BLOCKED" in ln or " publish_blocked" in ln)
     missing_figures = 0
     for ln in lines:
@@ -564,6 +567,8 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
         message = f"发现 {failed} 个失败，建议先看摘要下方最后一条错误"
     elif blocked:
         message = f"{blocked} 篇被质量闸拦下，已保留文章供预览"
+    elif awaiting_review:
+        message = f"{awaiting_review}/{total_jobs} 篇已生成待审核内容；请确认配图后继续发布"
     elif status == "done":
         if drafted:
             message = f"运行完成：{drafted}/{total_jobs} 篇已提交到公众号草稿箱"
@@ -579,6 +584,7 @@ def _summarize_log(lines: List[str], status: str, total_jobs: int) -> dict:
         "total": int(total_jobs or 0),
         "generated": generated,
         "drafted": drafted,
+        "awaiting_review": awaiting_review,
         "blocked": blocked,
         "failed": failed,
         "missing_figures": missing_figures,

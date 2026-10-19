@@ -30,16 +30,17 @@ class _Image(HTMLParser):
 
 
 @serialized_version
-def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
+def repair_images(workflow, job_id, lang='zh', *, repair_cover=False, expected_package_id=None, job_pk=None):
     """Repair figure URLs; opt in to replacing a custom cover with the first figure."""
-    from batch_processor import _resolve_job_figures, _resolve_figure_path
-    from utils.blog_pipeline import BlogPipelineError, _build_source_job
+    from batch_processor import _resolve_figure_path
+    from utils.blog_pipeline import (BlogPipelineError, _build_source_job, require_blog_package,
+                                     verify_public_image, verify_public_page_images)
     from utils.blog_urls import public_blog_url
     from db.database import BLOG_LANGS, BLOG_SOURCE_LANG
 
     if lang not in BLOG_LANGS:
         raise BlogPipelineError('不支持的 Blog 语言，未更新')
-    job_pk = workflow._resolve_job_pk(job_id, None)
+    job_pk = workflow._resolve_job_pk(job_id, job_pk)
     article = workflow.db.get_article(job_pk) if job_pk is not None else None
     job = workflow.db.get_job(job_pk) if article else None
     dist = workflow.db.get_distribution(job_pk, 'blog', account='genemedi', lang=lang) if job else None
@@ -47,7 +48,9 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
         raise BlogPipelineError('没有通过质量检查的已发布 Blog，未更新')
     if str(dist.external_url or '').rstrip('/') != public_blog_url(job_id, lang):
         raise BlogPipelineError('Blog 地址不匹配，未更新')
-    source = Path(article.content_dir) / 'article.md'
+    source_job = _build_source_job(job)
+    package = require_blog_package(source_job, expected_package_id, expected_job_pk=job_pk)
+    source = package.directory / 'article.md'
     descriptions = find_image_placeholders(unwrap_linked_image_placeholders(normalize_image_placeholders(source.read_text(encoding='utf-8'))))
     keys = [figure_key_from_description(desc) for desc in descriptions]
     if not keys or None in keys:
@@ -73,6 +76,15 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
     client = workflow.blog_client_factory()
     langcode = workflow._drupal_language(lang)
     original = client.get(dist.external_id, langcode=langcode)['data']['attributes']
+    if not repair_cover:
+        try:
+            receipt = json.loads(getattr(dist, 'image_receipt_json', None) or '{}')
+        except (ValueError, TypeError):
+            receipt = {}
+        if (getattr(dist, 'image_package_id', None) != package.bundle_id
+                or receipt.get('cover_url') != original.get('field_cover_url')
+                or not receipt.get('cover_url')):
+            raise BlogPipelineError('现有封面未验证属于已批准图包，请显式包含封面修复；未更新')
     body = original.get('body') or {}
     content = str(body.get('value') or '')
     if original.get('langcode') != langcode or not original.get('status') or body.get('format') != 'full_html':
@@ -99,7 +111,7 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
                     for match in matches]
     if any(attr is None for attr in source_attrs):
         raise BlogPipelineError('CMS 图片缺少可替换的 src，未更新')
-    figures, directory = _resolve_job_figures(_build_source_job(job), set(unique_keys))
+    figures, directory = package.figures, package.directory
     paths = [_resolve_figure_path(desc, directory, figures) for desc in descriptions_by_key.values()]
     if (any(not path or not Path(path).is_file() for path in paths)
             or len({Path(path).resolve() for path in paths}) != len(paths)):
@@ -108,7 +120,12 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
     if len(set(hashes)) != len(hashes):
         raise BlogPipelineError('多个图号对应同一张图片，未更新')
     store = workflow.asset_store_factory()
-    urls = [store.upload(path) for path in paths]  # Store verifies public asset bytes before CMS writes.
+    urls = []
+    for path in paths:
+        require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+        url = store.upload(path)
+        verify_public_image(url, expected_path=path)
+        urls.append(url)
     if len(set(urls)) != len(urls):
         raise BlogPipelineError('上传图片没有唯一对应，未更新')
     urls_by_key = dict(zip(unique_keys, urls))
@@ -120,8 +137,25 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
         tag = match.group()[:attr.start(2)] + escape(url, quote=True) + match.group()[attr.end(2):]
         updated = updated[:match.start()] + tag + updated[match.end():]
     cover = original.get('field_cover_url')
-    updated_cover = urls[0] if repair_cover else replacements.get(cover, cover)
+    if repair_cover:
+        require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+        updated_cover = store.upload(package.cover_path)
+    else:
+        updated_cover = cover
+    verify_public_image(updated_cover, expected_path=package.cover_path)
+    receipt = json.dumps({'image_package_id': package.bundle_id, 'cover_url': updated_cover,
+                         'images': urls, 'cms_verified': True, 'public_images_verified': True,
+                         'public_page_images_verified': True}, ensure_ascii=False)
     if updated == content and updated_cover == cover:
+        require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+        workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+            image_package_id=package.bundle_id, image_verification_status='pending_readback')
+        if client.get(dist.external_id, langcode=langcode)['data']['attributes'] != original:
+            raise BlogPipelineError('CMS 文章刚被修改，未将旧结果标记为已验证')
+        verify_public_page_images(dist.external_url, [*urls, updated_cover])
+        require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+        workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+            image_package_id=package.bundle_id, image_verification_status='verified', image_receipt_json=receipt)
         return {'job_id': job_id, 'lang': lang, 'status': 'already_repaired', 'verified': True, 'url': dist.external_url}
     payload = {'body': updated, 'body_format': body['format'], 'langcode': langcode}
     if updated_cover != cover:
@@ -132,11 +166,15 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
     backup = BACKUP_DIR / f'{uuid.uuid4().hex}.json'
     record = {'job_id': job_id, 'lang': lang, 'external_id': dist.external_id,
               'original': original, 'payload': payload, 'image_sha256': hashes,
+              'image_package_id': package.bundle_id,
               'status': 'prepared', 'created_at': datetime.utcnow().isoformat()}
     with backup.open('x', encoding='utf-8') as stream:
         os.chmod(backup, 0o600)
         json.dump(record, stream, ensure_ascii=False, indent=2)
     try:
+        require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+        workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+            image_package_id=package.bundle_id, image_verification_status='pending_readback')
         client.update(dist.external_id, payload)  # Never create or change publication status.
         actual = client.get(dist.external_id, langcode=langcode)['data']['attributes']
         preserved = ('title', 'langcode', 'status', 'path', 'field_slug', 'field_source_pdf_url', 'field_product_series')
@@ -145,12 +183,22 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False):
                     and all(actual.get(key) == original.get(key) for key in preserved)
                     and actual.get('field_cover_url') == payload.get('cover_url', cover))
         record['status'] = 'verified' if verified else 'needs_review'
+        if verified:
+            require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+            verify_public_page_images(dist.external_url, [*urls, updated_cover])
     except Exception:
         record['status'] = 'needs_review'
+        workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+            image_package_id=package.bundle_id, image_verification_status='needs_review')
         raise BlogPipelineError('CMS 图片更新结果待核对，已保留备份，不要盲目重试') from None
     finally:
         backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
     if not verified:
+        workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+            image_package_id=package.bundle_id, image_verification_status='needs_review')
         raise BlogPipelineError('CMS 图片更新回读校验未通过，已保留备份，不要盲目重试')
+    workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
+        image_package_id=package.bundle_id, image_verification_status='verified', image_receipt_json=receipt)
     return {'job_id': job_id, 'lang': lang, 'status': 'repaired', 'verified': True,
-            'url': dist.external_url, 'images': urls, 'backup_id': backup.stem}
+            'url': dist.external_url, 'images': urls, 'backup_id': backup.stem,
+            'image_package_id': package.bundle_id}

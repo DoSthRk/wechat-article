@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -14,7 +15,7 @@ from db.database import BLOG_LANGS, BLOG_TARGET_LANGS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUN_DIR = PROJECT_ROOT / "runtime" / "workflow_runs"
-STAGES = {"translate", "publish"}
+STAGES = {"translate", "publish", "images", "review_publish"}
 
 
 def _atomic_write(path: Path, payload: Dict[str, Any]) -> None:
@@ -57,7 +58,7 @@ def _lock_path(stage: str) -> Path:
 
 
 def _normalize(stage: str, selections: Iterable[Dict[str, Any]]) -> List[Dict[str, str]]:
-    allowed = BLOG_TARGET_LANGS if stage == "translate" else BLOG_LANGS
+    allowed = BLOG_TARGET_LANGS if stage == "translate" else ("zh",) if stage in {"images", "review_publish"} else BLOG_LANGS
     normalized: List[Dict[str, str]] = []
     seen = set()
     for item in selections or []:
@@ -70,6 +71,11 @@ def _normalize(stage: str, selections: Iterable[Dict[str, Any]]) -> List[Dict[st
             continue
         seen.add(key)
         normalized_item = {"job_id": job_id, "lang": lang}
+        if stage == "review_publish":
+            package_id = str(item.get("expected_package_id") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", package_id):
+                raise ValueError("继续发布必须指定已确认图片包的完整版本 ID")
+            normalized_item["expected_package_id"] = package_id
         if stage == "publish" and item.get("force") is True:
             normalized_item["force"] = True
         if stage == "publish" and item.get("repair_images") is True:

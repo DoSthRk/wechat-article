@@ -12,8 +12,10 @@ from urllib.parse import urlsplit
 import uuid
 
 from utils.blog_task_lock import version_lock
+from utils.image_packages import ImagePackageError, require_approved_package
 from utils.image_placeholders import normalize_image_placeholders, unwrap_linked_image_placeholders
 from utils.wechat_client import WeChatClient
+from utils.wechat_cover import approved_cover_geometry, full_width_cover_verified
 from utils.wechat_html import (find_image_placeholders, replace_image_placeholder,
                                prepare_wechat_update_html, restore_wechat_body_styles)
 
@@ -22,7 +24,7 @@ _PARAGRAPH = re.compile(r"<p\b[^>]*>.*?</p>", re.I | re.S)
 _IMAGE = re.compile(r"<img\b[^>]*>", re.I | re.S)
 _IMAGE_URL_ATTRIBUTE = re.compile(r'''(?<![\w-])(?:data-src|src)\s*=\s*(["'])(.*?)\1''', re.I | re.S)
 _FIELDS = ("title", "author", "digest", "content", "content_source_url", "thumb_media_id",
-           "show_cover_pic", "pic_crop_235_1", "pic_crop_1_1", "need_open_comment", "only_fans_can_comment")
+           "show_cover_pic", "pic_crop_235_1", "pic_crop_1_1", "cover_info", "need_open_comment", "only_fans_can_comment")
 
 
 class DraftImageRepairError(Exception):
@@ -97,7 +99,7 @@ def _styles_preserved(expected, actual):
 
 
 def _update_verified(client, job_id, draft_ref, original, updated, expected_text, urls=(), operation='images',
-                     *, expected_images=None, thumb_media_id=None):
+                     *, expected_images=None, thumb_media_id=None, before_write=None):
     content = str(original.get('content') or '')
     updated = prepare_wechat_update_html(updated)
     if _first(client.get_draft(draft_ref['media_id'])) != original:
@@ -116,7 +118,10 @@ def _update_verified(client, job_id, draft_ref, original, updated, expected_text
     payload = {**original, 'content': updated}
     if thumb_media_id is not None:
         payload['thumb_media_id'] = thumb_media_id
+        payload.update(approved_cover_geometry())
     try:
+        if before_write:
+            before_write()
         # No create fallback, regeneration, Blog requeue, or mass-publication call.
         client.update_draft(draft_ref['media_id'], 0, payload)
         actual = _first(client.get_draft(draft_ref['media_id']))
@@ -126,12 +131,16 @@ def _update_verified(client, job_id, draft_ref, original, updated, expected_text
                            if expected_images is not None else
                            all(_image_key(url) in image_keys for url in list(urls) + _Body(content).images))
         verified = (images_verified
+                    and full_width_cover_verified(actual)
                     and _text(actual_body) == expected_text
                     and _styles_preserved(updated, actual_body)
                     and not (re.search(r'<h1\b', actual_body, re.I) and not re.search(r'<h1\b', content, re.I))
-                    and all(actual.get(key) == value for key, value in payload.items() if key != 'content'))
+                    and all(actual.get(key) == value for key, value in payload.items()
+                            if key != 'content' and not (thumb_media_id is not None and key in approved_cover_geometry())))
         record.update(status='verified' if verified else 'needs_review',
                       actual_content_sha256=hashlib.sha256(actual_body.encode()).hexdigest())
+        if before_write:
+            before_write()
     except Exception:
         record['status'] = 'needs_review'
         raise
@@ -139,7 +148,53 @@ def _update_verified(client, job_id, draft_ref, original, updated, expected_text
         backup.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
     if not verified:
         raise DraftImageRepairError('草稿已更新，但文字、图片或格式回读校验未通过；已保留备份，请核对，不要盲目重试')
-    return {'ok': True, **draft_ref, 'verified': True, 'backup_id': backup.stem}
+    return {'ok': True, **draft_ref, 'verified': True, 'backup_id': backup.stem,
+            'image_keys': image_keys, 'thumb_media_id': actual.get('thumb_media_id')}
+
+
+def _approved_package(job, expected_package_id=None, *, expected_job_pk=None):
+    from utils.blog_pipeline import BlogPipelineError, _build_source_job
+    try:
+        return require_approved_package(_build_source_job(job), expected_package_id=expected_package_id,
+                                        expected_job_pk=expected_job_pk)
+    except (ImagePackageError, BlogPipelineError) as exc:
+        raise DraftImageRepairError(f'配图审批未通过，未更新：{exc}') from exc
+
+
+def _verified_existing_cover(db, job_pk, draft_ref, package, original, *, include_body=False):
+    dist = db.get_distribution(job_pk, 'wechat', account=draft_ref['account'], lang='zh')
+    try:
+        receipt = json.loads(getattr(dist, 'image_receipt_json', None) or '{}')
+    except (ValueError, TypeError):
+        receipt = {}
+    if (getattr(dist, 'image_package_id', None) != package.bundle_id
+            or receipt.get('thumb_media_id') != original.get('thumb_media_id')
+            or not receipt.get('thumb_media_id')):
+        raise DraftImageRepairError('现有封面未验证属于已批准图包，请显式包含封面修复；未更新')
+    if not receipt.get('wide_cover_crop_verified') or not full_width_cover_verified(original):
+        raise DraftImageRepairError('现有封面裁框未验证完整，请显式包含封面修复；未更新')
+    if include_body and (getattr(dist, 'image_verification_status', None) != 'verified'
+            or receipt.get('image_keys') != [list(_image_key(url)) for url in _Body(original.get('content', '')).images]):
+        raise DraftImageRepairError('现有草稿图片未通过已批准图包核验，请先修复图片；未修改格式')
+
+
+def _record_package_receipt(db, job_pk, draft_ref, package, result):
+    db.upsert_distribution(job_pk, 'wechat', account=draft_ref['account'], lang='zh',
+        image_package_id=package.bundle_id, image_verification_status='verified',
+        image_receipt_json=json.dumps({'image_package_id': package.bundle_id, 'media_id': draft_ref['media_id'],
+            'thumb_media_id': result.get('thumb_media_id'), 'image_keys': result.get('image_keys'),
+            'draft_readback_verified': True, 'wide_cover_crop_verified': True,
+            'square_preview_status': 'not_reviewed'}, ensure_ascii=False))
+    result['image_package_id'] = package.bundle_id
+    result['wide_cover_crop_verified'] = True
+    result['square_preview_status'] = 'not_reviewed'
+    return result
+
+
+def _before_package_write(db, job_pk, job, draft_ref, package):
+    _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
+    db.upsert_distribution(job_pk, 'wechat', account=draft_ref['account'], lang='zh',
+        image_package_id=package.bundle_id, image_verification_status='pending_readback')
 
 
 def _wechat_image_url(attrs):
@@ -173,21 +228,22 @@ def _saved_image_bindings(path, allowed_descriptions):
     return bindings
 
 
-def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, client_factory=WeChatClient):
+def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, client_factory=WeChatClient,
+                           expected_package_id=None):
     """Replace existing figure URLs only; never infer figure identity from its position."""
-    from batch_processor import (_resolve_job_figures, _resolve_figure_path, _upload_cached,
-                                 _fit_wechat_cover, _upload_cover_cached)
+    from batch_processor import _resolve_figure_path, _upload_cached, _upload_cover_cached
     from utils.blog_pipeline import _build_source_job
     from utils.figure_strategy import figure_key_from_description
 
-    with version_lock(job_id, 'wechat_repair'):
+    with version_lock(job_id, 'image_job'), version_lock(job_id, 'wechat'):
         job_pk = db.find_job_pk(job_id)
         job = db.get_job(job_pk) if job_pk is not None else None
         article = db.get_article(job_pk) if job else None
         draft_ref = db.latest_wechat_draft(job_id)
         if not article or article.publish_blocked or not draft_ref:
             raise DraftImageRepairError('文章不存在、质量检查未通过或没有现有草稿，未更新')
-        directory = Path(article.content_dir)
+        package = _approved_package(job, expected_package_id, expected_job_pk=job_pk)
+        directory = package.directory
         descriptions = find_image_placeholders(unwrap_linked_image_placeholders(
             normalize_image_placeholders((directory / 'article.md').read_text(encoding='utf-8'))))
         source_keys = [figure_key_from_description(desc) for desc in descriptions]
@@ -197,9 +253,11 @@ def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, cli
         for key, description in zip(source_keys, descriptions):
             by_key.setdefault(key, description)
             allowed.setdefault(key, set()).add(description)
-        saved_bindings = _saved_image_bindings(directory / 'article.html', allowed)
+        saved_bindings = _saved_image_bindings(Path(article.content_dir) / 'article.html', allowed)
         client = client_factory(account=draft_ref['account'])
         original = _first(client.get_draft(draft_ref['media_id']))
+        if not repair_cover:
+            _verified_existing_cover(db, job_pk, draft_ref, package, original)
         content = str(original.get('content') or '')
         patches, matched_keys, methods = [], [], []
         for match in _IMAGE.finditer(content):
@@ -233,7 +291,7 @@ def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, cli
                 or any(count > source_counts[key] for key, count in matched_counts.items())
                 or not all(any(candidate == key for candidate in remaining) for key in matched_keys)):
             raise DraftImageRepairError('草稿配图次数、顺序或身份与源稿不能唯一对应，未更新')
-        figures, figures_dir = _resolve_job_figures(_build_source_job(job), set(by_key))
+        figures, figures_dir = package.figures, package.directory
         paths = [_resolve_figure_path(desc, figures_dir, figures) for desc in by_key.values()]
         if (any(not path or not Path(path).is_file() for path in paths)
                 or len({Path(path).resolve() for path in paths}) != len(paths)):
@@ -241,7 +299,7 @@ def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, cli
         hashes = [hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths]
         if len(set(hashes)) != len(hashes):
             raise DraftImageRepairError('多个图号对应同一张图片，未更新')
-        cover_path = _fit_wechat_cover(paths[0], figures_dir) if repair_cover else None
+        cover_path = package.cover_path if repair_cover else None
         if repair_cover and (not cover_path or not Path(cover_path).is_file()):
             raise DraftImageRepairError('完整图片封面适配失败，未更新')
         plan = {'job_id': job_id, **draft_ref, 'matched_images': len(patches), 'unique_images': len(paths),
@@ -253,7 +311,10 @@ def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, cli
         if dry_run:
             return {'ok': True, 'status': 'dry_run', 'dry_run': True, **plan,
                     'current_cover_crop': {key: original.get(key) for key in ('pic_crop_235_1', 'pic_crop_1_1')}}
-        urls = [_upload_cached(client, draft_ref['account'], path) for path in paths]
+        urls = []
+        for path in paths:
+            _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
+            urls.append(_upload_cached(client, draft_ref['account'], path))
         for url in urls:
             _wechat_image_url({'src': url})
         if len({_image_key(url) for url in urls}) != len(urls):
@@ -267,24 +328,41 @@ def repair_existing_images(db, job_id, *, repair_cover=False, dry_run=False, cli
             updated = updated[:match.start()] + tag + updated[match.end():]
         if _text(updated) != _text(content) or not _styles_preserved(content, updated):
             raise DraftImageRepairError('修复会改变正文文字或样式，未更新')
+        _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
         thumb = _upload_cover_cached(client, draft_ref['account'], cover_path) if cover_path else None
         if cover_path and not thumb:
             raise DraftImageRepairError('完整图片封面上传失败，未更新')
-        if updated == content and (thumb is None or thumb == original.get('thumb_media_id')):
-            return {'ok': True, 'status': 'already_repaired', 'verified': True, **plan}
+        if (updated == content and (thumb is None or thumb == original.get('thumb_media_id'))
+                and (not repair_cover or all(original.get(key) == value for key, value in approved_cover_geometry().items()))):
+            _before_package_write(db, job_pk, job, draft_ref, package)
+            if _first(client.get_draft(draft_ref['media_id'])) != original:
+                raise DraftImageRepairError('草稿刚被修改，未将旧结果标记为已验证')
+            _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
+            return _record_package_receipt(db, job_pk, draft_ref, package,
+                {'ok': True, 'status': 'already_repaired', 'verified': True, **plan,
+                 'image_keys': [_image_key(url) for url in _Body(content).images],
+                 'thumb_media_id': original.get('thumb_media_id')})
         result = _update_verified(client, job_id, draft_ref, original, updated, _text(content), urls,
                                   operation='replace_images', expected_images=_Body(updated).images,
-                                  thumb_media_id=thumb)
-        return {**result, **plan, 'status': 'repaired', 'replaced_images': len(patches)}
+                                  thumb_media_id=thumb,
+                                  before_write=lambda: _before_package_write(db, job_pk, job, draft_ref, package))
+        return _record_package_receipt(db, job_pk, draft_ref, package,
+            {**result, **plan, 'status': 'repaired', 'replaced_images': len(patches)})
 
 
-def repair_formatting(db, job_id, *, client_factory=WeChatClient):
-    with version_lock(job_id, 'wechat_repair'):
+def repair_formatting(db, job_id, *, client_factory=WeChatClient, expected_package_id=None):
+    with version_lock(job_id, 'image_job'), version_lock(job_id, 'wechat'):
+        job_pk = db.find_job_pk(job_id)
+        job = db.get_job(job_pk) if job_pk is not None else None
+        if job is None:
+            raise DraftImageRepairError('文章不存在，未更新')
+        package = _approved_package(job, expected_package_id, expected_job_pk=job_pk)
         draft_ref = db.latest_wechat_draft(job_id)
         if not draft_ref:
             raise DraftImageRepairError('没有现有草稿，未更新')
         client = client_factory(account=draft_ref['account'])
         original = _first(client.get_draft(draft_ref['media_id']))
+        _verified_existing_cover(db, job_pk, draft_ref, package, original, include_body=True)
         content = str(original.get('content') or '')
         headings = re.findall(r'<h[234]\b[^>]*>.*?</h[234]>', content, re.I | re.S)
         if not headings or re.search(r'<h1\b', content, re.I):
@@ -295,29 +373,34 @@ def repair_formatting(db, job_id, *, client_factory=WeChatClient):
         updated = restore_wechat_body_styles(content[:footer]) + content[footer:]
         if _text(updated) != _text(content):
             raise DraftImageRepairError('格式修复会改变正文文字，未更新')
-        result = _update_verified(client, job_id, draft_ref, original, updated, _text(content), operation='formatting')
-        return {**result, 'styled_headings': len(headings), 'body_h1': False}
+        result = _update_verified(client, job_id, draft_ref, original, updated, _text(content), operation='formatting',
+                                  before_write=lambda: _before_package_write(db, job_pk, job, draft_ref, package))
+        return _record_package_receipt(db, job_pk, draft_ref, package,
+                                       {**result, 'styled_headings': len(headings), 'body_h1': False})
 
 
-def repair_images(db, job_id, *, client_factory=WeChatClient):
-    from batch_processor import _resolve_job_figures, _resolve_figure_path, _upload_cached
+def repair_images(db, job_id, *, client_factory=WeChatClient, expected_package_id=None, repair_cover=False):
+    from batch_processor import _resolve_figure_path, _upload_cached, _upload_cover_cached
     from utils.blog_pipeline import _build_source_job
     from utils.figure_strategy import figure_key_from_description
 
-    with version_lock(job_id, "wechat_repair"):
+    with version_lock(job_id, 'image_job'), version_lock(job_id, 'wechat'):
         job_pk = db.find_job_pk(job_id)
         job = db.get_job(job_pk) if job_pk is not None else None
         article = db.get_article(job_pk) if job else None
         draft_ref = db.latest_wechat_draft(job_id)
         if not article or article.publish_blocked or not draft_ref:
             raise DraftImageRepairError("文章不存在、质量检查未通过或没有现有草稿，未更新")
-        source = Path(article.content_dir) / "article.md"
+        package = _approved_package(job, expected_package_id, expected_job_pk=job_pk)
+        source = package.directory / "article.md"
         descriptions = find_image_placeholders(unwrap_linked_image_placeholders(
             normalize_image_placeholders(source.read_text(encoding="utf-8"))))
         if not descriptions or len(set(descriptions)) != len(descriptions):
             raise DraftImageRepairError("源稿图片标记不存在或重复，未更新")
         client = client_factory(account=draft_ref["account"])
         original = _first(client.get_draft(draft_ref["media_id"]))
+        if not repair_cover:
+            _verified_existing_cover(db, job_pk, draft_ref, package, original)
         content = str(original.get("content") or "")
         patches = []
         for desc in descriptions:
@@ -330,13 +413,16 @@ def repair_images(db, job_id, *, client_factory=WeChatClient):
         required = {figure_key_from_description(desc) for desc in descriptions}
         if None in required or len(required) != len(descriptions):
             raise DraftImageRepairError("源稿图号无法唯一对应，未更新")
-        figures, directory = _resolve_job_figures(source_job, required)
+        figures, directory = package.figures, package.directory
         paths = [_resolve_figure_path(desc, directory, figures) for desc in descriptions]
         if any(not path or not Path(path).is_file() for path in paths) or len(set(paths)) != len(paths):
             raise DraftImageRepairError("真实图片缺失或重复，未更新")
         if len({hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in paths}) != len(paths):
             raise DraftImageRepairError("多个图号对应同一张图片，未更新")
-        urls = [_upload_cached(client, draft_ref["account"], path) for path in paths]
+        urls = []
+        for path in paths:
+            _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
+            urls.append(_upload_cached(client, draft_ref['account'], path))
         if any(urlsplit(url).hostname not in {"mmbiz.qpic.cn", "mmbiz.qlogo.cn"} for url in urls):
             raise DraftImageRepairError("图片不是可用的微信素材，未更新")
         if len({_image_key(url) for url in urls}) != len(urls):
@@ -350,5 +436,11 @@ def repair_images(db, job_id, *, client_factory=WeChatClient):
             without_markers = without_markers[:match.start()] + without_markers[match.end():]
         if _text(updated) != _text(without_markers):
             raise DraftImageRepairError("修复会改变正文文字，未更新")
-        return {**_update_verified(client, job_id, draft_ref, original, updated, _text(without_markers), urls),
-                'inserted_images': len(urls)}
+        _approved_package(job, package.bundle_id, expected_job_pk=job_pk)
+        thumb = _upload_cover_cached(client, draft_ref['account'], package.cover_path) if repair_cover else None
+        if repair_cover and not thumb:
+            raise DraftImageRepairError('完整图片封面上传失败，未更新')
+        result = _update_verified(client, job_id, draft_ref, original, updated, _text(without_markers), urls,
+            thumb_media_id=thumb,
+            before_write=lambda: _before_package_write(db, job_pk, job, draft_ref, package))
+        return _record_package_receipt(db, job_pk, draft_ref, package, {**result, 'inserted_images': len(urls)})

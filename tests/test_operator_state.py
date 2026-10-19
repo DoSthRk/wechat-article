@@ -47,6 +47,13 @@ vm.runInContext(`
   assert.equal(coreStatus(uploaded)[1], "PDF 已重新上传，待重新处理");
   assert.equal(isCompleted(completed), true);
   assert.equal(requiresCoreAction(completed), false);
+  const awaitingReview = {...completed, image_status: "needs_review"};
+  assert.equal(requiresCoreAction(awaitingReview), true);
+  assert.equal(coreStatus(awaitingReview)[1], "等待人工确认配图");
+  assert.equal(languageProgress(awaitingReview, "en").text, "等待配图审核");
+  assert.equal(languageProgress(awaitingReview, "zh").text, "已发布");
+  assert.equal(workflowIsActive({images: {status: "running"}}), true);
+  assert.equal(workflowIsActive({review_publish: {status: "running"}}), true);
   const failed = {...completed, distributions: []};
   assert.equal(isCompleted(failed), false);
   assert.equal(requiresCoreAction(failed), true);

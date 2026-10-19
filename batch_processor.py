@@ -26,6 +26,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from dataclasses import replace
+from functools import wraps
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -38,6 +40,9 @@ from core.main import ArticleAnalyzer
 from db.database import ARTICLE_CONTENT_DIR, JobStatus, get_db_manager
 from utils.auto_blog import enqueue as enqueue_auto_blog
 from utils.blog_urls import BlogUrlError, resolve_published_blog_url
+from utils.blog_task_lock import version_lock
+from utils.image_packages import ImagePackageError, build_package, require_approved_package
+from utils.wechat_cover import approved_cover_geometry, full_width_cover_verified
 from utils.figure_strategy import (
     FigureKey,
     FigureSignals,
@@ -149,6 +154,7 @@ def main() -> int:
             task.id, j.job_id,
             pdf_path=j.pdf, template_id=j.template, product_id=j.product,
             image_pool=j.image_pool, title_hint=j.title_hint,
+            line_id=j.line,
         )
 
     analyzer: Optional[ArticleAnalyzer] = None
@@ -192,7 +198,7 @@ def _run_one_job(
     do_generate: bool,
     do_distribute: bool,
 ) -> bool:
-    job_pk = db.upsert_job(task_id, job.job_id).id
+    job_pk = db.upsert_job(task_id, job.job_id, line_id=job.line).id
 
     if do_generate:
         if analyzer is None or not _generate_one(db, job_pk, job, analyzer):
@@ -201,19 +207,31 @@ def _run_one_job(
     if do_distribute:
         if get_client is None:
             return True
-        if not _publish_chinese_blog(db, job_pk, job):
-            return False
-        return _distribute_one(db, job_pk, job, get_client, args)
+        with version_lock(job.job_id, 'image_job'):
+            try:
+                package = require_approved_package(job, expected_job_pk=job_pk)
+            except ImagePackageError:
+                package = build_package(job, job_pk=job_pk)
+                db.update_job_status(job_pk, JobStatus.GENERATED,
+                                     error_message='needs_review: 请先审核配图，确认后继续发布')
+                logger.info('[%s] 正文已保留，图包 %s 等待首次人工审核；未发布 Blog 或公众号',
+                            job.job_id, package.get('bundle_id', ''))
+                return True
+            if not _publish_chinese_blog(db, job_pk, job, expected_package_id=package.bundle_id):
+                return False
+            return _distribute_one(db, job_pk, job, get_client, args,
+                                   expected_package_id=package.bundle_id)
 
     return True
 
 
-def _publish_chinese_blog(db, job_pk: int, job: Job) -> bool:
+def _publish_chinese_blog(db, job_pk: int, job: Job, *, expected_package_id=None) -> bool:
     """Publish and verify the canonical Chinese Blog before WeChat drafting."""
     from utils.blog_pipeline import BlogPipelineError, BlogWorkflow
 
     try:
-        result = BlogWorkflow(db).publish(job.job_id, "zh")
+        result = BlogWorkflow(db).publish(job.job_id, "zh", job_pk=job_pk,
+                                         expected_package_id=expected_package_id)
     except BlogPipelineError as exc:
         error = f"blog: 中文官网文章发布失败：{exc}"
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
@@ -223,6 +241,15 @@ def _publish_chinese_blog(db, job_pk: int, job: Job) -> bool:
     return True
 
 
+def _serialized_image_job(function):
+    @wraps(function)
+    def locked(db, job_pk, job, *args, **kwargs):
+        with version_lock(job.job_id, 'image_job'):
+            return function(db, job_pk, job, *args, **kwargs)
+    return locked
+
+
+@_serialized_image_job
 def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
     """生成阶段：方案 B 出基准正文 → 落盘 → 写 articles 表。"""
     db.update_job_status(job_pk, JobStatus.GENERATING)
@@ -320,10 +347,19 @@ def _generate_one(db, job_pk: int, job: Job, analyzer: ArticleAnalyzer) -> bool:
     return True
 
 
+def _serialized_wechat(function):
+    @wraps(function)
+    def locked(db, job_pk, job, *args, **kwargs):
+        with version_lock(job.job_id, 'image_job'), version_lock(job.job_id, 'wechat'):
+            return function(db, job_pk, job, *args, **kwargs)
+    return locked
+
+
+@_serialized_wechat
 def _distribute_one(
     db, job_pk: int, job: Job,
     get_client: Callable[[str], WeChatClient],
-    args: argparse.Namespace,
+    args: argparse.Namespace, *, expected_package_id=None,
 ) -> bool:
     """投放阶段：取基准正文 → 该线对应账户的公众号草稿（已有 media_id 则走 PATCH）。"""
     article = db.get_article(job_pk)
@@ -340,8 +376,13 @@ def _distribute_one(
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"distribute: missing {md_path}")
         logger.error("[%s] distribute: 缺 article.md (%s)", job.job_id, md_path)
         return False
+    try:
+        package = require_approved_package(job, expected_package_id=expected_package_id, expected_job_pk=job_pk)
+    except ImagePackageError as exc:
+        db.update_job_status(job_pk, JobStatus.GENERATED, error_message=f'needs_review: {exc}')
+        return False
     # 从 article.md（唯一事实源）实时渲染 HTML —— 标题样式等改动无需重生成即可生效
-    html = markdown_to_wechat_html(md_path.read_text(encoding="utf-8"))
+    html = markdown_to_wechat_html((package.directory / 'article.md').read_text(encoding="utf-8"))
     account = _resolve_wechat_account(job)
     try:
         client = get_client(account)
@@ -352,7 +393,7 @@ def _distribute_one(
     existing = db.get_distribution(job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG)
     required_figure_keys = _required_figure_keys(html)
     try:
-        resolved_figures = _resolve_job_figures(job, required_figure_keys)
+        resolved_figures = (package.figures, package.directory)
         _preflight_figure_paths(html, resolved_figures)
     except Exception as exc:
         error = f"distribute: 配图质量闸拦下：{exc}"
@@ -367,19 +408,22 @@ def _distribute_one(
         logger.error("[%s] Blog 质量闸拦下，未创建/更新公众号草稿：%s", job.job_id, exc)
         return False
     try:
-        source_pdf_url = _ensure_source_pdf_published(db, job_pk, job)
-    except SourcePdfError as exc:
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
+        source_pdf_url = _ensure_source_pdf_published(
+            db, job_pk, replace(job, pdf=str(package.directory / 'source.pdf')),
+        )
+    except (SourcePdfError, ImagePackageError) as exc:
         error = f"distribute: 原文 PDF 上传失败：{exc}"
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
         logger.error("[%s] 原文 PDF 质量闸拦下，未创建/更新公众号草稿：%s", job.job_id, exc)
         return False
-    # 优先取该篇文章的首张可用配图作封面；账户固定素材只用于无图时兜底。
-    thumb_media_id = _auto_cover_media_id(client, account, job, html, resolved=resolved_figures)
-    if not thumb_media_id:
-        thumb_media_id = _resolve_thumb_media_id(account, args)
-    if not thumb_media_id and existing and existing.wechat_media_id:
-        # 重投 PATCH：复用原草稿现有封面，省去手动配 thumb_media_id
-        thumb_media_id = _existing_draft_thumb(client, existing.wechat_media_id)
+    # 所有平台使用审核时固定的封面，不再在投放时裁图或回退其他封面。
+    try:
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
+        thumb_media_id = _upload_cover_cached(client, account, package.cover_path)
+    except (ImagePackageError, WeChatAPIError, OSError) as exc:
+        db.update_job_status(job_pk, JobStatus.FAILED, error_message=f'distribute: 审批封面不可用：{exc}')
+        return False
     if not thumb_media_id:
         db.update_job_status(
             job_pk, JobStatus.FAILED,
@@ -392,7 +436,8 @@ def _distribute_one(
         return False
 
     try:
-        html, n_figs = _apply_figures(html, job, client, account, resolved=resolved_figures)
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
+        html, n_figs = _apply_figures(html, job, client, account, resolved=resolved_figures, package=package)
     except (ValueError, OSError, WeChatAPIError) as exc:
         error = f"distribute: 配图失败，未创建/更新公众号草稿：{exc}"
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=error)
@@ -415,7 +460,11 @@ def _distribute_one(
 
     # 必须放在正文及产品模块之后，才能紧邻微信底部的“阅读原文”入口。
     try:
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
         html, guide_url = append_source_pdf_guide(html, client, account)
+    except ImagePackageError as exc:
+        db.update_job_status(job_pk, JobStatus.GENERATED, error_message=f'needs_review: {exc}')
+        return False
     except TemplateAssetError as exc:
         logger.warning("[%s] 阅读原文引导图失败，继续生成草稿：%s", job.job_id, exc)
     else:
@@ -429,7 +478,9 @@ def _distribute_one(
         thumb_media_id=thumb_media_id,
         content_source_url=blog_url,
     )
+    media_id = ''
     try:
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
         if existing and existing.wechat_media_id:
             try:
                 client.update_draft(existing.wechat_media_id, 0, payload)
@@ -439,15 +490,26 @@ def _distribute_one(
                 if exc.errcode != 40007:  # 40007=media_id 失效（草稿已被删/过期）→ 重建；其它错抛出
                     raise
                 logger.warning("[%s] 原草稿 media_id 失效(40007)，改为新建草稿", job.job_id)
+                require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
                 media_id = client.create_draft([payload])
                 logger.info("[%s] POST wechat/%s media_id=%s（原草稿已删，重建）", job.job_id, account, media_id)
         else:
             media_id = client.create_draft([payload])
             logger.info("[%s] POST wechat/%s media_id=%s", job.job_id, account, media_id)
-    except WeChatAPIError as exc:
+        from utils.wechat_draft_repair import _Body, _first, _image_key
+        actual = _first(client.get_draft(media_id))
+        expected_images = [_image_key(url) for url in _Body(payload['content']).images]
+        actual_images = [_image_key(url) for url in _Body(str(actual.get('content') or '')).images]
+        if (actual_images != expected_images or actual.get('thumb_media_id') != thumb_media_id
+                or not full_width_cover_verified(actual)):
+            raise WeChatAPIError('公众号草稿图片/封面回读不匹配，未启动多语言发布')
+        require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
+    except Exception as exc:
         db.upsert_distribution(
             job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
             publish_status="failed", publish_error=str(exc), assembled_dir=article.content_dir,
+            wechat_media_id=media_id or (existing.wechat_media_id if existing else None),
+            image_package_id=package.bundle_id, image_verification_status='failed',
         )
         db.update_job_status(job_pk, JobStatus.FAILED, error_message=f"publish: {exc}")
         logger.error("[%s] publish failed: %s", job.job_id, exc)
@@ -457,10 +519,16 @@ def _distribute_one(
         job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
         wechat_media_id=media_id, publish_status="published", publish_error=None,
         assembled_dir=article.content_dir,
+        image_package_id=package.bundle_id, image_verification_status='verified',
+        image_receipt_json=json.dumps({'image_package_id': package.bundle_id,
+            'media_id': media_id, 'thumb_media_id': thumb_media_id,
+            'image_keys': actual_images, 'draft_readback_verified': True,
+            'wide_cover_crop_verified': True, 'square_preview_status': 'not_reviewed'}, ensure_ascii=False),
     )
     db.update_job_status(job_pk, JobStatus.PUBLISHED)
     try:
-        count = enqueue_auto_blog(db, job_pk, job.job_id, owner_line=job.line or "")
+        count = enqueue_auto_blog(db, job_pk, job.job_id, owner_line=job.line or "",
+                                  image_package_id=package.bundle_id)
         logger.info("[%s] 公众号草稿成功，多语言后台队列新增 %s 个版本", job.job_id, count)
     except Exception:
         # A Blog failure must not undo a valid WeChat draft or its success state.
@@ -966,10 +1034,10 @@ def _write_figure_resolution_report(
 
 
 def _resolve_job_figures(
-    job: Job, required_keys: Optional[set[FigureKey]] = None,
+    job: Job, required_keys: Optional[set[FigureKey]] = None, *, figures_dir: Optional[Path] = None,
 ) -> Tuple[List[Figure], Path]:
     """按文章实际所需图号选择抽图器，合并回退结果并保留策略报告。"""
-    figures_dir = Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
+    figures_dir = Path(figures_dir) if figures_dir is not None else Path(ARTICLE_CONTENT_DIR) / job.job_id / "figures"
     required_keys = set(required_keys or set())
     source = _prepare_figure_cache(job, figures_dir)
     _article_source_binding(job, source)
@@ -1095,27 +1163,16 @@ def _required_figure_keys(html: str) -> set[FigureKey]:
 
 def _auto_cover_media_id(
     client: WeChatClient, account: str, job: Job, html: str,
-    resolved: Optional[Tuple[List[Figure], Path]] = None,
+    resolved: Optional[Tuple[List[Figure], Path]] = None, package=None,
 ) -> str:
     """首次发该账户草稿、又没配封面时：用文章首图自动当封面（image_pool 优先，PDF 抽取兜底）。
 
     取 html 里第一个 ``[图片:…]`` 占位符对应的图；取不到回落到首张可用配图。
     传永久素材拿 thumb media_id（sha 缓存）。任何环节取不到图就回空串，由上层报"缺封面"。
     """
-    extracted, figures_dir = resolved or _resolve_job_figures(job)
-    cover_path: Optional[str] = None
-    for desc in find_image_placeholders(html):
-        cover_path = _resolve_figure_path(desc, figures_dir, extracted)
-        if cover_path:
-            break
-    if not cover_path and extracted:
-        cover_path = extracted[0].image_path
-    if not cover_path:
-        logger.warning("[%s] 自动封面：没有经校验的图片，仅可使用账户固定封面", job.job_id)
-        return ""
-    cover_path = _fit_wechat_cover(cover_path, figures_dir)
-    if not cover_path:
-        return ""
+    package = require_approved_package(job, expected_package_id=package.bundle_id if package else None,
+        expected_job_pk=getattr(package, 'manifest', {}).get('job_pk') if package else None)
+    cover_path = package.cover_path
     try:
         media_id = _upload_cover_cached(client, account, cover_path)
     except WeChatAPIError as exc:
@@ -1127,13 +1184,15 @@ def _auto_cover_media_id(
 
 def _apply_figures(
     html: str, job: Job, client: WeChatClient, account: str,
-    resolved: Optional[Tuple[List[Figure], Path]] = None,
+    resolved: Optional[Tuple[List[Figure], Path]] = None, package=None,
 ) -> Tuple[str, int]:
     """全部占位符通过检查后才上传；任何必需图缺失或上传失败都不生成残缺正文。"""
+    package = require_approved_package(job, expected_package_id=package.bundle_id if package else None,
+        expected_job_pk=getattr(package, 'manifest', {}).get('job_pk') if package else None)
     placeholders = find_image_placeholders(html)
     if not placeholders:
         return html, 0
-    resolved = resolved or _resolve_job_figures(job)
+    resolved = (package.figures, package.directory)
     paths = _preflight_figure_paths(html, resolved)
     used = 0
     used_paths: set = set()
@@ -1143,6 +1202,8 @@ def _apply_figures(
             # 同一张图已用过（如 Figure 1 与 Figure 1e 都指向 Fig 1）→ 删掉重复占位符，不重复插图
             html = html.replace(f"[图片:{desc}]", "", 1)
             continue
+        require_approved_package(job, expected_package_id=package.bundle_id,
+                                 expected_job_pk=getattr(package, 'manifest', {}).get('job_pk'))
         url = _upload_cached(client, account, path)
         if not url:
             raise ValueError(f"配图上传未返回图片地址：{desc}")
@@ -1166,8 +1227,7 @@ def _build_article_payload(
         "content_source_url": content_source_url,
         "thumb_media_id": thumb_media_id,
         "show_cover_pic": 1,
-        "pic_crop_235_1": "0_0_1_1",
-        "pic_crop_1_1": "0.287222_0_0.712778_1",
+        **approved_cover_geometry(),
         "need_open_comment": 0,
         "only_fans_can_comment": 0,
     }

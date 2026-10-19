@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from utils import wechat_draft_repair as repair
 from utils.wechat_client import WeChatAPIError
+from utils.wechat_cover import approved_cover_geometry, full_width_cover_verified
 
 
 class DraftImageRepairTests(unittest.TestCase):
@@ -25,10 +26,11 @@ class DraftImageRepairTests(unittest.TestCase):
         self.db = Mock()
         self.db.find_job_pk.return_value = 1
         self.db.get_job.return_value = SimpleNamespace(job_id="paper", pdf_path="p.pdf", template_id="t",
-            product_id="p", image_pool=None, title_hint="T")
+            product_id="p", image_pool=None, title_hint="T", line_id='aav')
         self.db.get_article.return_value = SimpleNamespace(content_dir=str(self.root), publish_blocked=False)
         self.db.latest_wechat_draft.return_value = {"account": "aav", "media_id": "existing"}
         self.original = {"title": "保留编辑过的标题", "author": "作者", "digest": "摘要",
+            **approved_cover_geometry(),
             "thumb_media_id": "original-cover", "content_source_url": "https://genemedi.cn/blog/paper-zh",
             "need_open_comment": 1, "only_fans_can_comment": 0,
             "content": '<p>手工修改的正文</p>' + "".join(
@@ -36,6 +38,12 @@ class DraftImageRepairTests(unittest.TestCase):
                 + '<section>原产品模块<img data-src="https://mmbiz.qpic.cn/footer/640"></section>'
                 + '<img data-src="https://mmbiz.qpic.cn/guide/640">'}
         self.current = dict(self.original)
+        self.package = SimpleNamespace(bundle_id='a' * 64, figures=[], directory=self.root,
+                                      cover_path=self.paths[0], source_markdown_sha256='hash')
+        self.db.get_distribution.side_effect = lambda *args, **kwargs: SimpleNamespace(
+            image_package_id='a' * 64, image_verification_status='verified',
+            image_receipt_json=json.dumps({'thumb_media_id': self.current['thumb_media_id'], 'wide_cover_crop_verified': True,
+                'image_keys': [list(repair._image_key(url)) for url in repair._Body(self.current['content']).images]}))
         self.client = Mock()
         self.client.get_draft.side_effect = lambda _id: {"news_item": [dict(self.current)]}
         self.client.update_draft.side_effect = self.update
@@ -43,6 +51,7 @@ class DraftImageRepairTests(unittest.TestCase):
         self.patches = [
             patch.object(repair, "BACKUP_DIR", self.root / "backups"),
             patch("utils.blog_task_lock.LOCK_DIR", self.root / "locks"),
+            patch('utils.wechat_draft_repair.require_approved_package', return_value=self.package),
             patch("batch_processor._resolve_job_figures", return_value=([], self.root)),
             patch("batch_processor._resolve_figure_path", side_effect=self.paths),
             patch("batch_processor._upload_cached", side_effect=[f"https://mmbiz.qpic.cn/figure{i}/0?from=appmsg" for i in range(4)]),
@@ -177,6 +186,7 @@ class DraftImageRepairTests(unittest.TestCase):
 
     def test_formatting_concurrent_edits_are_not_overwritten(self):
         original = {**self.original, 'content': self.formatting_content()}
+        self.current = dict(original)
         self.client.get_draft.side_effect = [{'news_item': [original]},
             {'news_item': [{**original, 'title': '刚改的标题'}]}]
         with self.assertRaisesRegex(repair.DraftImageRepairError, '未覆盖新内容'):
@@ -200,6 +210,7 @@ class ExistingDraftImageRepairTests(unittest.TestCase):
         self.current = dict(self.original)
         self.cover = self.root / 'contained-cover.jpg'
         self.cover.write_bytes(b'contained full figure cover')
+        self.package.cover_path = str(self.cover)
         self.cover_patches = [patch('batch_processor._fit_wechat_cover', return_value=str(self.cover)),
                               patch('batch_processor._upload_cover_cached', return_value='new-contained-cover')]
         self.fit_cover, self.upload_cover = [item.start() for item in self.cover_patches]
@@ -235,11 +246,57 @@ class ExistingDraftImageRepairTests(unittest.TestCase):
 
     def test_explicit_cover_repair_contains_first_figure_and_only_overrides_thumb(self):
         self.run_repair(repair_cover=True)
-        self.fit_cover.assert_called_once_with(self.paths[0], self.root)
+        self.fit_cover.assert_not_called()
         self.upload_cover.assert_called_once_with(self.client, 'aav', str(self.cover))
         self.assertEqual(self.current['thumb_media_id'], 'new-contained-cover')
         self.assertEqual({k: v for k, v in self.current.items() if k not in {'content', 'thumb_media_id'}},
                          {k: v for k, v in self.original.items() if k not in {'content', 'thumb_media_id'}})
+
+    def test_explicit_cover_repair_resets_old_crop_and_marks_square_unreviewed(self):
+        self.current['pic_crop_235_1'] = '0.2_0.2_0.8_0.8'
+        self.current['cover_info'] = {'crop_percent_list': [
+            {'ratio': '2.35_1', 'x1': '0.2', 'y1': '0.2', 'x2': '0.8', 'y2': '0.8'}]}
+        result = self.run_repair(repair_cover=True)
+        self.assertTrue(full_width_cover_verified(self.current))
+        self.assertEqual(self.current['cover_info'], approved_cover_geometry()['cover_info'])
+        self.assertEqual(self.current['pic_crop_235_1'], '0_0_1_1')
+        self.assertTrue(result['wide_cover_crop_verified'])
+        self.assertEqual(result['square_preview_status'], 'not_reviewed')
+
+    def test_bad_wide_crop_readback_prevents_verified_receipt(self):
+        def keep_old_crop(media_id, index, payload):
+            self.update(media_id, index, payload)
+            self.current['cover_info']['crop_percent_list'][0]['x1'] = '0.2'
+        self.client.update_draft.side_effect = keep_old_crop
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '回读校验未通过'):
+            self.run_repair(repair_cover=True)
+        self.assertNotIn('verified', [call.kwargs.get('image_verification_status')
+                                     for call in self.db.upsert_distribution.call_args_list])
+
+    def test_cover_false_preserves_cover_and_all_existing_crop_fields(self):
+        self.current['pic_crop_1_1'] = '0.3_0_0.7_1'
+        self.current['cover_info']['crop_percent_list'][1]['x1'] = '0.3'
+        self.current['cover_info']['crop_percent_list'][1]['x2'] = '0.7'
+        original_crop = json.loads(json.dumps({key: self.current[key] for key in approved_cover_geometry()}))
+        self.run_repair(repair_cover=False)
+        self.assertEqual({key: self.current[key] for key in original_crop}, original_crop)
+        self.assertEqual(self.current['thumb_media_id'], 'original-cover')
+
+    def test_cover_false_rejects_unverified_cover_before_any_upload(self):
+        self.db.get_distribution.side_effect = None
+        self.db.get_distribution.return_value = SimpleNamespace(image_package_id=self.package.bundle_id,
+            image_verification_status='verified', image_receipt_json=json.dumps({'thumb_media_id': 'different-cover'}))
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '显式包含封面修复'):
+            self.run_repair(repair_cover=False)
+        self.upload.assert_not_called()
+        self.upload_cover.assert_not_called()
+        self.client.update_draft.assert_not_called()
+
+    def test_empty_explicit_cover_upload_never_updates_draft(self):
+        self.upload_cover.return_value = ''
+        with self.assertRaisesRegex(repair.DraftImageRepairError, '封面上传失败'):
+            self.run_repair(repair_cover=True)
+        self.client.update_draft.assert_not_called()
 
     def test_dry_run_does_not_upload_patch_or_create_backup(self):
         result = self.run_repair(repair_cover=True, dry_run=True)
@@ -248,7 +305,7 @@ class ExistingDraftImageRepairTests(unittest.TestCase):
         self.assertEqual(result['matched_images'], 4)
         self.assertEqual(len(result['figures']), 4)
         self.assertIn('cover_sha256', result)
-        self.fit_cover.assert_called_once_with(self.paths[0], self.root)
+        self.fit_cover.assert_not_called()
         self.upload.assert_not_called()
         self.upload_cover.assert_not_called()
         self.client.update_draft.assert_not_called()
@@ -379,7 +436,7 @@ class ExistingDraftImageRepairTests(unittest.TestCase):
         self.client.update_draft.assert_not_called()
 
     def test_cover_containment_failure_prevents_all_uploads(self):
-        self.fit_cover.return_value = None
+        self.package.cover_path = str(self.root / 'missing-approved-cover.jpg')
         with self.assertRaisesRegex(repair.DraftImageRepairError, '完整图片封面适配失败'):
             self.run_repair(repair_cover=True)
         self.upload.assert_not_called()

@@ -182,7 +182,7 @@ class TestDashboardApi(unittest.TestCase):
         self.assertIn('aav: "AAV"', js)
         self.assertIn('solidex: "Solidex"', js)
         self.assertIn("上传 PDF", js)
-        self.assertIn("生成并提交草稿", js)
+        self.assertIn("生成待审核内容", js)
         self.assertIn("row-pick", js)
         self.assertIn("needsAction", js)
         self.assertNotIn("confirm(", js)
@@ -195,7 +195,7 @@ class TestDashboardApi(unittest.TestCase):
         self.assertNotIn("const validKeys", js)
 
         self.assertIn("生成中文文章", html)
-        self.assertIn("进入公众号草稿箱", html)
+        self.assertIn("人工确认配图", html)
         self.assertNotIn("翻译选中内容", html)
         self.assertNotIn("发布选中内容", html)
         self.assertNotIn('id="status"', html)

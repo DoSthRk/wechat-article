@@ -9,7 +9,10 @@
 """
 from __future__ import annotations
 
+from contextlib import closing
 import os
+import sqlite3
+import tempfile
 from datetime import datetime
 from enum import Enum as PyEnum
 from pathlib import Path
@@ -31,6 +34,7 @@ from sqlalchemy import (
     inspect,
 )
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
+from sqlalchemy.schema import CreateTable
 
 from utils.logger import setup_logger
 
@@ -78,6 +82,7 @@ class Job(Base):
     pdf_path = Column(String(512), nullable=False)
     template_id = Column(String(128), nullable=False)
     product_id = Column(String(128), nullable=False)
+    line_id = Column(String(32))
     image_pool = Column(String(128), comment="Phase 1 用")
     title_hint = Column(String(255))
     source_pdf_url = Column(String(1024), comment="原文 PDF 的公开 HTTPS 地址")
@@ -181,6 +186,8 @@ class ArticleVersion(Base):
     translation_status = Column(String(16), default="pending", nullable=False)
     translation_error = Column(Text)
     translation_model = Column(String(64))
+    source_markdown_sha256 = Column(String(64))
+    image_package_id = Column(String(64))
     total_tokens = Column(Integer, default=0)
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)
@@ -203,6 +210,8 @@ class ArticleVersion(Base):
             "translation_status": self.translation_status,
             "translation_error": self.translation_error,
             "translation_model": self.translation_model,
+            "source_markdown_sha256": self.source_markdown_sha256,
+            "image_package_id": self.image_package_id,
             "total_tokens": int(self.total_tokens or 0),
             "prompt_tokens": int(self.prompt_tokens or 0),
             "completion_tokens": int(self.completion_tokens or 0),
@@ -261,6 +270,9 @@ class Distribution(Base):
     external_node_id = Column(String(128), comment="external platform node ID")
     external_url = Column(String(512), comment="blog / 外链投放 URL")
     publish_error = Column(Text)
+    image_package_id = Column(String(64))
+    image_verification_status = Column(String(32))
+    image_receipt_json = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -286,6 +298,9 @@ class Distribution(Base):
             "external_node_id": self.external_node_id,
             "external_url": self.external_url,
             "publish_error": self.publish_error,
+            "image_package_id": self.image_package_id,
+            "image_verification_status": self.image_verification_status,
+            "image_receipt_json": self.image_receipt_json,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -299,6 +314,7 @@ class AutoBlogTask(Base):
     job_id = Column(String(128), nullable=False)
     lang = Column(String(16), nullable=False)
     source_sha256 = Column(String(64), nullable=False)
+    image_package_id = Column(String(64), nullable=False, default="")
     owner_line = Column(String(64), default="", nullable=False)
     status = Column(String(16), default="queued", nullable=False)
     phase = Column(String(16), default="", nullable=False)
@@ -306,8 +322,8 @@ class AutoBlogTask(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__ = (
-        UniqueConstraint("job_pk", "lang", "source_sha256", name="uq_auto_blog_revision"),
-        Index("ix_auto_blog_status", "status"),
+        UniqueConstraint("job_pk", "lang", "source_sha256", "image_package_id", name="uq_auto_blog_image_revision"),
+        Index("ix_auto_blog_image_status", "status"),
     )
 
 
@@ -318,6 +334,7 @@ class BlogNotification(Base):
     job_pk = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
     job_id = Column(String(128), nullable=False)
     source_sha256 = Column(String(64), nullable=False)
+    image_package_id = Column(String(64), nullable=False, default="")
     recipient_key = Column(String(16), default="primary", nullable=False)
     owner_line = Column(String(64), default="", nullable=False)
     status = Column(String(16), default="waiting", nullable=False)
@@ -344,14 +361,48 @@ class DatabaseManager:
         self.engine = create_engine(url, echo=False, future=True)
         self.SessionLocal = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
         Path(DEFAULT_SQLITE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        self._backup_before_image_gate_migration()
         Base.metadata.create_all(bind=self.engine)
         self._ensure_sqlite_columns()
+        self._ensure_image_queue_revision_constraint()
         self._backfill_blog_versions()
         self._normalize_legacy_english_blog_urls()
         logger.info("DB initialized: %s", self.engine.url)
 
     def get_session(self) -> Session:
         return self.SessionLocal()
+
+    def _backup_before_image_gate_migration(self) -> None:
+        """由数据库所属服务用户保存完整快照，备份失败时禁止开始迁移。"""
+        if self.engine.url.get_backend_name() != "sqlite":
+            return
+        filename = self.engine.url.database
+        if not filename or filename == ":memory:" or not Path(filename).is_file():
+            return
+        path = Path(filename).resolve()
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30)) as source:
+            columns = {row[1] for row in source.execute("PRAGMA table_info(auto_blog_tasks)")}
+            if not columns or "image_package_id" in columns:
+                return
+            directory = path.parent / "image_gate_backups"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            # 每进程独立名称，竞争初始化也不会覆盖先前完整快照。
+            with tempfile.NamedTemporaryFile(prefix="pre-image-gate-", suffix=".sqlite3.tmp",
+                                              dir=directory, delete=False) as target_file:
+                temporary = Path(target_file.name)
+            target = temporary.with_suffix("")
+            try:
+                with closing(sqlite3.connect(temporary)) as destination:
+                    source.backup(destination)
+                    if destination.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                        raise RuntimeError("图片门禁迁移前数据库备份校验失败")
+                with temporary.open("rb") as saved:
+                    os.fsync(saved.fileno())
+                temporary.replace(target)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            logger.info("image gate pre-migration backup verified: %s", target)
 
     def _ensure_sqlite_columns(self) -> None:
         """SQLite 平滑迁移：给既有表补上后加的列（create_all 不会 ALTER 既有表）。
@@ -362,6 +413,7 @@ class DatabaseManager:
             return
         additions = {
             "jobs": {
+                "line_id": "VARCHAR(32)",
                 "source_pdf_url": "VARCHAR(1024)",
                 "source_pdf_sha256": "VARCHAR(64)",
                 "source_pdf_size": "INTEGER DEFAULT 0",
@@ -376,15 +428,62 @@ class DatabaseManager:
             "distributions": {
                 "external_id": "VARCHAR(128)",
                 "external_node_id": "VARCHAR(128)",
+                "image_package_id": "VARCHAR(64)",
+                "image_verification_status": "VARCHAR(32)",
+                "image_receipt_json": "TEXT",
+            },
+            "article_versions": {
+                "source_markdown_sha256": "VARCHAR(64)",
+                "image_package_id": "VARCHAR(64)",
+            },
+            "auto_blog_tasks": {
+                "image_package_id": "VARCHAR(64) NOT NULL DEFAULT ''",
+            },
+            "blog_notifications": {
+                "image_package_id": "VARCHAR(64) NOT NULL DEFAULT ''",
             },
         }
         with self.engine.begin() as conn:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
             for table, cols in additions.items():
                 existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
                 for col, ddl in cols.items():
                     if col not in existing:
                         conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
                         logger.info("migrated: added %s.%s", table, col)
+
+    def _ensure_image_queue_revision_constraint(self) -> None:
+        """SQLite 队列幂等键加入图包；保留旧表作为一次性迁移备份。"""
+        if self.engine.url.get_backend_name() != "sqlite":
+            constraints = inspect(self.engine).get_unique_constraints("auto_blog_tasks")
+            if any(c.get("column_names") == ["job_pk", "lang", "source_sha256"] for c in constraints):
+                raise RuntimeError("数据库需要先迁移自动发布队列的图包唯一键，禁止使用旧约束启动")
+            return
+        with self.engine.connect() as conn:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                constraints = inspect(conn).get_unique_constraints("auto_blog_tasks")
+                if not any(c.get("column_names") == ["job_pk", "lang", "source_sha256"] for c in constraints):
+                    conn.commit()
+                    return
+                names = set(inspect(conn).get_table_names())
+                if {"auto_blog_tasks_image_revision", "auto_blog_tasks_legacy_image_gate"} & names:
+                    raise RuntimeError("图片队列迁移的保留表已存在，请先核对迁移状态")
+                ddl = str(CreateTable(AutoBlogTask.__table__).compile(dialect=conn.dialect))
+                conn.exec_driver_sql(ddl.replace("CREATE TABLE auto_blog_tasks", "CREATE TABLE auto_blog_tasks_image_revision", 1))
+                columns = ", ".join(f'"{column.name}"' for column in AutoBlogTask.__table__.columns)
+                conn.exec_driver_sql(f"INSERT INTO auto_blog_tasks_image_revision ({columns}) SELECT {columns} FROM auto_blog_tasks")
+                old_count = conn.exec_driver_sql("SELECT count(*) FROM auto_blog_tasks").scalar()
+                new_count = conn.exec_driver_sql("SELECT count(*) FROM auto_blog_tasks_image_revision").scalar()
+                if old_count != new_count:
+                    raise RuntimeError("图片队列迁移数量不一致，已停止")
+                conn.exec_driver_sql("ALTER TABLE auto_blog_tasks RENAME TO auto_blog_tasks_legacy_image_gate")
+                conn.exec_driver_sql("ALTER TABLE auto_blog_tasks_image_revision RENAME TO auto_blog_tasks")
+                conn.exec_driver_sql("CREATE INDEX ix_auto_blog_image_status ON auto_blog_tasks (status)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _backfill_blog_versions(self) -> None:
         """Make pre-feature generated Markdown visible in the Blog admin queue."""
@@ -575,6 +674,7 @@ class DatabaseManager:
             self.upsert_article_version(
                 job_pk, BLOG_SOURCE_LANG, content_path=source_path,
                 translation_status="ready", translation_error=None,
+                source_markdown_sha256=None, image_package_id=None,
             )
         source_distribution = self.get_distribution(
             job_pk, "blog", account="genemedi", lang=BLOG_SOURCE_LANG,
@@ -591,6 +691,7 @@ class DatabaseManager:
                 self.upsert_article_version(
                     job_pk, lang, content_path=target_path,
                     translation_status="pending", translation_error=None,
+                    source_markdown_sha256=None, image_package_id=None,
                 )
             target_distribution = self.get_distribution(
                 job_pk, "blog", account="genemedi", lang=lang,
@@ -721,8 +822,10 @@ class DatabaseManager:
                     "source_pdf_sha256": j.source_pdf_sha256,
                     "source_pdf_size": int(j.source_pdf_size or 0),
                     "status": j.status.value if j.status else None,
+                    "image_review_required": str(j.error_message or "").startswith("needs_review"),
                     "template_id": j.template_id,
                     "product_id": j.product_id,
+                    "line_id": j.line_id,
                     "title": a.title if a else None,
                     "word_count": int(a.word_count or 0) if a else 0,
                     "model": (a.model if a else None),
@@ -742,6 +845,8 @@ class DatabaseManager:
                             "external_node_id": d.external_node_id,
                             "external_url": d.external_url,
                             "publish_error": d.publish_error,
+                            "image_package_id": d.image_package_id,
+                            "image_verification_status": d.image_verification_status,
                         }
                         for d in j.distributions
                     ],

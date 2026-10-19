@@ -27,9 +27,12 @@ class BlogImageRepairTests(unittest.TestCase):
         self.workflow._drupal_language.return_value = 'zh-hans'
         self.workflow.db.get_article.return_value = SimpleNamespace(content_dir=str(self.root), publish_blocked=False)
         self.workflow.db.get_job.return_value = SimpleNamespace(job_id='paper', pdf_path='p.pdf', template_id='t',
-                                                               product_id='p', image_pool=None, title_hint='T')
+                                                               product_id='p', image_pool=None, title_hint='T', line_id='aav')
         self.workflow.db.get_distribution.return_value = SimpleNamespace(publish_status='published', external_id='uuid',
-                                                                         external_url=public_blog_url('paper', 'zh'))
+            external_url=public_blog_url('paper', 'zh'), image_package_id='a' * 64,
+            image_receipt_json=json.dumps({'cover_url': 'https://example.com/old/0.jpg'}))
+        self.package = SimpleNamespace(bundle_id='a' * 64, figures=[], directory=self.root,
+                                      cover_path=self.paths[0], source_markdown_sha256='hash')
         self.original = {'title': '保留手工标题', 'langcode': 'zh-hans', 'status': True,
                          'field_slug': 'paper-zh', 'field_cover_url': 'https://example.com/old/0.jpg',
                          'field_source_pdf_url': 'https://example.com/source.pdf', 'field_product_series': 'solidex',
@@ -45,6 +48,9 @@ class BlogImageRepairTests(unittest.TestCase):
         self.store.upload.side_effect = [f'https://example.com/new/{i}.jpg' for i in range(4)]
         self.patches = [patch.object(repair, 'BACKUP_DIR', self.root / 'backups'),
                         patch('utils.blog_task_lock.LOCK_DIR', self.root / 'locks'),
+                        patch('utils.blog_pipeline.require_approved_package', return_value=self.package),
+                        patch('utils.blog_pipeline.verify_public_image', side_effect=lambda url, **kwargs: url),
+                        patch('utils.blog_pipeline.verify_public_page_images', side_effect=lambda url, *args, **kwargs: url),
                         patch('batch_processor._resolve_job_figures', return_value=([], self.root)),
                         patch('batch_processor._resolve_figure_path', side_effect=self.paths)]
         for p in self.patches:
@@ -66,12 +72,12 @@ class BlogImageRepairTests(unittest.TestCase):
         self.client.create.assert_not_called()
         self.client.update.assert_called_once()
         payload = self.client.update.call_args.args[1]
-        self.assertEqual(set(payload), {'body', 'body_format', 'langcode', 'cover_url'})
+        self.assertEqual(set(payload), {'body', 'body_format', 'langcode'})
         expected = self.original['body']['value'].replace('/old/', '/new/')
         self.assertEqual(self.current['body']['value'], expected)
         for key in ('title', 'langcode', 'status', 'field_slug', 'field_product_series', 'field_source_pdf_url'):
             self.assertEqual(self.current[key], self.original[key])
-        self.assertEqual(self.current['field_cover_url'], 'https://example.com/new/0.jpg')
+        self.assertEqual(self.current['field_cover_url'], 'https://example.com/old/0.jpg')
         backup = self.root / 'backups' / (result['backup_id'] + '.json')
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(backup.read_text())['status'], 'verified')
@@ -96,7 +102,7 @@ class BlogImageRepairTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in self.store.upload.call_args_list], self.paths[:2])
         expected = original_body.replace('/old/0.jpg', '/new/0.jpg').replace('/old/1.jpg', '/new/0.jpg').replace('/old/2.jpg', '/new/1.jpg')
         self.assertEqual(self.current['body']['value'], expected)
-        self.assertEqual(self.current['field_cover_url'], 'https://example.com/new/0.jpg')
+        self.assertEqual(self.current['field_cover_url'], 'https://example.com/old/0.jpg')
         self.assertEqual(result['images'], ['https://example.com/new/0.jpg', 'https://example.com/new/1.jpg'])
 
     def test_renderer_deduplicated_source_occurrence_is_accepted(self):
@@ -181,19 +187,22 @@ class BlogImageRepairTests(unittest.TestCase):
 
     def test_custom_cover_is_preserved_by_default(self):
         self.current['field_cover_url'] = 'https://example.com/custom-cover.jpg'
-        repair.repair_images(self.workflow, 'paper', 'zh')
+        with self.assertRaisesRegex(BlogPipelineError, '显式包含封面修复'):
+            repair.repair_images(self.workflow, 'paper', 'zh')
         self.assertEqual(self.current['field_cover_url'], 'https://example.com/custom-cover.jpg')
-        self.assertNotIn('cover_url', self.client.update.call_args.args[1])
+        self.client.update.assert_not_called()
+        self.store.upload.assert_not_called()
 
     def test_explicit_cover_repair_uses_first_validated_figure(self):
         self.current['field_cover_url'] = 'https://example.com/wrong-cover.jpg'
+        self.store.upload.side_effect = [f'https://example.com/new/{i}.jpg' for i in range(5)]
         repair.repair_images(self.workflow, 'paper', 'zh', repair_cover=True)
-        self.assertEqual(self.current['field_cover_url'], 'https://example.com/new/0.jpg')
+        self.assertEqual(self.current['field_cover_url'], 'https://example.com/new/4.jpg')
 
     def test_cover_only_repair_updates_and_backs_up_unchanged_body(self):
         self.current['field_cover_url'] = 'https://example.com/wrong-cover.jpg'
         original = copy.deepcopy(self.current)
-        self.store.upload.side_effect = [f'https://example.com/old/{i}.jpg' for i in range(4)]
+        self.store.upload.side_effect = [f'https://example.com/old/{i}.jpg' for i in range(4)] + ['https://example.com/old/0.jpg']
         result = repair.repair_images(self.workflow, 'paper', 'zh', repair_cover=True)
         self.assertEqual(result['status'], 'repaired')
         self.client.update.assert_called_once()
@@ -205,11 +214,34 @@ class BlogImageRepairTests(unittest.TestCase):
 
     def test_no_changes_preserves_custom_cover_and_skips_patch(self):
         self.current['field_cover_url'] = 'https://example.com/custom-cover.jpg'
+        self.workflow.db.get_distribution.return_value.image_receipt_json = json.dumps({'cover_url': self.current['field_cover_url']})
         self.store.upload.side_effect = [f'https://example.com/old/{i}.jpg' for i in range(4)]
         result = repair.repair_images(self.workflow, 'paper', 'zh')
         self.assertEqual(result['status'], 'already_repaired')
         self.client.update.assert_not_called()
         self.assertFalse((self.root / 'backups').exists())
+
+    def test_cover_false_rejects_unverified_cover_without_upload_or_patch(self):
+        self.current['field_cover_url'] = 'https://example.com/unapproved-cover.jpg'
+        with self.assertRaisesRegex(BlogPipelineError, '显式包含封面修复'):
+            repair.repair_images(self.workflow, 'paper', 'zh', repair_cover=False)
+        self.store.upload.assert_not_called()
+        self.client.update.assert_not_called()
+
+    def test_noop_still_requires_public_readback_before_verified_receipt(self):
+        self.store.upload.side_effect = [f'https://example.com/old/{i}.jpg' for i in range(4)]
+        with patch('utils.blog_pipeline.verify_public_page_images', side_effect=BlogPipelineError('stale public HTML')):
+            with self.assertRaisesRegex(BlogPipelineError, 'stale public HTML'):
+                repair.repair_images(self.workflow, 'paper', 'zh')
+        self.client.update.assert_not_called()
+        statuses = [call.kwargs.get('image_verification_status')
+                    for call in self.workflow.db.upsert_distribution.call_args_list]
+        self.assertIn('pending_readback', statuses)
+        self.assertNotIn('verified', statuses)
+
+    def test_repair_passes_pinned_job_revision_to_resolver(self):
+        repair.repair_images(self.workflow, 'paper', 'zh', job_pk=23)
+        self.workflow._resolve_job_pk.assert_called_once_with('paper', 23)
 
     def test_concurrent_cms_edit_not_overwritten(self):
         self.client.get.side_effect = [{'data': {'attributes': copy.deepcopy(self.original)}},

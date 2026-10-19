@@ -1,15 +1,18 @@
 """No network: durable outbox + real BlogWorkflow with fake translator/CMS."""
 import os
+import hashlib
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from db.database import AutoBlogTask, BLOG_TARGET_LANGS, BlogNotification, DatabaseManager, JobStatus
 from utils import auto_blog, blog_task_lock, blog_notifications
 from utils.blog_pipeline import BlogWorkflow
 from utils.translator import TranslationResult
+from utils.image_packages import ImagePackageError
 
 
 class AutoBlogTests(unittest.TestCase):
@@ -17,11 +20,21 @@ class AutoBlogTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.db = DatabaseManager(f"sqlite:///{self.base / 'test.db'}")
+        # This suite tests the durable queue. Real approval/asset integrity is
+        # exercised separately in test_image_packages / package_consumers.
+        self.package_ids = {}
+        self.unapproved = set()
         self.real_kick = auto_blog.kick
         self.patches = [
             patch.object(auto_blog, "RUN_DIR", self.base / "runs"),
             patch.object(blog_task_lock, "LOCK_DIR", self.base / "locks"),
             patch.object(auto_blog, "kick"),
+            patch("utils.image_packages.require_approved_package", side_effect=self.approved_fixture),
+            patch("utils.blog_pipeline.require_approved_package", side_effect=self.approved_fixture),
+            patch("utils.blog_pipeline.verify_public_image"),
+            patch("utils.blog_pipeline.verify_public_page_images"),
+            patch("utils.blog_pipeline.verify_cms_payload"),
+            patch.object(blog_notifications, "send_notice", side_effect=AssertionError("unexpected external send")),
             patch.dict(os.environ, {"AUTO_BLOG_ENABLED": "true", "GENEMEDI_BLOG_CHINESE_LANGCODE": "zh-hans",
                                     "FEISHU_BLOG_RECIPIENT_OPEN_ID": "", "FEISHU_BLOG_RECIPIENT_EMAIL": "zxy@genemedi.net",
                                     "FEISHU_BLOG_COPY_RECIPIENT_OPEN_ID": "", "FEISHU_BLOG_COPY_RECIPIENT_EMAIL": "",
@@ -36,8 +49,12 @@ class AutoBlogTests(unittest.TestCase):
         ))
         self.cms = Mock()
         self.cms.create.return_value = {"uuid": "uuid-1", "node_id": "1"}
+        self.cms.update.return_value = {"uuid": "uuid-1", "node_id": "1"}
+        store = Mock()
+        store.upload.side_effect = lambda path: "https://example.com/" + Path(path).name
         self.workflow = BlogWorkflow(self.db, translator=self.translator,
             blog_client_factory=lambda: self.cms, blog_url_verifier=lambda url: url,
+            asset_store_factory=lambda: store,
             source_pdf_publisher=lambda *_args: "https://example.com/paper.pdf")
 
     def tearDown(self):
@@ -48,14 +65,29 @@ class AutoBlogTests(unittest.TestCase):
 
     def make_job(self, job_id, task_name="t"):
         task = self.db.get_or_create_task(task_name)
-        pk = self.db.upsert_job(task.id, job_id, pdf_path="p", template_id="t", product_id="",
+        pk = self.db.upsert_job(task.id, job_id, pdf_path="p", template_id="t", product_id="", line_id="aav",
                                 status=JobStatus.PUBLISHED).id
         content = self.base / f"article-{pk}"
         content.mkdir()
         (content / "article.md").write_text("# 中文标题\n\n中文正文", encoding="utf-8")
+        (content / "cover.jpg").write_bytes(b"fixture-cover-not-used-by-image-decoder")
+        self.db.upsert_job(task.id, job_id, pdf_path=str(content / "source.pdf"))
+        self.package_ids[content] = "b" * 64
         self.db.upsert_article(pk, content_dir=str(content), publish_blocked=False)
         self.db.ensure_blog_versions(pk, str(content))
         return pk
+
+    def approved_fixture(self, job, expected_package_id=None, expected_job_pk=None):
+        content = Path(job.pdf).parent
+        bundle_id = self.package_ids[content]
+        job_pk = int(content.name.removeprefix("article-"))
+        if expected_job_pk is not None and expected_job_pk != job_pk:
+            raise ImagePackageError("fixture job revision mismatch")
+        if content in self.unapproved or (expected_package_id and expected_package_id != bundle_id):
+            raise ImagePackageError("fixture needs_review: exact bundle not approved")
+        return SimpleNamespace(bundle_id=bundle_id, directory=content, figures=[],
+            cover_path=str(content / "cover.jpg"), manifest={'job_pk': job_pk},
+            source_markdown_sha256=hashlib.sha256((content / "article.md").read_bytes()).hexdigest())
 
     def rows(self):
         with self.db.get_session() as session:
@@ -71,6 +103,74 @@ class AutoBlogTests(unittest.TestCase):
         self.run_worker()
         self.assertEqual(self.rows(), [])
         self.cms.create.assert_not_called()
+
+    def test_unapproved_enqueue_does_not_create_queue_or_notice(self):
+        self.unapproved.add(Path(self.db.get_article(self.pk).content_dir))
+        with self.assertRaises(ImagePackageError):
+            auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.assertEqual(self.rows(), [])
+        with self.db.get_session() as session:
+            self.assertEqual(session.query(BlogNotification).count(), 0)
+        self.kick_mock.assert_not_called()
+
+    def test_revoked_queue_stops_before_translation_and_can_resume_after_explicit_reapproval(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        content = Path(self.db.get_article(self.pk).content_dir)
+        self.unapproved.add(content)
+        self.run_worker()
+        self.assertTrue(all(row.status == "needs_review" for row in self.rows()))
+        self.translator.assert_not_called()
+        self.cms.create.assert_not_called()
+        self.unapproved.remove(content)
+        self.assertEqual(auto_blog.enqueue(self.db, self.pk, "paper-1"), 4)
+        self.run_worker()
+        self.assertTrue(all(row.status == "done" for row in self.rows()))
+
+    def test_new_bundle_does_not_silently_retarget_old_queue(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.package_ids[Path(self.db.get_article(self.pk).content_dir)] = "c" * 64
+        self.run_worker()
+        self.assertTrue(all(row.image_package_id == "b" * 64 and row.status == "needs_review" for row in self.rows()))
+        self.translator.assert_not_called()
+        self.assertEqual(auto_blog.enqueue(self.db, self.pk, "paper-1"), 4)
+        self.run_worker()
+        self.assertEqual([row.status for row in self.rows()], ["needs_review"] * 4 + ["done"] * 4)
+        self.assertEqual(self.notice().image_package_id, "c" * 64)
+
+    def test_legacy_queue_without_bundle_is_not_auto_approved(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        for row in self.rows():
+            auto_blog._update(self.db, row.id, image_package_id="")
+        self.run_worker()
+        self.assertTrue(all(row.status == "needs_review" for row in self.rows()))
+        self.translator.assert_not_called()
+        self.cms.create.assert_not_called()
+
+    def test_missing_verification_receipt_does_not_complete_queue(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        with patch.object(self.workflow, "publish", return_value={"status": "published"}):
+            self.run_worker()
+        self.assertTrue(all(row.status == "failed" for row in self.rows()))
+
+    def test_existing_published_images_are_repaired_without_rewriting_text_and_pin_revision(self):
+        self.workflow.translate("paper-1", "en")
+        self.workflow.publish("paper-1", "en")
+        self.package_ids[Path(self.db.get_article(self.pk).content_dir)] = "c" * 64
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.make_job("paper-1", "new-task")
+        self.translator.reset_mock()
+        self.cms.reset_mock()
+        def repair(workflow, job_id, lang, **kwargs):
+            self.assertEqual(kwargs["job_pk"], self.pk)
+            self.assertEqual(kwargs["expected_package_id"], "c" * 64)
+            self.db.upsert_distribution(self.pk, "blog", account="genemedi", lang=lang,
+                image_package_id="c" * 64, image_verification_status="verified")
+        with patch("utils.blog_image_repair.repair_images", side_effect=repair) as repair_mock:
+            self.run_worker()
+        repair_mock.assert_called_once()
+        self.assertEqual(self.translator.call_count, 3)
+        self.cms.update.assert_not_called()
+        self.assertTrue(all(row.status == "done" for row in self.rows()))
 
     def test_duplicate_enqueue_drains_four_languages_and_skips_repeat(self):
         self.assertEqual(auto_blog.enqueue(self.db, self.pk, "paper-1", "aav"), 4)
@@ -239,12 +339,56 @@ class AutoBlogTests(unittest.TestCase):
         self.assertEqual(row.recipient_id, "zxy@genemedi.net")
         self.assertEqual(row.recipient_type, "email")
         self.assertTrue(text.startswith("Blog 已发布"))
+        self.assertIn("业务线：AAV", text)
         for lang in ("zh", *BLOG_TARGET_LANGS):
             dist = self.db.get_distribution(self.pk, "blog", account="genemedi", lang=lang)
             self.assertIn(dist.external_url, text)
         self.assertEqual(self.notice().status, "sent")
         self.assertEqual(self.notice().message_id, "om_receipt")
         self.assertFalse(blog_notifications.pending(self.db))
+
+    def test_notification_requires_same_bundle_for_every_language(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.publish_all()
+        self.db.upsert_distribution(self.pk, "blog", account="genemedi", lang="ru", image_package_id="c" * 64)
+        sender = Mock()
+        blog_notifications.deliver_ready(self.db, sender=sender)
+        sender.assert_not_called()
+        self.assertEqual(self.notice().status, "waiting")
+
+    def test_notification_reloads_reapproved_bundle_after_snapshot(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.publish_all()
+        snapshots = blog_notifications._rows(self.db)
+        self.package_ids[Path(self.db.get_article(self.pk).content_dir)] = "c" * 64
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        for lang in ("zh", *BLOG_TARGET_LANGS):
+            self.db.upsert_distribution(self.pk, "blog", account="genemedi", lang=lang,
+                                       image_package_id="c" * 64)
+        sender = Mock(return_value="om_current_bundle")
+        with patch.object(blog_notifications, "_rows", return_value=snapshots):
+            blog_notifications.deliver_ready(self.db, sender=sender)
+        sender.assert_called_once()
+        self.assertEqual(sender.call_args.args[0].image_package_id, "c" * 64)
+        self.assertEqual(self.notice().status, "sent")
+
+    def test_revoked_approval_blocks_notification_despite_five_success_receipts(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.publish_all()
+        self.unapproved.add(Path(self.db.get_article(self.pk).content_dir))
+        sender = Mock()
+        blog_notifications.deliver_ready(self.db, sender=sender)
+        sender.assert_not_called()
+        self.assertEqual(self.notice().status, "needs_review")
+
+    def test_legacy_notice_is_not_sent_from_legacy_published_status(self):
+        auto_blog.enqueue(self.db, self.pk, "paper-1")
+        self.publish_all()
+        blog_notifications._save(self.db, self.notice(), image_package_id="")
+        sender = Mock()
+        blog_notifications.deliver_ready(self.db, sender=sender)
+        sender.assert_not_called()
+        self.assertEqual(self.notice().status, "needs_review")
 
     def test_incomplete_or_legacy_publication_does_not_send(self):
         auto_blog.enqueue(self.db, self.pk, "paper-1")

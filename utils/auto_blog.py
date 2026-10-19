@@ -43,10 +43,23 @@ def source_hash(db, job_pk):
     return hashlib.sha256(Path(version.content_path).read_bytes()).hexdigest()
 
 
-def _published(db, job_pk, job_id, lang):
+def _published(db, job_pk, job_id, lang, image_package_id):
     dist = db.get_distribution(job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=lang)
     return bool(dist and dist.publish_status == "published" and
+                image_package_id and dist.image_package_id == image_package_id and
+                dist.image_verification_status == "verified" and
                 str(dist.external_url or "").rstrip("/") == public_blog_url(job_id, lang))
+
+
+def approved_package(db, job_pk, job_id, expected_package_id=None):
+    """队列只接收已批准的确切图包，不从旧 published 状态推断批准。"""
+    from utils.blog_pipeline import _build_source_job
+    from utils.image_packages import require_approved_package
+    job = db.get_job(job_pk)
+    if job is None or job.job_id != job_id:
+        raise BlogPipelineError("图片审核对应的文章版本不存在")
+    return require_approved_package(_build_source_job(job), expected_package_id=expected_package_id,
+                                    expected_job_pk=job_pk)
 
 
 @contextmanager
@@ -64,28 +77,34 @@ def worker_lock():
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def enqueue(db, job_pk, job_id, owner_line="", *, launch=True):
+def enqueue(db, job_pk, job_id, owner_line="", *, image_package_id=None, launch=True):
     if not enabled() or held(job_id):
         return 0
-    digest = source_hash(db, job_pk)
     # Serialize duplicate draft callbacks, including the same revision.
-    with version_lock(job_id, "auto_enqueue"):
+    with version_lock(job_id, "image_job"), version_lock(job_id, "auto_enqueue"):
+        package = approved_package(db, job_pk, job_id, image_package_id)
+        digest = source_hash(db, job_pk)
+        if digest != package.source_markdown_sha256:
+            raise BlogPipelineError("草稿正文与已确认图包不一致，未创建自动发布任务")
+        image_package_id = package.bundle_id
         with db.get_session() as session:
             count = 0
             for lang in BLOG_TARGET_LANGS:
                 row = session.query(AutoBlogTask).filter_by(
-                    job_pk=job_pk, lang=lang, source_sha256=digest,
+                    job_pk=job_pk, lang=lang, source_sha256=digest, image_package_id=image_package_id,
                 ).first()
                 if row is None:
                     session.add(AutoBlogTask(job_pk=job_pk, job_id=job_id, lang=lang,
-                                            source_sha256=digest, owner_line=owner_line or ""))
+                                            source_sha256=digest, image_package_id=image_package_id,
+                                            owner_line=owner_line or ""))
                     count += 1
-                elif row.status in {"failed", "cancelled"} or (
-                    row.status == "done" and not _published(db, job_pk, job_id, lang)
+                elif row.status in {"failed", "cancelled", "needs_review"} or (
+                    row.status == "done" and not _published(db, job_pk, job_id, lang, image_package_id)
                 ):
                     row.status, row.phase, row.error = "queued", "", None
                     count += 1
-            blog_notifications.add_notice(session, job_pk, job_id, digest, owner_line)
+            blog_notifications.add_notice(session, job_pk, job_id, digest, owner_line,
+                                          image_package_id=image_package_id)
             session.commit()
     if launch:
         kick(db)
@@ -124,7 +143,7 @@ def _update(db, task_id, **fields):
 
 
 def _process(db, row, workflow):
-    with version_lock(row.job_id, row.lang):
+    with version_lock(row.job_id, "image_job"), version_lock(row.job_id, row.lang):
         if held(row.job_id):
             _update(db, row.id, status="cancelled", error="自动发布已暂缓")
             return
@@ -134,15 +153,39 @@ def _process(db, row, workflow):
         if source_hash(db, row.job_pk) != row.source_sha256:
             _update(db, row.id, status="cancelled", error="源文章已变更，等待新草稿上传")
             return
-        if not _published(db, row.job_pk, row.job_id, row.lang):
+        if not row.image_package_id:
+            _update(db, row.id, status="needs_review", error="历史任务未绑定已确认图包，请先确认配图")
+            return
+        package = approved_package(db, row.job_pk, row.job_id, row.image_package_id)
+        if package.source_markdown_sha256 != row.source_sha256:
+            raise BlogPipelineError("自动任务与已确认图包的正文版本不一致")
+        if not _published(db, row.job_pk, row.job_id, row.lang, row.image_package_id):
+            current = db.get_distribution(row.job_pk, BLOG_PLATFORM, account=BLOG_ACCOUNT, lang=row.lang)
+            if (current and current.publish_status == "published" and current.external_id
+                    and str(current.external_url or "").rstrip("/") == public_blog_url(row.job_id, row.lang)):
+                # 旧文章换图不能借机用磁盘译稿覆盖 CMS 中的人工修改。
+                from utils.blog_image_repair import repair_images
+                _update(db, row.id, phase="images")
+                repair_images(workflow, row.job_id, row.lang, repair_cover=True,
+                              expected_package_id=row.image_package_id, job_pk=row.job_pk)
+                if not _published(db, row.job_pk, row.job_id, row.lang, row.image_package_id):
+                    raise BlogPipelineError("历史文章图片同步未通过当前图包验收")
+                _update(db, row.id, status="done", phase="", error=None)
+                return
             version = db.get_article_version(row.job_pk, row.lang)
-            if not (version and version.translation_status == "translated" and Path(version.content_path).is_file()):
+            if not (version and version.translation_status == "translated"
+                    and version.source_markdown_sha256 == row.source_sha256
+                    and Path(version.content_path).is_file()):
                 _update(db, row.id, phase="translate")
-                workflow.translate(row.job_id, row.lang, job_pk=row.job_pk)
+                workflow.translate(row.job_id, row.lang, job_pk=row.job_pk,
+                                   expected_package_id=row.image_package_id)
             if source_hash(db, row.job_pk) != row.source_sha256:
                 raise BlogPipelineError("Source changed during translation; publication stopped")
             _update(db, row.id, phase="publish")
-            workflow.publish(row.job_id, row.lang, job_pk=row.job_pk)
+            workflow.publish(row.job_id, row.lang, job_pk=row.job_pk,
+                             expected_package_id=row.image_package_id)
+            if not _published(db, row.job_pk, row.job_id, row.lang, row.image_package_id):
+                raise BlogPipelineError("发布回执未确认预期图包，自动任务不能记为完成")
         _update(db, row.id, status="done", phase="", error=None)
 
 
@@ -173,7 +216,9 @@ def drain(db=None, workflow=None):
             try:
                 _process(db, row, workflow)
             except Exception as exc:
-                _update(db, row.id, status="failed", error=str(exc) or exc.__class__.__name__)
+                from utils.image_packages import ImagePackageError
+                _update(db, row.id, status="needs_review" if isinstance(exc, ImagePackageError) else "failed",
+                        error=str(exc) or exc.__class__.__name__)
                 logger.exception("Auto Blog failed job=%s lang=%s", row.job_id, row.lang)
             blog_notifications.deliver_ready(db)
     # Close the enqueue-vs-idle-exit race: a competing launch may have observed
@@ -189,7 +234,7 @@ def status(db=None, allowed=None):
             query = query.filter(AutoBlogTask.owner_line.in_(allowed))
         rows = query.order_by(AutoBlogTask.id).all()
         items = [{"job_id": r.job_id, "lang": r.lang, "status": r.status,
-                  "phase": r.phase, "error": r.error} for r in rows]
+                  "phase": r.phase, "error": r.error, "image_package_id": r.image_package_id} for r in rows]
     notifications = blog_notifications.status(db, allowed)
     active = any(r["status"] in {"queued", "running"} for r in items) or any(
         n["status"] in {"sending", "retry"} for n in notifications
@@ -197,6 +242,7 @@ def status(db=None, allowed=None):
     return {"stage": "auto", "status": "running" if active else "idle",
             "total": len(items), "completed": sum(r["status"] == "done" for r in items),
             "failed": sum(r["status"] == "failed" for r in items), "items": items,
+            "needs_review": sum(r["status"] == "needs_review" for r in items),
             "notifications": notifications,
             "current": next((r for r in items if r["status"] == "running"), None),
             "errors": [f"{r['job_id']} / {r['lang']}: {r['error']}" for r in items if r["error"]]}

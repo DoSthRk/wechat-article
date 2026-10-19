@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>图片审核 · {{ job_id }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='operator.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='image_review.css') }}">
+</head>
+<body data-job-id="{{ job_id }}">
+  <a class="skip-link" href="#review-main">跳到图片审核</a>
+  <header class="page-header">
+    <div><p class="eyebrow">GM-LAB / 内容平台</p><h1>首次图片审核</h1><p class="identity">{{ job_id }} · 当前用户：{{ username }}</p></div>
+    <a class="gm-lab-home" href="{{ url_for('operator') }}">返回工作台</a>
+  </header>
+  <main id="review-main" class="review-main">
+    <section class="review-notice">
+      <h2>先确认图片，再继续发布</h2>
+      <p>请核对论文身份、每张原页与裁图，以及完整封面。审核通过后，各语言 Blog 与公众号共用同一图片包；源 PDF 或图片变更后需重新审核。</p>
+      <p>“确认并继续发布”将同步本图包的正文图片和封面：已有文章保留文字，新稿继续发布中文 Blog / 公众号草稿，随后自动多语言发布；不会重新生成正文。</p>
+    </section>
+    {% if not can_approve %}
+    <section class="review-notice warning"><strong>当前为业务线快捷查看模式</strong><p>可查看图片，但不能批准。请从 <a href="https://lab.genemedi.cn/">GM-LAB 登录入口</a>进入，以记录真实审核人。</p></section>
+    {% endif %}
+    <div id="review-message" class="review-message" role="status" aria-live="polite" tabindex="-1">正在读取图片包…</div>
+    <section class="review-toolbar"><div><strong id="package-status">读取中</strong><p id="package-id" class="mono"></p></div><div class="review-actions"><button type="button" id="refresh-package" class="btn secondary">刷新状态</button><button type="button" id="prepare-package" class="btn secondary">生成图片候选</button></div></section>
+    <form id="review-form" novalidate hidden>
+      <section class="review-section" id="source-section">
+        <h2>1. 确认论文身份与范围</h2>
+        <p id="source-binding"></p><p><a id="source-pdf" target="_blank" rel="noopener">打开原 PDF</a> <span id="source-hash" class="mono"></span></p>
+        <div class="review-fields"><label>论文原文标题（标题或 DOI 至少填一项）<input id="paper-title" name="title" autocomplete="off" aria-describedby="scope-error"></label><label>DOI<input id="paper-doi" name="doi" autocomplete="off" aria-describedby="scope-error" placeholder="例如 10.xxxx/xxxxx"></label></div>
+        <label>该论文在 PDF 中的页码范围<input id="paper-pages" name="pages" required aria-describedby="pages-help pages-error" placeholder="例如 1-5, 8"></label>
+        <p class="field-help" id="pages-help">按 PDF 实际页码，从 1 开始。合订 PDF 请只填当前论文的页码，且包含下面全部图所在页。</p><p id="pages-error" class="field-error" hidden></p>
+        <label>身份核对依据<textarea id="paper-evidence" name="evidence" required rows="3" aria-describedby="scope-error" placeholder="例如：第 2 页标题和 DOI 与本稿一致；Figure 1 位于第 3 页。"></textarea></label>
+        <p id="scope-error" class="field-error" hidden></p>
+      </section>
+      <section class="review-section"><h2>2. 逐张对照原页与裁图</h2><p class="field-help">点击图片可打开原尺寸。不能仅因图片能加载就确认：请检查是否为当前论文的对应图，而非图注、正文或其他论文图片。</p><div id="figure-list"></div><p id="figures-error" class="field-error" hidden></p></section>
+      <section class="review-section"><h2>3. 检查公众号封面</h2><a id="cover-link" target="_blank" rel="noopener"><img id="cover-image" alt="公众号完整留白封面预览" width="900" height="383"></a><p class="field-help">封面等比缩放并留白，不切掉科研图面板。正文仍使用原始完整裁图。</p></section>
+      <section class="review-section"><h2>4. 提交审核</h2><fieldset class="confirmations"><legend>确认事项（四项均必选）</legend>
+        <label><input type="checkbox" name="source">原 PDF 与当前论文身份、页范围一致</label>
+        <label><input type="checkbox" name="number">每个图号均与论文原图对应，没有把图注或其他文章当成图片</label>
+        <label><input type="checkbox" name="completeness">所有子图、坐标、图例和必要标注完整保留</label>
+        <label><input type="checkbox" name="cover">封面来源正确，关键内容未被裁掉</label>
+      </fieldset><p id="confirmations-error" class="field-error" hidden></p>
+        <label>审核备注（可选）<textarea id="review-note" rows="2"></textarea></label>
+        <p class="field-help">继续发布会同步正文图片与封面，并继续自动多语言发布；只想保存本次人工确认，请选择“仅确认配图”。</p>
+        <div class="review-actions"><button id="approve-continue" type="submit" class="btn primary">确认并继续发布</button><button id="approve-only" type="button" class="btn secondary">仅确认配图</button><button id="continue-publish" type="button" class="btn primary" hidden>继续发布</button></div>
+        <p class="field-help" id="approval-record"></p>
+      </section>
+    </form>
+    <section id="revoke-section" class="review-section" hidden><h2>撤回本次审核</h2><p>撤回会阻止后续使用本包发布，不会自动撤下已经发布的内容。</p><label>撤回原因<input id="revoke-reason"></label><button type="button" id="revoke-package" class="btn secondary">撤回审核</button></section>
+  </main>
+  <script src="{{ url_for('static', filename='image_review.js') }}"></script>
+</body>
+</html>

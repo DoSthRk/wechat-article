@@ -97,21 +97,30 @@ def send_notice(row, text):
     return message_id
 
 
-def add_notice(session, job_pk, job_id, source_sha256, owner_line):
+def add_notice(session, job_pk, job_id, source_sha256, owner_line, *, image_package_id=""):
     for key in recipient_keys():
         row = session.query(BlogNotification).filter_by(job_pk=job_pk, source_sha256=source_sha256,
                                                       recipient_key=key).first()
         if row is None:
             session.add(BlogNotification(job_pk=job_pk, job_id=job_id, source_sha256=source_sha256,
-                recipient_key=key, owner_line=owner_line or "", delivery_uuid=str(uuid.uuid4())))
+                image_package_id=image_package_id, recipient_key=key,
+                owner_line=owner_line or "", delivery_uuid=str(uuid.uuid4())))
+        elif row.status in {"waiting", "needs_review"} and not row.attempts:
+            # 尚未发送的同正文通知跟随本次明确批准的包；已发/不确定结果不重置。
+            row.image_package_id = image_package_id
+            row.status, row.error = "waiting", None
     # Sent/uncertain notices are never reset by a duplicate draft callback.
 
 
 def links_for(db, row):
+    if not row.image_package_id:
+        return []
     links = []
     for lang in BLOG_LANGS:
         dist = db.get_distribution(row.job_pk, "blog", account="genemedi", lang=lang)
-        if not dist or dist.publish_status != "published":
+        if (not dist or dist.publish_status != "published"
+                or dist.image_package_id != row.image_package_id
+                or dist.image_verification_status != "verified"):
             return []
         actual = str(dist.external_url or "").rstrip("/")
         if actual != public_blog_url(row.job_id, lang):
@@ -123,8 +132,9 @@ def links_for(db, row):
 def render_notice(db, row, links):
     article = db.get_article(row.job_pk)
     title = str(article.title or row.job_id) if article else row.job_id
+    business_line = str(row.owner_line or "").strip().upper() or "未标记"
     return "\n".join([
-        "Blog 已发布", f"文章：{title}", f"任务：{row.job_id}", "",
+        "Blog 已发布", f"业务线：{business_line}", f"文章：{title}", f"任务：{row.job_id}", "",
         *[f"{LANG_LABELS[lang]}：{url}" for lang, url in links],
     ])
 
@@ -157,51 +167,75 @@ def _save(db, row, **fields):
 
 def deliver_ready(db, *, sender=None):
     """Called under the automatic worker lock. Return next retry delay, if any."""
-    from utils.auto_blog import held, source_hash
+    from utils.auto_blog import approved_package, held, source_hash
     sender = sender or send_notice
     delays = []
-    for row in _rows(db):
-        now = datetime.utcnow()
-        try:
-            if held(row.job_id) or source_hash(db, row.job_pk) != row.source_sha256:
-                _save(db, row, status="cancelled", error="文章已变更或暂缓发布")
-                continue
-            article = db.get_article(row.job_pk)
-            if article is None or article.publish_blocked:
-                continue
-            links = links_for(db, row)
-            if not links:
-                continue
-            if row.retry_at and row.retry_at > now:
-                delays.append((row.retry_at - now).total_seconds())
-                continue
-            # Feishu only deduplicates the same UUID for one hour. Do not
-            # blindly resend an ambiguous delivery after that window expires.
-            if row.first_attempt_at and now - row.first_attempt_at >= timedelta(minutes=55):
-                _save(db, row, status="uncertain", error="通知结果待确认；已超过安全自动重试窗口")
-                continue
-            recipient_id, recipient_type = (row.recipient_id, row.recipient_type) if row.recipient_id else recipient(row.recipient_key)
-            _save(db, row, status="sending", recipient_id=recipient_id, recipient_type=recipient_type,
-                  attempts=row.attempts + 1, first_attempt_at=row.first_attempt_at or now, retry_at=None)
-            message_id = sender(row, render_notice(db, row, links))
-            if not message_id:
-                raise NotificationError("飞书未返回消息回执", retryable=True)
-            _save(db, row, status="sent", message_id=message_id, error=None)
-        except Exception as exc:
-            retryable = isinstance(exc, NotificationError) and exc.retryable
-            if retryable and row.attempts < 5:
-                delay = 30 * (2 ** max(0, row.attempts - 1))
-                _save(db, row, status="retry", retry_at=now + timedelta(seconds=delay), error=str(exc))
+    for snapshot in _rows(db):
+        # Queue reapproval may replace the package while this worker waits.
+        # Never write a stale A-package decision onto a current B-package row.
+        with version_lock(snapshot.job_id, "image_job"):
+            with db.get_session() as session:
+                row = session.get(BlogNotification, snapshot.id)
+                if row is None or row.status not in {"waiting", "sending", "retry"}:
+                    continue
+                session.expunge(row)
+            delay = _deliver_one(db, row, sender, approved_package, held, source_hash)
+            if delay is not None:
                 delays.append(delay)
-            else:
-                error = str(exc) if isinstance(exc, NotificationError) else f"通知处理失败：{type(exc).__name__}"
-                uncertain = retryable or (not isinstance(exc, NotificationError) and row.status == "sending")
-                _save(db, row, status="uncertain" if uncertain else "failed", error=error)
     return min(delays) if delays else None
 
 
+def _deliver_one(db, row, sender, approved_package, held, source_hash):
+    """One fresh outbox row; caller holds its image_job lock through the send."""
+    from utils.image_packages import ImagePackageError
+    now = datetime.utcnow()
+    try:
+        if not row.image_package_id:
+            _save(db, row, status="needs_review", error="历史通知未绑定经确认的图包，不自动发送")
+            return
+        if held(row.job_id) or source_hash(db, row.job_pk) != row.source_sha256:
+            _save(db, row, status="cancelled", error="文章已变更或暂缓发布")
+            return
+        article = db.get_article(row.job_pk)
+        if article is None or article.publish_blocked:
+            return
+        links = links_for(db, row)
+        if not links:
+            return
+        if row.retry_at and row.retry_at > now:
+            return (row.retry_at - now).total_seconds()
+        # Feishu deduplicates UUIDs for one hour; late ambiguous sends need review.
+        if row.first_attempt_at and now - row.first_attempt_at >= timedelta(minutes=55):
+            _save(db, row, status="uncertain", error="通知结果待确认；已超过安全自动重试窗口")
+            return
+        try:
+            approved_package(db, row.job_pk, row.job_id, row.image_package_id)
+        except ImagePackageError:
+            _save(db, row, status="needs_review", error="通知对应的图片确认已失效")
+            return
+        links = links_for(db, row)
+        if not links or source_hash(db, row.job_pk) != row.source_sha256:
+            return
+        recipient_id, recipient_type = (row.recipient_id, row.recipient_type) if row.recipient_id else recipient(row.recipient_key)
+        _save(db, row, status="sending", recipient_id=recipient_id, recipient_type=recipient_type,
+              attempts=row.attempts + 1, first_attempt_at=row.first_attempt_at or now, retry_at=None)
+        message_id = sender(row, render_notice(db, row, links))
+        if not message_id:
+            raise NotificationError("飞书未返回消息回执", retryable=True)
+        _save(db, row, status="sent", message_id=message_id, error=None)
+    except Exception as exc:
+        retryable = isinstance(exc, NotificationError) and exc.retryable
+        if retryable and row.attempts < 5:
+            delay = 30 * (2 ** max(0, row.attempts - 1))
+            _save(db, row, status="retry", retry_at=now + timedelta(seconds=delay), error=str(exc))
+            return delay
+        error = str(exc) if isinstance(exc, NotificationError) else f"通知处理失败：{type(exc).__name__}"
+        uncertain = retryable or (not isinstance(exc, NotificationError) and row.status == "sending")
+        _save(db, row, status="uncertain" if uncertain else "failed", error=error)
+
+
 def retry(db, job_id):
-    with version_lock(job_id, "notify_retry"):
+    with version_lock(job_id, "image_job"), version_lock(job_id, "notify_retry"):
         return _retry(db, job_id)
 
 

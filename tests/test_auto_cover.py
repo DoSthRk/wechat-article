@@ -10,12 +10,14 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
 from PIL import Image
 
 from utils.job_loader import Job
 from utils.pdf_figure_extractor import Figure
+from utils.image_packages import ImagePackageError
 import batch_processor as bp
 
 
@@ -102,9 +104,14 @@ class TestAutoCoverFromPool(unittest.TestCase):
         bp.ARTICLE_CONTENT_DIR = str(self.base / "outputs" / "jobs")
         self.job = Job(job_id="j", pdf=str(self.pdf), template="t", product="p",
                        line="solidex", image_pool="poolX")
+        self.package = SimpleNamespace(bundle_id='a' * 64, figures=bp._load_pool_figures(self.job),
+            directory=self.base / 'figures', cover_path=str(pool / 'fig00.jpg'), source_markdown_sha256='hash')
+        self.approval = patch.object(bp, 'require_approved_package', return_value=self.package)
+        self.approval.start()
 
     def tearDown(self):
         bp.PROJECT_ROOT, bp.RUNTIME_DIR, bp.ARTICLE_CONTENT_DIR = self._saved
+        self.approval.stop()
         self._tmp.cleanup()
 
     def test_pool_figures_loaded_by_caption_number(self):
@@ -225,9 +232,10 @@ class TestAutoCoverFromPool(unittest.TestCase):
 
     def test_no_valid_figure_does_not_use_pdf_first_page_as_cover(self):
         client = FakeMaterialClient()
-        media = bp._auto_cover_media_id(client, "immune", self.job, "<p>正文</p>",
-                                       resolved=([], self.base / "figs"))
-        self.assertEqual(media, "")
+        with patch.object(bp, 'require_approved_package', side_effect=ImagePackageError('needs review')):
+            with self.assertRaises(ImagePackageError):
+                bp._auto_cover_media_id(client, "immune", self.job, "<p>正文</p>",
+                                        resolved=([], self.base / "figs"))
         self.assertEqual(client.uploaded, [])
 
     def test_cover_letterboxes_instead_of_clipping_panels(self):

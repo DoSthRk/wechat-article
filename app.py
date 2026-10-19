@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 import markdown as md_lib
-from flask import Flask, abort, jsonify, make_response, redirect, render_template, request, url_for
+from flask import Flask, abort, jsonify, make_response, redirect, render_template, request, send_file, url_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -370,6 +370,211 @@ def create_app(testing: bool = False) -> Flask:
             return jsonify({'ok': False, 'error': str(exc)}), 409
         except Exception:
             return jsonify({'ok': False, 'error': '图片检查失败，未更新草稿'}), 502
+
+    def _review_job(job_id: str):
+        from utils.blog_pipeline import _build_source_job
+        owner = _require_job(job_id)
+        db = get_db_manager()
+        job_pk = db.find_job_pk(job_id)
+        record = db.get_job(job_pk) if job_pk is not None else None
+        if record is None or db.get_article(job_pk) is None:
+            abort(404)
+        return _build_source_job(record), job_pk, owner
+
+    def _real_reviewer() -> str:
+        # 业务线快捷 cookie 只用于查看，不能成为审批身份。
+        if not testing and not str(request.headers.get('X-GM-LAB-Username') or '').strip():
+            abort(401)
+        return _username()
+
+    def _package_id(value) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+            abort(400)
+        return value
+
+    def _review_data() -> dict:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            abort(400, description='图片审核请求须为 JSON 对象')
+        return data
+
+    def _review_assets(manifest: dict) -> dict:
+        assets = {}
+        source_pdf = (manifest.get('source') or {}).get('pdf') or {}
+        if source_pdf.get('path'):
+            assets['source-pdf'] = source_pdf
+        for category in ('figures', 'pages'):
+            for index, item in enumerate(manifest.get(category) or []):
+                if isinstance(item, dict) and item.get('path'):
+                    assets[f'{category}-{index}'] = item
+        if (manifest.get('cover') or {}).get('path'):
+            assets['cover'] = manifest['cover']
+        return assets
+
+    def _review_payload(job_id: str, package: dict) -> dict:
+        manifest = package.get('manifest') or {}
+        bundle_id = package.get('bundle_id')
+        payload = {'ok': True, 'job_id': job_id, 'bundle_id': bundle_id,
+                   'status': package.get('status') or 'missing', 'reason': package.get('reason') or '',
+                   'can_approve': bool(str(request.headers.get('X-GM-LAB-Username') or '').strip()) or testing,
+                   'reviewer': _username(), 'approval': package.get('approval'),
+                   'paper_scope': manifest.get('paper_scope') or {},
+                   'source_binding': (manifest.get('source') or {}).get('binding'),
+                   'source_sha256': ((manifest.get('source') or {}).get('pdf') or {}).get('sha256'),
+                   'figures': [], 'pages': [], 'cover': None, 'source_pdf_url': None}
+        if not bundle_id or not re.fullmatch(r'[0-9a-f]{64}', bundle_id):
+            return payload
+        assets = _review_assets(manifest)
+        for asset_id, item in assets.items():
+            url = url_for('image_review_asset', job_id=job_id, package_id=bundle_id, relative=item['path'])
+            if asset_id == 'source-pdf':
+                payload['source_pdf_url'] = url
+            elif asset_id == 'cover':
+                payload['cover'] = {key: item.get(key) for key in ('width', 'height', 'sha256', 'transform')}
+                payload['cover']['url'] = url
+            else:
+                entry = {key: item.get(key) for key in ('label', 'is_extended', 'caption', 'page', 'bbox', 'width', 'height', 'sha256')}
+                entry['url'] = url
+                if asset_id.startswith('figures-'):
+                    entry['key'] = f"{'extended' if item.get('is_extended') else 'main'}:{item.get('label')}"
+                    payload['figures'].append(entry)
+                else:
+                    payload['pages'].append(entry)
+        return payload
+
+    def _review_failure(error):
+        # 仅展示 core 的业务校验错误，远端/文件异常不直接回显。
+        from utils.image_packages import ImagePackageError
+        if isinstance(error, ImagePackageError):
+            return jsonify({'ok': False, 'error': str(error)}), 409
+        app.logger.exception('Image package review failed')
+        return jsonify({'ok': False, 'error': '图片审核操作未完成，请刷新包状态后重试；原审核输入可保留。'}), 502
+
+    def _continue_review(job_id, bundle_id, owner):
+        from utils.workflow_runner import start_workflow
+        return start_workflow('review_publish', [{'job_id': job_id, 'lang': 'zh',
+                                                  'expected_package_id': bundle_id}],
+                              owner_line=owner, owner_username=_username())
+
+    @app.get('/image-review/<job_id>')
+    def image_review(job_id: str):
+        _review_job(job_id)
+        return render_template('image_review.html', job_id=job_id, username=_username(),
+                               can_approve=bool(str(request.headers.get('X-GM-LAB-Username') or '').strip()) or testing)
+
+    @app.get('/api/image-review/<job_id>')
+    def api_image_review(job_id: str):
+        from utils.image_packages import get_package
+        job, _, _ = _review_job(job_id)
+        try:
+            return jsonify(_review_payload(job_id, get_package(job)))
+        except Exception as exc:
+            return _review_failure(exc)
+
+    @app.post('/api/image-review/<job_id>/prepare')
+    def api_image_review_prepare(job_id: str):
+        from utils.workflow_runner import start_workflow
+        _, _, owner = _review_job(job_id)
+        try:
+            result = start_workflow('images', [{'job_id': job_id, 'lang': 'zh'}],
+                                    owner_line=owner, owner_username=_username())
+            return jsonify(result), (202 if result.get('ok') else 409)
+        except Exception as exc:
+            return _review_failure(exc)
+
+    @app.post('/api/image-review/<job_id>/approve')
+    def api_image_review_approve(job_id: str):
+        from utils.image_packages import ImagePackageError, approve_package, get_package
+        reviewer = _real_reviewer()
+        job, job_pk, owner = _review_job(job_id)
+        data = _review_data()
+        bundle_id = _package_id(data.get('package_id'))
+        confirmations = data.get('confirmations')
+        if not isinstance(confirmations, dict) or any(confirmations.get(key) is not True
+                for key in ('source', 'number', 'completeness', 'cover')):
+            return jsonify({'ok': False, 'error': '请逐项确认论文来源、图号、完整性和封面。', 'field': 'confirmations'}), 400
+        try:
+            current = get_package(job, bundle_id)
+            package_job_pk = (current.get('manifest') or {}).get('job_pk')
+            if type(package_job_pk) is not int or package_job_pk != job_pk:
+                raise ImagePackageError('图片包不属于当前文章记录，请重新生成候选并审核，不能复用旧任务图片包。')
+            figure_keys = {f"{'extended' if item.get('is_extended') else 'main'}:{item.get('label')}"
+                           for item in (current.get('manifest') or {}).get('figures', [])}
+            per_figure = data.get('figure_confirmations')
+            if (not figure_keys or not isinstance(per_figure, dict) or set(per_figure) != figure_keys
+                    or any(value is not True for value in per_figure.values())):
+                return jsonify({'ok': False, 'error': '请对照原页逐张确认所有图片。', 'field': 'figures'}), 400
+            scope = data.get('paper_scope')
+            if not isinstance(scope, dict):
+                return jsonify({'ok': False, 'error': '请填写论文身份与核对页范围。', 'field': 'paper_scope'}), 400
+            approved = approve_package(job, bundle_id, reviewer, confirmations, scope,
+                                       note=str(data.get('note') or ''), figure_confirmations=per_figure)
+            if approved.get('status') != 'approved':
+                return jsonify({'ok': False, 'approved': False,
+                                'bundle_id': approved.get('bundle_id', bundle_id),
+                                'status': approved.get('status', 'blocked'),
+                                'error': approved.get('reason') or '来源或图片包已变化，审核未生效；请刷新后重新核对。'}), 409
+            response = {'ok': True, 'approved': True, 'bundle_id': approved['bundle_id'],
+                        'status': 'approved'}
+            if data.get('continue') is True:
+                try:
+                    response['continuation'] = _continue_review(job_id, approved['bundle_id'], owner)
+                except Exception:
+                    response['continuation'] = {'ok': False, 'error': '审核已保存，但后台任务未启动。可点击“继续发布”重试，无需重新审核。'}
+            return jsonify(response)
+        except Exception as exc:
+            return _review_failure(exc)
+
+    @app.post('/api/image-review/<job_id>/continue')
+    def api_image_review_continue(job_id: str):
+        from utils.image_packages import get_package, require_approved_package
+        _real_reviewer()
+        job, job_pk, owner = _review_job(job_id)
+        data = _review_data()
+        bundle_id = _package_id(data.get('package_id'))
+        try:
+            package = get_package(job, bundle_id)
+            if package.get('status') != 'approved':
+                return jsonify({'ok': False, 'error': '当前图片包尚未批准，不能继续发布。'}), 409
+            require_approved_package(job, bundle_id, expected_job_pk=job_pk)
+            result = _continue_review(job_id, bundle_id, owner)
+            return jsonify(result), (202 if result.get('ok') else 409)
+        except Exception as exc:
+            return _review_failure(exc)
+
+    @app.post('/api/image-review/<job_id>/revoke')
+    def api_image_review_revoke(job_id: str):
+        from utils.image_packages import revoke_package
+        reviewer = _real_reviewer()
+        job, _, _ = _review_job(job_id)
+        data = _review_data()
+        bundle_id = _package_id(data.get('package_id'))
+        try:
+            result = revoke_package(job, bundle_id, reviewer, note=str(data.get('reason') or '人工撤回审核'))
+            return jsonify({'ok': True, 'bundle_id': result.get('bundle_id', bundle_id), 'status': result.get('status', 'revoked')})
+        except Exception as exc:
+            return _review_failure(exc)
+
+    @app.get('/api/image-review/<job_id>/assets/<package_id>/<path:relative>')
+    def image_review_asset(job_id: str, package_id: str, relative: str):
+        from utils.image_packages import resolve_review_asset
+        job, _, _ = _review_job(job_id)
+        package_id = _package_id(package_id)
+        try:
+            # 白名单和哈希由 core 逐资产校验；不为每张预览图重复解码整个包。
+            if relative == 'source.pdf':
+                mimetype = 'application/pdf'
+            else:
+                mimetype = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}.get(Path(relative).suffix.lower())
+                if not mimetype:
+                    abort(404)
+            path = resolve_review_asset(job, package_id, relative)
+        except (ValueError, OSError):
+            abort(404)
+        response = send_file(path, mimetype=mimetype, conditional=True, max_age=0)
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
 
     @app.post("/api/source-pdf/apply-to-draft")
     def api_source_pdf_apply_to_draft():

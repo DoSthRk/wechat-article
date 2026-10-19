@@ -3,10 +3,13 @@
 用 fake WeChatClient + 临时 sqlite，不触网。
 """
 import argparse
+import json
+import hashlib
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from db.database import DatabaseManager, JobStatus
@@ -14,6 +17,7 @@ from utils.job_loader import Job
 from utils.wechat_client import WeChatAPIError
 from utils.source_pdf_store import SourcePdfError
 from utils.blog_urls import BlogUrlError
+from utils.image_packages import ImagePackageError
 import batch_processor as bp
 
 
@@ -29,6 +33,9 @@ class FakeWeChat:
     def update_draft(self, media_id, index, article):
         self.updated.append((media_id, index, article))
 
+    def get_draft(self, media_id):
+        return {'news_item': [self.updated[-1][2] if self.updated else self.created[-1][0]]}
+
 
 class FakeWeChatStaleDraft:
     """update_draft 报 40007（草稿已删/失效），create_draft 成功 —— 验证重建回退。"""
@@ -42,6 +49,9 @@ class FakeWeChatStaleDraft:
     def create_draft(self, articles):
         self.created.append(articles)
         return "media-REBUILT"
+
+    def get_draft(self, media_id):
+        return {'news_item': [self.created[-1][0]]}
 
 
 def _args():
@@ -71,6 +81,15 @@ class TestDistributeOne(unittest.TestCase):
         (content_dir / "article.md").write_text("# 标题\n\n正文段落。", encoding="utf-8")
         self.db.upsert_article(self.job_pk, title="测试标题", digest="测试摘要", content_dir=str(content_dir))
         self.job = Job(job_id="j1", pdf="p", template="t", product="pr", line=None)
+        self.package = SimpleNamespace(bundle_id='a' * 64, figures=[], directory=content_dir,
+            cover_path=str(base / 'approved-cover.jpg'),
+            source_markdown_sha256=hashlib.sha256((content_dir / 'article.md').read_bytes()).hexdigest())
+        self._approval = patch.object(bp, 'require_approved_package', return_value=self.package)
+        self.approval_mock = self._approval.start()
+        self._cover = patch.object(bp, '_upload_cover_cached', return_value='approved-thumb')
+        self._cover.start()
+        self._locks = patch('utils.blog_task_lock.LOCK_DIR', base / 'locks')
+        self._locks.start()
         self._apply_figures = patch.object(
             bp,
             "_apply_figures",
@@ -107,6 +126,9 @@ class TestDistributeOne(unittest.TestCase):
         self._source_pdf.stop()
         self._blog_url.stop()
         self._apply_figures.stop()
+        self._locks.stop()
+        self._cover.stop()
+        self._approval.stop()
         self._content_root.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
@@ -131,7 +153,7 @@ class TestDistributeOne(unittest.TestCase):
         self.assertEqual(len(fake.updated), 1)
         self.assertEqual(fake.updated[0][0], "media-NEW")
         self.assertEqual(self.auto_blog_mock.call_count, 2)
-        self.auto_blog_mock.assert_called_with(self.db, self.job_pk, "j1", owner_line="")
+        self.auto_blog_mock.assert_called_with(self.db, self.job_pk, "j1", owner_line="", image_package_id='a' * 64)
 
     def test_async_launch_failure_keeps_successful_draft(self):
         self.auto_blog_mock.side_effect = OSError("worker unavailable")
@@ -146,13 +168,34 @@ class TestDistributeOne(unittest.TestCase):
             self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         self.auto_blog_mock.assert_not_called()
 
+    def test_successful_write_with_wrong_image_or_cover_never_enqueues(self):
+        for failure in ('image', 'cover'):
+            with self.subTest(failure=failure):
+                fake = FakeWeChat()
+                def get_draft(_media):
+                    payload = dict(fake.created[-1][0])
+                    if failure == 'image':
+                        payload['content'] = payload['content'].replace('https://img.test/1.png', 'https://img.test/wrong.png')
+                    else:
+                        payload['thumb_media_id'] = 'wrong-cover'
+                    return {'news_item': [payload]}
+                with patch.object(fake, 'get_draft', side_effect=get_draft):
+                    self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
+                distribution = self.db.get_distribution(self.job_pk, 'wechat', account='default', lang='zh')
+                self.assertEqual(distribution.publish_status, 'failed')
+                self.assertEqual(distribution.wechat_media_id, 'media-NEW')
+                self.assertEqual(distribution.image_verification_status, 'failed')
+                self.auto_blog_mock.assert_not_called()
+                self.db.upsert_distribution(self.job_pk, 'wechat', account='default', lang='zh', wechat_media_id=None)
+
     def test_draft_success_persists_async_outbox_without_inline_translation(self):
         from utils import auto_blog
         from db.database import AutoBlogTask
         self.db.ensure_blog_versions(self.job_pk, self.db.get_article(self.job_pk).content_dir)
         self.auto_blog_mock.side_effect = auto_blog.enqueue
         fake = FakeWeChat()
-        with patch.object(auto_blog, "kick") as kick, patch.object(auto_blog.BlogWorkflow, "translate") as translate:
+        with patch.object(auto_blog, "kick") as kick, patch.object(auto_blog.BlogWorkflow, "translate") as translate, \
+             patch.object(auto_blog, 'approved_package', return_value=self.package):
             self.assertTrue(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
         with self.db.get_session() as session:
             rows = session.query(AutoBlogTask).all()
@@ -234,9 +277,9 @@ class TestDistributeOne(unittest.TestCase):
 
     def test_source_binding_error_marks_failed_without_uploading(self):
         fake = FakeWeChat()
-        with patch.object(bp, "_resolve_job_figures", side_effect=ValueError("原文 PDF 已变化")):
+        with patch.object(bp, "require_approved_package", side_effect=ImagePackageError("原文 PDF 已变化")):
             self.assertFalse(bp._distribute_one(self.db, self.job_pk, self.job, _get(fake), _args()))
-        self.assertEqual(self.db.get_job(self.job_pk).status, JobStatus.FAILED)
+        self.assertEqual(self.db.get_job(self.job_pk).status, JobStatus.GENERATED)
         self.assertEqual(fake.created, [])
         self.source_pdf_mock.assert_not_called()
         self.auto_blog_mock.assert_not_called()
@@ -311,8 +354,8 @@ class TestDistributeOne(unittest.TestCase):
             with patch.object(bp, "_auto_cover_media_id", return_value="article-image-thumb") as auto_cover:
                 self.assertTrue(bp._distribute_one(self.db, self.job_pk, job, _get(fake), _args()))
 
-        self.assertEqual(fake.created[0][0]["thumb_media_id"], "article-image-thumb")
-        auto_cover.assert_called_once()
+        self.assertEqual(fake.created[0][0]["thumb_media_id"], "approved-thumb")
+        auto_cover.assert_not_called()
 
 
 class TestRunOneJobOrder(unittest.TestCase):
@@ -323,6 +366,11 @@ class TestRunOneJobOrder(unittest.TestCase):
         )
         self.task = self.db.get_or_create_task("order")
         self.job = Job(job_id="j1", pdf="paper.pdf", template="aav", product="purprox")
+        self.approval = patch.object(bp, 'require_approved_package',
+                                    return_value=SimpleNamespace(bundle_id='a' * 64))
+        self.approval.start()
+        self.locks = patch('utils.blog_task_lock.LOCK_DIR', Path(self._tmp.name) / 'locks')
+        self.locks.start()
         self.db.upsert_job(
             self.task.id, self.job.job_id, pdf_path=self.job.pdf,
             template_id=self.job.template, product_id=self.job.product,
@@ -330,6 +378,8 @@ class TestRunOneJobOrder(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.locks.stop()
+        self.approval.stop()
         self.db.engine.dispose()
         self._tmp.cleanup()
 
@@ -337,10 +387,10 @@ class TestRunOneJobOrder(unittest.TestCase):
         events = []
         with patch.object(
             bp, "_publish_chinese_blog",
-            side_effect=lambda *_args: events.append("blog") or True,
+            side_effect=lambda *_args, **_kwargs: events.append("blog") or True,
         ), patch.object(
             bp, "_distribute_one",
-            side_effect=lambda *_args: events.append("wechat") or True,
+            side_effect=lambda *_args, **_kwargs: events.append("wechat") or True,
         ):
             ok = bp._run_one_job(
                 self.db, self.task.id, self.job, None, lambda _account: FakeWeChat(),

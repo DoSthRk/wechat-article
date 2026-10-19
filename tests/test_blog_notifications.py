@@ -3,7 +3,7 @@ import json
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib import error as urllib_error
 
 from utils import blog_notifications as notifications
@@ -11,6 +11,21 @@ from utils import blog_notifications as notifications
 
 def response(payload):
     return io.BytesIO(json.dumps(payload).encode())
+
+
+class BlogNoticeRenderingTests(unittest.TestCase):
+    def test_notice_labels_business_line_and_preserves_all_links(self):
+        db = Mock()
+        db.get_article.return_value = SimpleNamespace(title="文章标题")
+        links = [(lang, f"https://example.com/blog/paper-{lang}") for lang in notifications.LANG_LABELS]
+        for owner_line, label in (("aav", "AAV"), ("solidex", "SOLIDEX"), ("", "未标记")):
+            with self.subTest(owner_line=owner_line):
+                row = SimpleNamespace(job_pk=1, job_id="paper", owner_line=owner_line)
+                text = notifications.render_notice(db, row, links)
+                self.assertTrue(text.startswith(f"Blog 已发布\n业务线：{label}\n"))
+                self.assertIn("文章：文章标题\n任务：paper", text)
+                for lang, url in links:
+                    self.assertIn(f"{notifications.LANG_LABELS[lang]}：{url}", text)
 
 
 class FeishuNotificationClientTests(unittest.TestCase):

@@ -343,6 +343,23 @@ class TestUpload(unittest.TestCase):
         self.assertTrue(item["published"])
         self.assertFalse(item["needs_action"])
 
+    def test_review_marker_is_exposed_without_downgrading_historical_publication(self):
+        db = dbmod.get_db_manager()
+        saved = pr.save_uploaded_pdf("solidex", "review-marker.pdf", self._PDF)
+        task = db.get_or_create_task("review-marker")
+        jpk = db.upsert_job(task.id, "review-marker", pdf_path=saved["pdf"],
+                            template_id="t", product_id="p", status=JobStatus.GENERATED).id
+        db.upsert_article(jpk, title="Historical article", content_dir="review-marker")
+        db.upsert_distribution(jpk, "wechat", account="immune", lang="zh",
+                               publish_status="published", wechat_media_id="m1")
+        def item():
+            return next(f for line in pr.list_sources() for f in line["pdfs"] if f["job_id"] == "review-marker")
+        self.assertEqual(item()["image_status"], "")
+        self.assertTrue(item()["published"])
+        db.update_job_status(jpk, JobStatus.GENERATED, error_message="needs_review: confirm images")
+        self.assertEqual(item()["image_status"], "needs_review")
+        self.assertTrue(item()["published"])
+
 
 class TestNormPdfKey(unittest.TestCase):
     def test_basename_fallback_for_outside_path(self):
@@ -387,6 +404,14 @@ class TestListSources(unittest.TestCase):
 
 
 class TestRunSummary(unittest.TestCase):
+    def test_candidate_generation_summary_explicitly_requires_review(self):
+        summary = pr._summarize_log([
+            "INFO [a] generated: title=A", "INFO [a] 正文已保留，图包 abc 等待首次人工审核；未发布 Blog 或公众号",
+        ], "done", 1)
+        self.assertEqual(summary["awaiting_review"], 1)
+        self.assertEqual(summary["drafted"], 0)
+        self.assertIn("请确认配图后继续发布", summary["message"])
+
     def test_done_summary_reports_wechat_draft_count(self):
         lines = [
             "2026 - INFO - [a] generated: title=A len=100 tokens=20 health=90 tonal=80",
