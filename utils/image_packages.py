@@ -25,8 +25,11 @@ from utils.blog_task_lock import version_lock
 from utils.figure_strategy import figure_key_from_description
 from utils.image_placeholders import normalize_image_placeholders, unwrap_linked_image_placeholders
 from utils.pdf_figure_extractor import Figure
+from utils.figure_crop_geometry import UnsafeFigureCrop
+from utils.logger import setup_logger
 from utils.wechat_html import find_image_placeholders
 
+logger = setup_logger('image_packages')
 SCHEMA_VERSION = 1
 REVIEW_POLICY_VERSION = 1
 CONFIRMATIONS = ('source', 'number', 'completeness', 'cover')
@@ -488,7 +491,13 @@ def build_package(job, *, job_pk=None):
             _set_state(job, bundle_id=bundle_id, approval_id=None, status='needs_review')
             return _get(job, bundle_id)
         except Exception as exc:
-            reason = str(exc) if isinstance(exc, ImagePackageError) else '图片包构建失败，未批准任何图片；请检查来源和抽图诊断'
+            if isinstance(exc, (ImagePackageError, UnsafeFigureCrop)):
+                reason = str(exc)
+                logger.warning('[%s] 图片候选被拦下：%s', job.job_id, reason)
+            else:
+                diagnostic_id = uuid.uuid4().hex[:12]
+                logger.exception('[%s] 图片包构建失败，诊断编号 %s', job.job_id, diagnostic_id)
+                reason = f'图片包构建失败，未批准任何图片。请联系管理员并提供诊断编号 {diagnostic_id}'
             _set_state(job, bundle_id='', approval_id=None, status='blocked', reason=reason)
             return {'bundle_id': '', 'status': 'blocked', 'reason': reason, 'manifest': None, 'approval': None}
 

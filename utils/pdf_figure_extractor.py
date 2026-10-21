@@ -48,7 +48,7 @@ _FIGPAGE_MAX_WORDS = 650  # 图页：文字数上限
 _DETACHED_FIGPAGE_MAX_WORDS = 1000  # 文末整页科研图可含大量坐标轴/图例文字
 _TEXT_GUARD_WORDS = 45    # 同页区域内文字超过此数 → 判为正文，不当图
 _CONTENT_PAD = 6          # 文本/图形并集外留白，避免坐标轴文字贴边
-_CROP_VERSION = 5         # v5: include source crop geometry for shared acceptance gate
+_CROP_VERSION = 6         # v6: preserve complete text crossing the crop boundary
 
 
 @dataclass
@@ -262,6 +262,12 @@ def _legend_page_content_region(
     region = _union(gfx)
     if region is None:
         return None
+    # Exclude the existing right-margin download watermark before either
+    # geometry or text expansion can use its full rotated word bounds.
+    words = [word for word in words if not (
+        not bool(word.get('upright', True))
+        and float(word.get('x1', 0)) >= page_w - _MARGIN
+    )]
     region = sanitize_figure_region(gfx, words, region, page_w, page_h)
     rx0, rt, rx1, rb = region
     header_bottom = publisher_header_bottom(words, page_h)
@@ -270,10 +276,6 @@ def _legend_page_content_region(
         word for word in words
         if float(word.get("bottom", 0)) >= rt - _MARGIN
         and float(word.get("top", 0)) > header_bottom
-        and not (
-            not bool(word.get("upright", True))
-            and float(word.get("x1", 0)) >= page_w - _MARGIN
-        )
     ]
     word_region = _union(content_words)
     if word_region is not None:

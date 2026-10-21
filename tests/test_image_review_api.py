@@ -69,6 +69,9 @@ class ImageReviewApiTests(unittest.TestCase):
 
     def test_direct_cookie_can_view_but_cannot_approve_continue_or_revoke(self):
         self.client.get('/aav')
+        page = self.client.get('/image-review/paper').get_data(as_text=True)
+        self.assertIn('https://article.lab.genemedi.cn/image-review/paper', page)
+        self.assertIn('默认用户名不代表已登录', page)
         with patch('utils.image_packages.get_package', return_value=self.package), patch(
                 'utils.image_packages.approve_package') as approve, patch(
                 'utils.image_packages.revoke_package') as revoke, patch(
@@ -83,12 +86,27 @@ class ImageReviewApiTests(unittest.TestCase):
             revoke.assert_not_called()
             workflow.assert_not_called()
 
+    def test_review_run_status_is_scoped_and_never_kicks_publication(self):
+        state = {'run_id': '123456789a', 'stage': 'images', 'status': 'failed',
+                 'owner_line': 'aav', 'errors': ['blocked'], 'pid': 10, 'private': 'secret'}
+        with patch('utils.workflow_runner.review_workflow_status', return_value=state) as read, patch('utils.auto_blog.kick') as kick:
+            response = self.client.get(f'{self.api}/workflow/123456789a', headers=self.headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()['status'], 'failed')
+            self.assertNotIn('private', response.get_json())
+            self.assertNotIn('pid', response.get_json())
+            read.assert_called_once_with('paper', '123456789a')
+            kick.assert_not_called()
+        with patch('utils.workflow_runner.review_workflow_status', return_value={**state, 'owner_line': 'solidex'}):
+            self.assertEqual(self.client.get(f'{self.api}/workflow/123456789a', headers=self.headers).status_code, 404)
+
     def test_every_route_checks_business_line_before_any_core_or_worker_call(self):
         with patch('utils.image_packages.get_package') as get, patch(
                 'utils.image_packages.approve_package') as approve, patch(
                 'utils.image_packages.resolve_review_asset') as asset, patch(
                 'utils.workflow_runner.start_workflow') as workflow:
             routes = [('GET', self.api), ('GET', '/image-review/paper'),
+                      ('GET', f'{self.api}/workflow/123456789a'),
                       ('GET', f'{self.api}/assets/{self.bundle_id}/cover.jpg')]
             routes += [('POST', f'{self.api}/{action}') for action in ('prepare', 'approve', 'continue', 'revoke')]
             for method, route in routes:

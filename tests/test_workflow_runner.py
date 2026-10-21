@@ -8,6 +8,33 @@ from utils import workflow_runner
 
 
 class WorkflowRunnerTests(unittest.TestCase):
+    def test_review_status_reads_exact_run_and_binds_job(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(workflow_runner, 'RUN_DIR', Path(temp)):
+            run_id = '123456789a'
+            state = {'run_id': run_id, 'stage': 'images', 'status': 'failed', 'errors': ['blocked']}
+            workflow_runner._atomic_write(Path(temp) / f'{run_id}.state.json', state)
+            selection = Path(temp) / f'{run_id}.selections.json'
+            selection.write_text(json.dumps([{'job_id': 'paper', 'lang': 'zh'}]))
+            workflow_runner._atomic_write(Path(temp) / 'newer.state.json', {'stage': 'images', 'status': 'done'})
+            self.assertEqual(workflow_runner.review_workflow_status('paper', run_id), state)
+            for job_id, identifier in [('other', run_id), ('paper', '../' + run_id), ('paper', '0'*10)]:
+                self.assertEqual(workflow_runner.review_workflow_status(job_id, identifier), {})
+            selection.write_text(json.dumps([{'job_id': 'paper', 'lang': 'zh'}, {'job_id': 'other', 'lang': 'zh'}]))
+            self.assertEqual(workflow_runner.review_workflow_status('paper', run_id), {})
+
+    def test_review_status_detects_interrupted_worker_without_writing_or_kicking(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(workflow_runner, 'RUN_DIR', Path(temp)):
+            run_id = '123456789a'
+            state = {'run_id': run_id, 'stage': 'images', 'status': 'running', 'pid': 42, 'started_at': 1}
+            path = Path(temp) / f'{run_id}.state.json'
+            workflow_runner._atomic_write(path, state)
+            (Path(temp) / f'{run_id}.selections.json').write_text(json.dumps([{'job_id': 'paper', 'lang': 'zh'}]))
+            with patch.object(workflow_runner, '_pid_running', return_value=False):
+                self.assertEqual(workflow_runner.review_workflow_status('paper', run_id)['status'], 'failed')
+            self.assertEqual(json.loads(path.read_text()), state)
+            with patch.object(workflow_runner, '_pid_running', return_value=True):
+                self.assertEqual(workflow_runner.review_workflow_status('paper', run_id)['status'], 'running')
+
     def test_normalize_keeps_supported_unique_languages(self):
         items = workflow_runner._normalize("translate", [
             {"job_id": "paper-1", "lang": "en"},

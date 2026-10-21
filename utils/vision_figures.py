@@ -241,7 +241,7 @@ def _make_crop(pdf_path: str, idx: int, pil, vlm_bbox):
 
 
 # v7: honor explicit model bbox; old page/label guesses must be detected again.
-_CROP_VERSION = 7
+_CROP_VERSION = 8
 
 
 def _crop_version_path(out: Path) -> Path:

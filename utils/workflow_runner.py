@@ -189,3 +189,25 @@ def workflow_status() -> Dict[str, Any]:
             "completed": 0, "failed": 0, "current": None, "errors": [],
         }
     return result
+
+
+def review_workflow_status(job_id: str, run_id: str) -> Dict[str, Any]:
+    """Read one review run, without kicking publishers or waiting for image locks."""
+    if not re.fullmatch(r'[0-9a-f]{10}', run_id):
+        return {}
+    state = _read(RUN_DIR / f'{run_id}.state.json')
+    if state.get('run_id') != run_id or state.get('stage') not in {'images', 'review_publish'}:
+        return {}
+    try:
+        selections = json.loads((RUN_DIR / f'{run_id}.selections.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    if (not isinstance(selections, list) or len(selections) != 1
+            or not isinstance(selections[0], dict)
+            or selections[0].get('job_id') != job_id or selections[0].get('lang') != 'zh'):
+        return {}
+    if state.get('status') == 'running':
+        starting = not state.get('pid') and time.time() - float(state.get('started_at') or 0) < 10
+        if not starting and not _pid_running(state.get('pid')):
+            state.update(status='failed', errors=[*state.get('errors', []), '任务进程意外中断，请重新生成候选或核对发布状态'])
+    return state

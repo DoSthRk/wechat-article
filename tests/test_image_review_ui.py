@@ -16,9 +16,11 @@ const figures = [{...node(), dataset: {key: 'main:1'}}], stored = new Map();
 const document = {body: {dataset: {jobId: 'paper'}}, createElement: node,
   querySelector(selector) {if (!nodes.has(selector)) nodes.set(selector, node()); return nodes.get(selector);},
   querySelectorAll(selector) {return selector === '.confirmations input' ? confirmations : selector === '.figure-confirm input' ? figures : [];} };
-const context = vm.createContext({document, assert, nodes, confirmations, figures,
+const timers = new Map(); let timerId = 0;
+const context = vm.createContext({document, assert, nodes, confirmations, figures, AbortController, timers,
   sessionStorage: {getItem: key => stored.get(key) || null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key)},
-  fetch: () => new Promise(() => {}), clearTimeout() {}, setTimeout() {}, confirm: () => true});
+  fetch: () => new Promise(() => {}), clearTimeout(id) {timers.delete(id);},
+  setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms}); return id;}, confirm: () => true});
 vm.runInContext(fs.readFileSync('static/image_review.js', 'utf8'), context);
 (async () => {
   await vm.runInContext(`(async () => {
@@ -43,8 +45,36 @@ vm.runInContext(fs.readFileSync('static/image_review.js', 'utf8'), context);
     imagePreview(null, 'Original page'); updateButtons(); assert.equal($('#approve-continue').disabled, true);
     currentPackage.status = 'approved'; updateButtons(); assert.equal($('#continue-publish').hidden, false);
     assert.equal($('#approve-continue').hidden, true);
-    fetch = async () => ({ok: true, json: async () => ({images: {run_id: 'other', status: 'done'}})});
+    fetch = async () => ({ok: true, json: async () => ({run_id: 'other', stage: 'images', status: 'done'})});
     await pollWorkflow('images', 'mine'); assert.match($('#review-message').textContent, /不能确认本次结果/);
+    const blocked = {bundle_id: '', status: 'blocked', reason: '同一图号对应多个区域', figures: [], pages: []};
+    activeWorkflow = {stage: 'images', runId: 'mine'}; busy = true;
+    sessionStorage.setItem(workflowKey, JSON.stringify(activeWorkflow));
+    fetch = async (path) => ({ok: true, json: async () => path.endsWith('/workflow/mine')
+      ? {run_id: 'mine', stage: 'images', status: 'failed', errors: [blocked.reason]} : blocked});
+    await refreshReview();
+    assert.equal(busy, false); assert.equal(activeWorkflow, null);
+    assert.equal(sessionStorage.getItem(workflowKey), null);
+    assert.equal($('#prepare-package').disabled, false);
+    assert.match($('#review-message').textContent, /同一图号对应多个区域/);
+    assert.doesNotMatch($('#review-message').textContent, /正在后台/);
+    activeWorkflow = {stage: 'images', runId: 'mine'}; busy = true;
+    fetch = async () => {throw new Error('offline');};
+    await refreshReview();
+    assert.equal(busy, true); assert.equal(activeWorkflow.runId, 'mine');
+    assert.match($('#review-message').textContent, /刷新状态/);
+    fetch = async () => ({ok: true, json: async () => ({run_id: 'mine', stage: 'images', status: 'running'})});
+    await refreshReview(); assert.equal(busy, true);
+    assert.match($('#review-message').textContent, /正在后台准备/);
+    clearWorkflow();
+    timers.clear();
+    fetch = (_path, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+    const timed = request('/timeout');
+    [...timers.values()].find(timer => timer.ms === 15000).fn();
+    await assert.rejects(() => timed, /请求超时/);
+    assert.equal(timers.size, 0);
     fetch = async () => ({status: 502, json: async () => {throw new Error('invalid JSON');}});
     await assert.rejects(() => request('/api'), /HTTP 502/);
   })()`, context);

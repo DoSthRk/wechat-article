@@ -281,13 +281,13 @@ def sanitize_figure_region(elements: Iterable[Mapping], words: Iterable[Mapping]
     content = kept + [w for w in words
         if float(w['top']) > header + 1
         and float(w['bottom']) >= new_top - 12
-        and float(w['top']) < bottom and float(w['bottom']) <= bottom + 2
+        and float(w['top']) < bottom
         and float(w['x1']) >= x0 - 24 and float(w['x0']) <= x1 + 24]
     pad = 2.0
     result = (max(0.0, min(float(e['x0']) for e in content) - pad),
               max(header + 1, min(float(e['top']) for e in content) - pad),
               min(page_w, max(float(e['x1']) for e in content) + pad),
-              min(page_h, bottom + pad, max(float(e['bottom']) for e in content) + pad))
+              min(page_h, max(float(e['bottom']) for e in content) + pad))
     if result[3] - result[1] < 40 or result[2] - result[0] < 40:
         raise UnsafeFigureCrop('Scientific crop too small after publisher header removal')
     return result

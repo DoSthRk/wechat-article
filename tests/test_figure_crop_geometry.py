@@ -79,6 +79,16 @@ if __name__ == "__main__":
 
 
 class TestPublisherAwareCrop(unittest.TestCase):
+    def test_bottom_axis_word_crossing_graphics_edge_is_kept_whole(self):
+        from utils.figure_crop_geometry import sanitize_figure_region
+        words = [dict(_el(50, 20, 100, 30), text='Article'),
+                 dict(_el(90, 690, 110, 707), text='−1,000'),
+                 dict(_el(50, 720, 550, 730), text='Figure 2 caption below the figure')]
+        elements = [_el(80, 60, 530, 698)]
+        box = sanitize_figure_region(elements, words, (80, 60, 530, 698), 600, 800)
+        self.assertGreaterEqual(box[3], 707)
+        self.assertLess(box[3], 720)
+
     def test_real_cellpress_stacked_citation_and_logo(self):
         import json
         from pathlib import Path

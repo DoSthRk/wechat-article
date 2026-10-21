@@ -167,6 +167,23 @@ class ImagePackageTests(unittest.TestCase):
         self.assertEqual(result['status'], 'blocked')
         self.assertEqual(result['bundle_id'], '')
 
+    def test_unsafe_crop_reason_is_preserved_without_approval(self):
+        with patch('batch_processor._resolve_job_figures', side_effect=ip.UnsafeFigureCrop('同一图号对应多个区域')):
+            result = ip.build_package(self.job)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['reason'], '同一图号对应多个区域')
+        self.assertEqual(ip.get_package(self.job)['reason'], result['reason'])
+        with self.assertRaises(ip.ImagePackageError):
+            ip.require_approved_package(self.job)
+
+    def test_unexpected_build_failure_has_private_trace_and_public_reference(self):
+        with patch('batch_processor._resolve_job_figures', side_effect=RuntimeError('private-path-secret')), self.assertLogs(ip.logger, 'ERROR') as logs:
+            result = ip.build_package(self.job)
+        self.assertNotIn('private-path-secret', result['reason'])
+        self.assertRegex(result['reason'], r'诊断编号 [0-9a-f]{12}')
+        self.assertIn('private-path-secret', '\n'.join(logs.output))
+        self.assertEqual(result['status'], 'blocked')
+
     def test_crop_provenance_is_required_even_for_manual_candidates(self):
         self.figures[0].bbox = None
         self.assertEqual(ip.build_package(self.job)['status'], 'blocked')

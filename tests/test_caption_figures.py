@@ -108,6 +108,23 @@ class _FakePdf:
 
 
 class TestCrossPageCaption(unittest.TestCase):
+    def test_following_figure_page_keeps_rotated_bottom_ticks_after_padding(self):
+        page = _FakePage([*_words('Article', 20),
+                          dict(_el(90, 690, 110, 707), text='−1,000')],
+                         images=[_el(60, 60, 540, 688)])
+        box = cf._following_page_figure_box(page)
+        self.assertGreaterEqual(box[3], 707)
+
+    def test_inline_figure_reference_in_right_column_is_not_a_caption(self):
+        # Nature Immunology: Extended Data Fig. 5's legend contains
+        # "clusters defined in Fig. 2 in the scRNAseq dataset" at x=447.
+        words = [dict(word, x0=word['x0'] + 300, x1=word['x1'] + 300)
+                 for word in _words('clusters defined in Fig. 2 in the scRNAseq dataset', 490)]
+        page = _FakePage(words, images=[_el(300, 60, 540, 400)])
+        self.assertFalse(any(cf._CAPTION_RE.match(line['text']) for line in cf._group_lines(page)))
+        with patch('pdfplumber.open', return_value=_FakePdf([page])):
+            self.assertEqual(cf.find_figure_boxes('paper.pdf'), [])
+
     def test_shaded_legend_is_not_a_figure_and_uses_previous_raster_page(self):
         previous = _FakePage(_words('A B C D', 50), images=[_el(60, 70, 535, 680)])
         caption = _FakePage(_words('Figure 1. Experimental results', 85))

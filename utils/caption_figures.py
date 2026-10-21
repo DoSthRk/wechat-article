@@ -39,7 +39,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 8     # v8: reject legend backgrounds; pair detached raster figures
+_CAPTION_VERSION = 9     # v9: require a column gutter before splitting a caption out of prose
 
 
 def caption_enabled() -> bool:
@@ -71,7 +71,10 @@ def _group_lines(page) -> List[dict]:
         # left-column prose. Preserve that caption as its own line.
         ordered = sorted(row, key=lambda word: float(word["x0"]))
         for pos, word in enumerate(ordered):
-            if pos and float(word["x0"]) >= float(page.width) * 0.45:
+            # Only a real column boundary can start a second caption. A
+            # mid-sentence "Fig. 2" has ordinary word spacing, not a gutter.
+            if (pos and float(word["x0"]) >= float(page.width) * 0.45
+                    and float(word["x0"]) - float(ordered[pos - 1]["x1"]) >= 8):
                 right_line = _mk_line(ordered[pos:])
                 if _CAPTION_RE.match(right_line["text"]):
                     lines.append(right_line)
@@ -165,10 +168,12 @@ def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, floa
     box = _union_box(clean)
     if box is None or box[1] > page_h * 0.35 or box[3] - box[1] < page_h * 0.35:
         return None
-    x0, top, x1, bottom = sanitize_figure_region(
+    # Apply the existing edge padding before fitting complete words. Applying
+    # it afterwards can still slice a rotated tick label crossing that edge.
+    box = (*box[:3], min(page_h * 0.95, box[3] + 7))
+    return sanitize_figure_region(
         clean, figure_crop_words(page), box, page_w, page_h,
     )
-    return x0, top, x1, min(page_h * 0.95, bottom + 7)
 
 
 def _without_caption_backgrounds(page, cap, gfx):
@@ -224,7 +229,7 @@ def _left_figure_for_right_caption(page, cap: dict) -> Optional[Tuple[float, flo
 
 
 def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
-    """返回 [(num, is_extended, page_idx, (x0,y0,x1,y1)pt, caption_text), ...]，按图号去重取首张。"""
+    """返回所有独立图号/页码/裁框候选；真实同号冲突交给质量闸拦截。"""
     import pdfplumber
 
     out = []

@@ -460,6 +460,7 @@ def create_app(testing: bool = False) -> Flask:
     def image_review(job_id: str):
         _review_job(job_id)
         return render_template('image_review.html', job_id=job_id, username=_username(),
+                               review_login_url='https://article.lab.genemedi.cn' + url_for('image_review', job_id=job_id),
                                can_approve=bool(str(request.headers.get('X-GM-LAB-Username') or '').strip()) or testing)
 
     @app.get('/api/image-review/<job_id>')
@@ -481,6 +482,16 @@ def create_app(testing: bool = False) -> Flask:
             return jsonify(result), (202 if result.get('ok') else 409)
         except Exception as exc:
             return _review_failure(exc)
+
+    @app.get('/api/image-review/<job_id>/workflow/<run_id>')
+    def api_image_review_workflow(job_id: str, run_id: str):
+        from utils.workflow_runner import review_workflow_status
+        _, _, owner = _review_job(job_id)
+        state = review_workflow_status(job_id, run_id)
+        if not state or state.get('owner_line') != owner:
+            return jsonify({'ok': False, 'error': '找不到这篇文章对应的后台任务，请返回工作台核对。'}), 404
+        return jsonify({key: state.get(key) for key in
+                        ('run_id', 'stage', 'status', 'total', 'completed', 'failed', 'errors')})
 
     @app.post('/api/image-review/<job_id>/approve')
     def api_image_review_approve(job_id: str):

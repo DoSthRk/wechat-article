@@ -4,6 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 const jobId = document.body.dataset.jobId;
 const api = `/api/image-review/${encodeURIComponent(jobId)}`;
 let currentPackage = null, busy = false, pollTimer = null;
+let activeWorkflow = null, pollEpoch = 0;
 let expectedImages = new Set(), loadedImages = new Set();
 const candidateStates = new Set(["needs_review", "revoked"]);
 const statusLabels = {missing: "尚无图片候选", building: "正在生成图片候选", needs_review: "等待首次人工审核", approved: "图片包已审核", blocked: "图片候选被拦下", stale: "来源已变化，需要重新审核", superseded: "图片包已有新版本", revoked: "审核已撤回"};
@@ -16,16 +17,26 @@ function message(text, tone = "", focus = false) {
 }
 
 async function request(path, body) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   const options = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
-  const response = await fetch(path, options);
-  let data;
-  try { data = await response.json(); }
-  catch (_) { throw new Error(`请求未完成（HTTP ${response.status}）。请刷新状态核对，不要重复提交。`); }
-  if (!response.ok || data.ok === false) {
-    const error = new Error(data.error || `请求失败（HTTP ${response.status}），请重试。`);
-    error.field = data.field; throw error;
-  }
-  return data;
+  try {
+    const response = await fetch(path, {...options, signal: controller.signal});
+    let data;
+    try { data = await response.json(); }
+    catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw new Error(`请求未完成（HTTP ${response.status}）。请刷新状态核对，不要重复提交。`);
+    }
+    if (!response.ok || data.ok === false) {
+      const error = new Error(data.error || `请求失败（HTTP ${response.status}），请重试。`);
+      error.field = data.field; error.status = response.status; throw error;
+    }
+    return data;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("请求超时，后台任务可能仍在运行。请点击“刷新状态”核对，不要重复提交。");
+    throw error;
+  } finally { clearTimeout(timeout); }
 }
 
 function draftKey() { return `image-review:${jobId}:${currentPackage?.bundle_id || "none"}`; }
@@ -118,8 +129,9 @@ async function loadPackage(quiet = false) {
   if (currentPackage) saveDraft();
   try {
     const data = await request(api); renderPackage(data);
-    if (!quiet) message(data.reason || (data.status === "approved" ? "图片审核已保存，可继续发布。" : "请按下面顺序核对原页、裁图和封面。"), data.status === "approved" ? "success" : "");
-  } catch (error) { message(error.message, "error"); }
+    if (!quiet) message(data.reason || (data.status === "approved" ? "图片审核已保存，可继续发布。" : "请按下面顺序核对原页、裁图和封面。"), data.status === "approved" ? "success" : ["blocked", "stale"].includes(data.status) ? "error" : "");
+    return data;
+  } catch (error) { message(error.message, "error"); return null; }
 }
 
 function parsePages(text) {
@@ -167,24 +179,50 @@ function validateForm() {
 
 async function pollWorkflow(stage, runId) {
   clearTimeout(pollTimer);
+  const epoch = ++pollEpoch;
   try {
-    const data = await request("/api/workflow/status"), state = data[stage];
-    if (state?.run_id !== runId) {
-      busy = false; updateButtons();
+    const state = await request(`${api}/workflow/${encodeURIComponent(runId)}`);
+    if (epoch !== pollEpoch) return;
+    if (state?.run_id !== runId || state?.stage !== stage) {
+      clearWorkflow(); updateButtons();
       message("该任务已不在当前状态窗口，不能确认本次结果。请返回工作台核对文章状态，不要重复启动。", "error");
       return;
     }
-    if (state.status === "running") { pollTimer = setTimeout(() => pollWorkflow(stage, runId), 3000); return; }
-    try { sessionStorage.removeItem(workflowKey); } catch (_) {}
-    busy = false; await loadPackage(true); updateButtons();
-    if (!state || !["done", "completed", "failed"].includes(state.status)) { message("后台任务结果暂未确认。请返回工作台查看状态，不要重复启动。", "error"); return; }
+    if (state.status === "running") {
+      busy = true; updateButtons();
+      message(stage === "images" ? "正在后台准备图片候选；不会发布文章。状态会自动更新，也可点击“刷新状态”。" : "后台发布任务正在运行，状态会自动更新。");
+      pollTimer = setTimeout(() => pollWorkflow(stage, runId), 3000); return;
+    }
+    if (!["done", "completed", "failed"].includes(state.status)) { message("后台任务结果暂未确认。请点击“刷新状态”核对，不要重复启动。", "error"); return; }
+    clearWorkflow();
+    const data = await loadPackage(true); updateButtons();
+    if (!data) return;
+    if (stage === "images" && state.status !== "failed" && !candidateStates.has(data.status)) {
+      message(data.reason || "候选未就绪，请刷新状态核对，不能提交审核。", "error"); return;
+    }
     message(state?.status === "failed" ? `后台处理未完成：${(state.errors || []).join("；")}。请核对状态后重试。` : stage === "images" ? "图片候选已生成，请逐张审核。" : "后台发布步骤已完成。多语言任务继续在工作台显示。", state?.status === "failed" ? "error" : "success");
-  } catch (error) { busy = false; updateButtons(); message(`${error.message} 可返回工作台查看后台任务；不要重复启动。`, "error"); }
+  } catch (error) {
+    if (epoch !== pollEpoch) return;
+    if (error.status === 404) clearWorkflow();
+    updateButtons(); message(`${error.message} 可点击“刷新状态”重新核对，或返回工作台查看后台任务。`, "error");
+  }
+}
+
+function clearWorkflow() {
+  clearTimeout(pollTimer); pollEpoch += 1;
+  activeWorkflow = null; busy = false;
+  try { sessionStorage.removeItem(workflowKey); } catch (_) {}
+}
+
+async function refreshReview() {
+  if (activeWorkflow) return pollWorkflow(activeWorkflow.stage, activeWorkflow.runId);
+  return loadPackage();
 }
 
 function trackWorkflow(stage, result) {
   if (!result?.run_id) { busy = false; updateButtons(); message("后台未返回任务编号，结果暂未确认。请返回工作台核对，不要重复启动。", "error"); return; }
-  try { sessionStorage.setItem(workflowKey, JSON.stringify({stage, runId: result.run_id})); } catch (_) {}
+  activeWorkflow = {stage, runId: result.run_id};
+  try { sessionStorage.setItem(workflowKey, JSON.stringify(activeWorkflow)); } catch (_) {}
   busy = true; updateButtons(); pollWorkflow(stage, result.run_id);
 }
 
@@ -203,7 +241,7 @@ async function submitApproval(shouldContinue) {
 $("#review-form").addEventListener("input", saveDraft);
 $("#review-form").addEventListener("submit", (event) => { event.preventDefault(); submitApproval(true); });
 $("#approve-only").addEventListener("click", () => submitApproval(false));
-$("#refresh-package").addEventListener("click", () => loadPackage());
+$("#refresh-package").addEventListener("click", refreshReview);
 $("#prepare-package").addEventListener("click", async () => {
   if (busy) return;
   if (currentPackage?.status === "approved" && !confirm("重新生成候选后需重新审核，现有线上文章不会自动改动。继续吗？")) return;
@@ -226,12 +264,12 @@ $("#revoke-package").addEventListener("click", async () => {
   busy = false; updateButtons();
 });
 async function initializeReview() {
-  await loadPackage();
   let pending;
   try { pending = JSON.parse(sessionStorage.getItem(workflowKey) || "null"); } catch (_) {}
   if (pending?.runId && ["images", "review_publish"].includes(pending.stage)) {
+    activeWorkflow = pending;
     busy = true; updateButtons(); message("正在核对上次启动的后台任务…");
-    pollWorkflow(pending.stage, pending.runId);
-  }
+    await pollWorkflow(pending.stage, pending.runId);
+  } else { await loadPackage(); }
 }
 initializeReview();

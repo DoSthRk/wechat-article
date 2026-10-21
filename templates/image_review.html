@@ -20,7 +20,7 @@
       <p>“确认并继续发布”将同步本图包的正文图片和封面：已有文章保留文字，新稿继续发布中文 Blog / 公众号草稿，随后自动多语言发布；不会重新生成正文。</p>
     </section>
     {% if not can_approve %}
-    <section class="review-notice warning"><strong>当前为业务线快捷查看模式</strong><p>可查看图片，但不能批准。请从 <a href="https://lab.genemedi.cn/">GM-LAB 登录入口</a>进入，以记录真实审核人。</p></section>
+    <section class="review-notice warning"><strong>当前为业务线快捷查看模式，尚未取得审核身份</strong><p>可查看图片，但不能批准。<a href="{{ review_login_url }}">登录 GM-LAB 并返回本篇审核</a>，以记录真实审核人。请使用本人账号登录；上方业务线默认用户名不代表已登录。</p></section>
     {% endif %}
     <div id="review-message" class="review-message" role="status" aria-live="polite" tabindex="-1">正在读取图片包…</div>
     <section class="review-toolbar"><div><strong id="package-status">读取中</strong><p id="package-id" class="mono"></p></div><div class="review-actions"><button type="button" id="refresh-package" class="btn secondary">刷新状态</button><button type="button" id="prepare-package" class="btn secondary">生成图片候选</button></div></section>
