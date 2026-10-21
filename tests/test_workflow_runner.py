@@ -20,6 +20,7 @@ class WorkflowRunnerTests(unittest.TestCase):
             result = workflow_runner.start_review_publication('paper', bundle, owner_line='aav', owner_username='human')
             self.assertTrue(result['reused'])
             self.assertEqual(result['run_id'], run_id)
+            self.assertEqual(workflow_runner.review_workflow_status('paper', run_id)['bundle_id'], bundle)
             start.assert_not_called()
             workflow_runner.start_review_publication('paper', 'b'*64, owner_line='aav', owner_username='human')
             self.assertEqual(start.call_count, 1)

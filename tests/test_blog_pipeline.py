@@ -537,6 +537,25 @@ class PublicImageVerificationTests(unittest.TestCase):
                 b'<img src="https://img.test/figure"><img data-src="https://img.test/cover">', content_type='text/html')):
             verify_public_page_images('https://blog.test/article', expected)
 
+    def test_sharing_cover_is_verified_separately_from_body_figures(self):
+        for cover in ('<meta property="og:image" content="https://img.test/cover">',
+                      '<meta name="twitter:image" content="https://img.test/cover">',
+                      '<img src="https://img.test/cover">'):
+            with self.subTest(cover=cover), patch('utils.blog_pipeline.urllib_request.urlopen',
+                    side_effect=lambda *_a, **_k: self.response(
+                        ('<img src="https://img.test/figure">' + cover).encode(), content_type='text/html')):
+                verify_public_page_images('https://blog.test/article', {'https://img.test/figure'},
+                                          cover_url='https://img.test/cover')
+        for html in ('<meta property="og:image" content="https://img.test/figure"><img src="https://img.test/cover">',
+                     '<img src="https://img.test/figure"><meta property="og:image" content="https://img.test/wrong">',
+                     '<img src="https://img.test/figure">https://img.test/cover',
+                     '<img src="https://img.test/figure"><script>"https://img.test/cover"</script>'):
+            with self.subTest(html=html), patch('utils.blog_pipeline.urllib_request.urlopen',
+                    side_effect=lambda *_a, **_k: self.response(html.encode(), content_type='text/html')):
+                with self.assertRaises(BlogPipelineError):
+                    verify_public_page_images('https://blog.test/article', {'https://img.test/figure'},
+                                              cover_url='https://img.test/cover')
+
 
 if __name__ == "__main__":
     unittest.main()

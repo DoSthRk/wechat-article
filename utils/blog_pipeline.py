@@ -137,13 +137,17 @@ def verify_public_image(url: str, timeout: float = 30.0, *, expected_path=None) 
 class _PublicImages(HTMLParser):
     def __init__(self, html, page_url):
         super().__init__(convert_charrefs=True)
-        self.urls, self.page_url = set(), page_url
+        self.urls, self.cover_urls, self.page_url = set(), set(), page_url
         self.feed(html)
 
     def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == 'meta':
+            identity = (attributes.get('property') or attributes.get('name') or '').lower()
+            if identity in {'og:image', 'twitter:image'} and attributes.get('content'):
+                self.cover_urls.add(urljoin(self.page_url, unescape(attributes['content'])))
         if tag != 'img':
             return
-        attributes = dict(attrs)
         for key in ('src', 'data-src'):
             if attributes.get(key):
                 self.urls.add(urljoin(self.page_url, unescape(attributes[key])))
@@ -153,8 +157,13 @@ class _PublicImages(HTMLParser):
                     self.urls.add(urljoin(self.page_url, unescape(candidate.strip().split()[0])))
 
 
-def verify_public_page_images(url, expected_urls, *, timeout=10.0):
-    """Require real public HTML image attributes, not merely an HTTP 200 page."""
+def verify_public_page_images(url, expected_urls, *, cover_url='', timeout=10.0):
+    """Body figures must be images; the cover may be the page's sharing image.
+
+    GeneMedi article pages expose the cover through og:image rather than a
+    duplicate body image. Metadata must never substitute for a body figure.
+    CMS fields and the full cover bytes are verified separately by callers.
+    """
     expected = {str(value) for value in expected_urls if value}
     if not expected:
         raise BlogPipelineError('公开页面没有预期的已批准图片')
@@ -166,9 +175,11 @@ def verify_public_page_images(url, expected_urls, *, timeout=10.0):
                 content = response.read(5 * 1024 * 1024 + 1)
                 if int(getattr(response, 'status', 200) or 200) != 200 or len(content) > 5 * 1024 * 1024:
                     raise ValueError('公开页面响应状态或大小异常')
-            actual = _PublicImages(content.decode('utf-8'), url).urls
-            if not expected <= actual:
-                raise ValueError('公开页面尚未包含全部已批准正文图片/封面地址')
+            actual = _PublicImages(content.decode('utf-8'), url)
+            if not expected <= actual.urls:
+                raise ValueError('公开页面尚未包含全部已批准正文图片地址')
+            if cover_url and cover_url not in actual.urls | actual.cover_urls:
+                raise ValueError('公开页面封面或分享图片与已批准封面不一致')
             return url
         except Exception as exc:
             error = exc
@@ -511,7 +522,7 @@ class BlogWorkflow:
             )
             verify_cms_payload(client, str(result.get('uuid') or distribution.external_id or ''), payload)
             self.blog_url_verifier(public_url)
-            verify_public_page_images(public_url, _PublicImages(html, public_url).urls | {cover_url})
+            verify_public_page_images(public_url, _PublicImages(html, public_url).urls, cover_url=cover_url)
             require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
         except Exception as exc:
             error = str(exc)

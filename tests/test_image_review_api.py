@@ -103,6 +103,15 @@ class ImageReviewApiTests(unittest.TestCase):
         with patch('utils.workflow_runner.review_workflow_status', return_value={**state, 'owner_line': 'solidex'}):
             self.assertEqual(self.client.get(f'{self.api}/workflow/123456789a', headers=self.headers).status_code, 404)
 
+    def test_review_publish_progress_exposes_exact_bundle_without_waiting_for_image_lock(self):
+        state = {'run_id': '123456789a', 'stage': 'review_publish', 'status': 'running',
+                 'owner_line': 'aav', 'bundle_id': self.bundle_id}
+        with patch('utils.workflow_runner.review_workflow_status', return_value=state), patch(
+                'utils.image_packages.get_package', side_effect=AssertionError('must not wait for publisher lock')):
+            response = self.client.get(f'{self.api}/workflow/123456789a', headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['bundle_id'], self.bundle_id)
+
     def test_every_route_checks_business_line_before_any_core_or_worker_call(self):
         with patch('utils.image_packages.get_package') as get, patch(
                 'utils.image_packages.approve_package') as approve, patch(

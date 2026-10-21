@@ -210,6 +210,11 @@ def review_workflow_status(job_id: str, run_id: str) -> Dict[str, Any]:
         starting = not state.get('pid') and time.time() - float(state.get('started_at') or 0) < 10
         if not starting and not _pid_running(state.get('pid')):
             state.update(status='failed', errors=[*state.get('errors', []), '任务进程意外中断，请重新生成候选或核对发布状态'])
+    if state.get('stage') == 'review_publish':
+        bundle_id = selections[0].get('expected_package_id')
+        if not isinstance(bundle_id, str) or not re.fullmatch(r'[0-9a-f]{64}', bundle_id):
+            return {}
+        state = {**state, 'bundle_id': bundle_id}
     return state
 
 

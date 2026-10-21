@@ -31,34 +31,60 @@ vm.runInContext(fs.readFileSync('static/image_review.js','utf8'),context);
     currentPackage.status='needs_review';updateButton();
     let calls=[];
     fetch=async(path,options)=>{calls.push({path,body:options.body?JSON.parse(options.body):null});return {ok:true,json:async()=>path.endsWith('/confirm')
-      ? {approved:true,continuation:{ok:true,run_id:'mine'}} : {run_id:'mine',stage:'review_publish',status:'running'}};};
+      ? {approved:true,continuation:{ok:true,run_id:'mine'}} : {run_id:'mine',stage:'review_publish',status:'running',bundle_id:bundle}};};
     await confirmAndPublish();await Promise.resolve();
     assert.deepEqual(JSON.stringify(calls[0].body),JSON.stringify({package_id:bundle,images_correct:true}));
     assert.ok(calls[0].path.endsWith('/confirm'));
-    assert.equal(busy,true);assert.equal(activeWorkflow.bundleId,bundle);
+    assert.equal(busy,false);assert.equal(activeWorkflow.bundleId,bundle);
+    assert.equal($('#confirm-publish').textContent,'已提交后台发布');
+    assert.match($('#review-message').textContent,/可以关闭此页面/);
     const count=calls.length;await confirmAndPublish();assert.equal(calls.length,count);
     assert.equal($('#confirm-publish').disabled,true);
     const approved={bundle_id:bundle,status:'approved',can_approve:true,figures:[],pages:[],approval:{reviewer:'human'}};
     fetch=async(path)=>({ok:true,json:async()=>path.includes('/workflow/')
-      ? {run_id:'mine',stage:'review_publish',status:'done'} : approved});
+      ? {run_id:'mine',stage:'review_publish',status:'done',bundle_id:bundle} : approved});
     await pollWorkflow('review_publish','mine');
-    assert.equal(submittedBundle,bundle);assert.equal($('#confirm-publish').textContent,'已提交发布');
+    assert.equal(submittedBundle,bundle);assert.equal($('#confirm-publish').textContent,'已提交后台发布');
     assert.equal($('#confirm-publish').disabled,true);
-    assert.match($('#review-message').textContent,/发布步骤已完成/);
+    assert.match($('#review-message').textContent,/公众号草稿已就绪/);
     submittedBundle='';activeWorkflow={stage:'review_publish',runId:'mine',bundleId:bundle};busy=true;
     fetch=async(path)=>({ok:true,json:async()=>path.includes('/workflow/')
-      ? {run_id:'mine',stage:'review_publish',status:'failed',errors:['failed publish']} : approved});
+      ? {run_id:'mine',stage:'review_publish',status:'failed',bundle_id:bundle,errors:['failed publish']} : approved});
     await pollWorkflow('review_publish','mine');assert.equal(busy,false);
     assert.match($('#review-message').textContent,/failed publish/);
     activeWorkflow={stage:'review_publish',runId:'mine',bundleId:bundle};busy=true;
     fetch=async(path)=>({ok:true,json:async()=>path.includes('/workflow/')
-      ? {run_id:'mine',stage:'review_publish',status:'done'} : {...approved,bundle_id:'b'.repeat(64)}});
+      ? {run_id:'mine',stage:'review_publish',status:'done',bundle_id:'b'.repeat(64)} : approved});
     await pollWorkflow('review_publish','mine');assert.equal(submittedBundle,'');
-    assert.match($('#review-message').textContent,/配图状态已变化/);
+    assert.match($('#review-message').textContent,/配图版本不一致/);
     activeWorkflow={stage:'review_publish',runId:'mine',bundleId:bundle};busy=true;
     fetch=async()=>{throw new Error('offline');};
     await pollWorkflow('review_publish','mine');assert.equal(busy,true);
     assert.match($('#review-message').textContent,/offline/);
+    assert.match($('#review-message').textContent,/无需重复点击/);
+    assert.ok([...timers.values()].some(t=>t.ms===10000));
+    // The accepted response releases the human immediately, even if progress
+    // requests never finish. Completion must not reread the locked image pack.
+    currentPackage={...approved,figures:[{page:1}]};busy=false;submittedBundle='';clearWorkflow();
+    fetch=async(path)=>{
+      if(path.endsWith('/confirm'))return {ok:true,json:async()=>({continuation:{ok:true,run_id:'slow'}})};
+      return new Promise(()=>{});
+    };
+    expectedImages=new Set(['ready']);loadedImages=new Set(['ready']);updateButton();
+    await confirmAndPublish();assert.equal(busy,false);
+    assert.match($('#review-message').textContent,/可以关闭此页面/);
+    assert.equal($('#confirm-publish').disabled,true);
+    fetch=async(path)=>{
+      assert.ok(path.includes('/workflow/'),'must not block on full package GET');
+      return {ok:true,json:async()=>({run_id:'slow',stage:'review_publish',status:'done',bundle_id:bundle})};
+    };
+    await pollWorkflow('review_publish','slow');
+    assert.match($('#review-message').textContent,/各语言 Blog 继续后台处理/);
+    // Reloading a pending submission restores the accepted UI, not a spinner.
+    currentPackage=null;sessionStorage.setItem(workflowKey,JSON.stringify({stage:'review_publish',runId:'slow',bundleId:bundle}));
+    fetch=async()=>({ok:true,json:async()=>({run_id:'slow',stage:'review_publish',status:'running',bundle_id:bundle})});
+    await initializeReview();assert.equal(busy,false);assert.equal($('#confirm-publish').textContent,'已提交后台发布');
+    assert.match($('#review-message').textContent,/无需等待/);
     clearWorkflow();timers.clear();
     fetch=(_path,options)=>new Promise((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted'))));
     const timed=request('/timeout');[...timers.values()].find(t=>t.ms===15000).fn();

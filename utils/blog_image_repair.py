@@ -152,7 +152,7 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False, expected_p
             image_package_id=package.bundle_id, image_verification_status='pending_readback')
         if client.get(dist.external_id, langcode=langcode)['data']['attributes'] != original:
             raise BlogPipelineError('CMS 文章刚被修改，未将旧结果标记为已验证')
-        verify_public_page_images(dist.external_url, [*urls, updated_cover])
+        verify_public_page_images(dist.external_url, urls, cover_url=updated_cover)
         require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
         workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,
             image_package_id=package.bundle_id, image_verification_status='verified', image_receipt_json=receipt)
@@ -185,7 +185,7 @@ def repair_images(workflow, job_id, lang='zh', *, repair_cover=False, expected_p
         record['status'] = 'verified' if verified else 'needs_review'
         if verified:
             require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
-            verify_public_page_images(dist.external_url, [*urls, updated_cover])
+            verify_public_page_images(dist.external_url, urls, cover_url=updated_cover)
     except Exception:
         record['status'] = 'needs_review'
         workflow.db.upsert_distribution(job_pk, 'blog', account='genemedi', lang=lang,

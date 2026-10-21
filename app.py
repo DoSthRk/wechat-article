@@ -540,7 +540,7 @@ def create_app(testing: bool = False) -> Flask:
         if not state or state.get('owner_line') != owner:
             return jsonify({'ok': False, 'error': '找不到这篇文章对应的后台任务，请返回工作台核对。'}), 404
         return jsonify({key: state.get(key) for key in
-                        ('run_id', 'stage', 'status', 'total', 'completed', 'failed', 'errors')})
+                        ('run_id', 'stage', 'status', 'total', 'completed', 'failed', 'errors', 'bundle_id')})
 
     @app.post('/api/image-review/<job_id>/approve')
     def api_image_review_approve(job_id: str):

@@ -8,6 +8,7 @@ const reviewableStates = new Set(["needs_review", "revoked", "approved"]);
 const statusLabels = {missing: "图片尚未准备好", building: "正在准备图片", needs_review: "等待确认图片", approved: "图片已确认", blocked: "图片需要负责人处理", stale: "图片已变化，需要重新处理", superseded: "图片已有新版本", revoked: "等待重新确认图片"};
 let currentPackage = null, busy = false, pollTimer = null, activeWorkflow = null, pollEpoch = 0;
 let expectedImages = new Set(), loadedImages = new Set(), submittedBundle = "";
+const acceptedMessage = "图片已确认，已提交后台发布。您可以关闭此页面，无需等待或重复点击；公众号草稿及各语言 Blog 将继续自动处理，全部完成后会发送飞书通知。";
 
 function message(text, tone = "") {
   const node = $("#review-message");
@@ -39,10 +40,11 @@ async function request(path, body) {
 
 function updateButton() {
   const button = $("#confirm-publish");
-  const submitted = currentPackage?.bundle_id && submittedBundle === currentPackage.bundle_id;
+  const submitted = (currentPackage?.bundle_id && submittedBundle === currentPackage.bundle_id)
+    || (activeWorkflow?.stage === "review_publish" && (!currentPackage || activeWorkflow.bundleId === currentPackage.bundle_id));
   const imagesReady = expectedImages.size > 0 && [...expectedImages].every((url) => loadedImages.has(url));
   button.disabled = busy || submitted || !currentPackage?.can_approve || !currentPackage?.figures?.length || !reviewableStates.has(currentPackage.status) || !imagesReady;
-  button.textContent = busy ? "正在处理…" : submitted ? "已提交发布" : "图片正确，确认并发布";
+  button.textContent = submitted ? "已提交后台发布" : busy ? "正在提交…" : "图片正确，确认并发布";
 }
 
 function imagePreview(item, title) {
@@ -114,29 +116,46 @@ async function pollWorkflow(stage, runId) {
     if (state?.run_id !== runId || state?.stage !== stage) {
       clearWorkflow(); updateButton(); message("暂时无法核对本次任务，请返回工作台查看。", "error"); return;
     }
+    const expectedBundle = activeWorkflow?.bundleId;
+    if (stage === "review_publish" && (state.bundle_id !== expectedBundle
+        || (currentPackage && currentPackage.bundle_id !== expectedBundle))) {
+      clearWorkflow(); submittedBundle = ""; updateButton();
+      message("后台任务与当前配图版本不一致，请返回工作台核对或告知负责人。", "error"); return;
+    }
     if (state.status === "running") {
-      busy = true; updateButton();
-      message(stage === "images" ? "正在后台准备图片，完成后自动显示。" : "图片已确认，后台正在发布。完成后会自动更新状态。");
+      busy = stage === "images"; updateButton();
+      message(stage === "images" ? "正在后台准备图片，完成后自动显示。" : acceptedMessage, stage === "images" ? "" : "success");
       pollTimer = setTimeout(() => pollWorkflow(stage, runId), 3000); return;
     }
     if (!["done", "completed", "failed"].includes(state.status)) {
       message("后台任务结果尚未确认，请刷新页面核对。", "error"); return;
     }
-    const expectedBundle = activeWorkflow?.bundleId;
-    clearWorkflow(); const data = await loadPackage(true); updateButton();
-    if (!data) return;
-    if (state.status === "failed") { message(`后台处理未完成：${(state.errors || []).join("；")}。请重试或告知负责人。`, "error"); return; }
+    clearWorkflow();
+    if (state.status === "failed" || state.failed > 0) {
+      submittedBundle = ""; updateButton();
+      const prefix = stage === "review_publish" ? "图片确认已保存，但后台发布未完成" : "后台图片准备未完成";
+      message(`${prefix}：${(state.errors || []).join("；")}。请重试或告知负责人。`, "error");
+      if (!currentPackage) await loadPackage(true);
+      return;
+    }
     if (stage === "review_publish") {
-      if (data.status !== "approved" || data.bundle_id !== expectedBundle) {
-        message("后台任务已结束，但当前配图状态已变化，请返回工作台核对或告知负责人。", "error"); return;
-      }
-      submittedBundle = data.bundle_id; updateButton();
-      message("发布步骤已完成，各语言 Blog 将继续自动处理。", "success");
-    } else { message("图片已准备好，请查看后确认。", "success"); }
+      // Do not reread the full package here: the multilingual worker may hold
+      // its image lock for minutes. This exact run/bundle receipt is sufficient
+      // to show submission progress, not a claim that every Blog is published.
+      submittedBundle = expectedBundle;
+      if (!currentPackage) currentPackage = {bundle_id: expectedBundle};
+      $("#package-status").textContent = "公众号草稿已就绪"; updateButton();
+      message("中文 Blog 已核验，公众号草稿已就绪。各语言 Blog 继续后台处理，全部完成后会发送飞书通知；您可以关闭此页面。", "success");
+    } else {
+      const data = await loadPackage(true); updateButton();
+      if (data) message("图片已准备好，请查看后确认。", "success");
+    }
   } catch (error) {
     if (epoch !== pollEpoch) return;
     if (error.status === 404) clearWorkflow();
-    updateButton(); message(error.message, "error");
+    updateButton();
+    message(stage === "review_publish" ? `已提交后台发布，无需重复点击。暂时无法更新进度：${error.message} 您可以关闭页面，稍后在工作台核对。` : error.message, "error");
+    if (activeWorkflow && error.status !== 404) pollTimer = setTimeout(() => pollWorkflow(stage, runId), 10000);
   }
 }
 
@@ -146,7 +165,9 @@ function trackWorkflow(result) {
   }
   activeWorkflow = {stage: "review_publish", runId: result.run_id, bundleId: currentPackage.bundle_id};
   try { sessionStorage.setItem(workflowKey, JSON.stringify(activeWorkflow)); } catch (_) {}
-  busy = true; updateButton(); pollWorkflow(activeWorkflow.stage, activeWorkflow.runId);
+  submittedBundle = currentPackage.bundle_id; busy = false;
+  $("#package-status").textContent = "已提交后台发布";
+  updateButton(); message(acceptedMessage, "success"); pollWorkflow(activeWorkflow.stage, activeWorkflow.runId);
 }
 
 async function confirmAndPublish() {
@@ -168,8 +189,10 @@ async function initializeReview() {
   let pending;
   try { pending = JSON.parse(sessionStorage.getItem(workflowKey) || "null"); } catch (_) {}
   if (pending?.runId && ["images", "review_publish"].includes(pending.stage)) {
-    activeWorkflow = pending; busy = true; updateButton();
-    message("正在核对上次提交的任务…"); await pollWorkflow(pending.stage, pending.runId);
+    activeWorkflow = pending; busy = pending.stage === "images"; updateButton();
+    if (pending.stage === "review_publish") $("#package-status").textContent = "已提交后台发布";
+    message(pending.stage === "review_publish" ? acceptedMessage : "正在核对上次提交的任务…", pending.stage === "review_publish" ? "success" : "");
+    await pollWorkflow(pending.stage, pending.runId);
   } else { await loadPackage(); }
 }
 initializeReview();
