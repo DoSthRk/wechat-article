@@ -1,6 +1,9 @@
 """题注锚定抽图：题注正则 + 框计算（纯函数，无需真 PDF）。"""
 import os
 import unittest
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from utils import caption_figures as cf
@@ -35,6 +38,17 @@ class TestCaptionRegex(unittest.TestCase):
 
 class TestBoxForCaption(unittest.TestCase):
     W, H = 600.0, 800.0
+
+    def test_detached_panel_titles_and_axis_labels_fit_inside_caption_boundaries(self):
+        graphics = [_el(80, 90, 520, 400)]
+        words = [dict(_el(80, 65, 90, 75), text='a'),
+                 dict(_el(300, 63, 500, 73), text='CAR clonal evolution'),
+                 dict(_el(250, 410, 350, 420), text='Late CAR T signature'),
+                 dict(_el(80, 430, 520, 440), text='Fig. 5 | caption must stay out')]
+        box = cf._box_for_caption(430, 445, graphics, [430], [445], self.W, self.H, words=words)
+        self.assertLessEqual(box[1], 63)
+        self.assertGreaterEqual(box[3], 420)
+        self.assertLess(box[3], 430)
 
     def test_figure_above_caption_excludes_rule(self):
         gfx = [_el(100, 50, 500, 350),          # 正图大框
@@ -105,6 +119,67 @@ class _FakePdf:
 
     def __exit__(self, *_args):
         return False
+
+
+class TestSelectiveCaptionParsing(unittest.TestCase):
+    def test_scan_keeps_all_requested_occurrences_and_closes_resources(self):
+        from unittest.mock import MagicMock
+        document = MagicMock()
+        texts = ['Fig. 1 | first', 'Extended Data Fig. 1 | appendix',
+                 'Left-column text    Fig. 1 | another article', 'Fig. 2 | last']
+        pages = [MagicMock() for _ in texts]
+        document.__len__.return_value = len(pages)
+        document.__getitem__.side_effect = pages.__getitem__
+        for page, text in zip(pages, texts):
+            page.get_textpage.return_value.get_text_bounded.return_value = text
+        with patch('pypdfium2.PdfDocument', return_value=document):
+            self.assertEqual(cf._caption_page_indices('source.pdf', {('1', False), ('2', False)}), {0, 2, 3})
+            self.assertIsNone(cf._caption_page_indices('source.pdf', {('5', False)}))
+        self.assertEqual(document.close.call_count, 2)
+        for page in pages:
+            self.assertEqual(page.close.call_count, 2)
+            self.assertEqual(page.get_textpage.return_value.close.call_count, 2)
+
+    def test_layout_skips_unreferenced_pages_but_keeps_duplicate_regions(self):
+        first = _FakePage(_words('Fig. 1 | first', 420), images=[_el(60, 60, 540, 390)])
+        second = _FakePage(_words('Fig. 1 | different article', 420), images=[_el(60, 90, 540, 390)])
+        unused = _FakePage([])
+        unused.extract_words = lambda **kw: self.fail('unreferenced appendix must not be parsed')
+        with patch('pdfplumber.open', return_value=_FakePdf([first, unused, second])), patch.object(
+                cf, '_caption_page_indices', return_value={0, 2}):
+            boxes = cf.find_figure_boxes('source.pdf', required_keys={('1', False)})
+        self.assertEqual([box[2] for box in boxes], [0, 2])
+
+    def test_incomplete_fast_scan_falls_back_to_layout_without_dropping_keys(self):
+        page = _FakePage(_words('Fig. 2 | results', 420), images=[_el(60, 60, 540, 390)])
+        with patch('pdfplumber.open', return_value=_FakePdf([page])), patch.object(
+                cf, '_caption_page_indices', return_value=None):
+            boxes = cf.find_figure_boxes('source.pdf', required_keys={('2', False)})
+        self.assertEqual([box[0] for box in boxes], ['2'])
+
+    def test_partial_cache_is_not_reused_as_complete_or_for_another_key(self):
+        from utils.pdf_figure_extractor import Figure
+        with TemporaryDirectory() as temp:
+            out = Path(temp)
+            cf._write_manifest(cf._manifest(out), [Figure('1', False, '', 1, '1.jpg', 600, 400)])
+            (out / '.caption_required_keys.json').write_text(json.dumps([['1', False]]))
+            with patch.object(cf, 'find_figure_boxes', return_value=[]) as find:
+                self.assertEqual(len(cf.extract_figures_by_caption('source.pdf', temp, required_keys={('1', False)})), 1)
+                find.assert_not_called()
+                cf.extract_figures_by_caption('source.pdf', temp, required_keys={('2', False)})
+                find.assert_called_once()
+                find.reset_mock()
+                cf.extract_figures_by_caption('source.pdf', temp)
+                find.assert_called_once()
+
+    def test_worker_forwards_requested_keys_without_approving_or_publishing(self):
+        from utils import figure_extract_worker as worker
+        with TemporaryDirectory() as temp, patch.object(worker, '_extract', return_value=[]) as extract:
+            result = Path(temp) / 'result.json'
+            self.assertEqual(worker.main(['caption', 'source.pdf', temp, '', str(result),
+                                          json.dumps([['1', False], ['5', False]])]), 0)
+            extract.assert_called_once_with('caption', 'source.pdf', temp, None,
+                                            required_keys={('1', False), ('5', False)})
 
 
 class TestCrossPageCaption(unittest.TestCase):

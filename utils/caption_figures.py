@@ -32,6 +32,9 @@ _CAPTION_RE = re.compile(
     r"\.?\s*([0-9]+)(?=[\s\.\:\|、。]|$)",
     re.IGNORECASE,
 )
+# Deliberately broader than layout captions: include right-column starts and
+# inline mentions in the prefilter rather than hiding possible duplicate keys.
+_CAPTION_SCAN_RE = re.compile(r'(?<![A-Za-z])' + _CAPTION_RE.pattern[1:], re.IGNORECASE)
 _NEXT_PAGE_CAPTION_RE = re.compile(
     r"caption\s+(?:is\s+)?on\s+(?:the\s+)?next\s+page",
     re.IGNORECASE,
@@ -39,7 +42,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 9     # v9: require a column gutter before splitting a caption out of prose
+_CAPTION_VERSION = 10    # v10: selective layout parsing; retain labels within caption-bounded figure bands
 
 
 def caption_enabled() -> bool:
@@ -125,22 +128,22 @@ def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
     """
     clean = [e for e in gfx if not is_rule_line(e, page_w, page_h)]
 
-    def sanitized_union(elements: list) -> Optional[Tuple[float, float, float, float]]:
+    def sanitized_union(elements: list, text_bounds) -> Optional[Tuple[float, float, float, float]]:
         box = _union_box(elements)
         if box is None:
             return None
         if words is not None:
-            return sanitize_figure_region(elements, words, box, page_w, page_h)
+            return sanitize_figure_region(elements, words, box, page_w, page_h, text_bounds=text_bounds)
         return trim_detached_edge_bands(elements, box, page_w, page_h)
 
     # 上方：上一题注以下、本题注以上
     lo = max([b for b in cap_bottoms if b < cap_top - _MIN_FIG_PT], default=0.0)
-    above = sanitized_union([e for e in clean if lo < _cy(e) < cap_top])
+    above = sanitized_union([e for e in clean if lo < _cy(e) < cap_top], (lo, cap_top))
     if above:
         return above
     # 下方兜底（题注在图上方的版式）：本题注以下、下一题注以上
     hi = min([t for t in cap_tops if t > cap_bottom + _MIN_FIG_PT], default=page_h)
-    return sanitized_union([e for e in clean if cap_bottom < _cy(e) < hi])
+    return sanitized_union([e for e in clean if cap_bottom < _cy(e) < hi], (cap_bottom, hi))
 
 
 def _has_next_page_caption_marker(lines: List[dict]) -> bool:
@@ -155,7 +158,8 @@ def _full_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
     box = _union_box(clean)
     if box is None:
         return None
-    return sanitize_figure_region(clean, figure_crop_words(page), box, page_w, page_h)
+    return sanitize_figure_region(clean, figure_crop_words(page), box, page_w, page_h,
+                                  text_bounds=(0, page_h * .95))
 
 
 def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, float]]:
@@ -173,6 +177,7 @@ def _following_page_figure_box(page) -> Optional[Tuple[float, float, float, floa
     box = (*box[:3], min(page_h * 0.95, box[3] + 7))
     return sanitize_figure_region(
         clean, figure_crop_words(page), box, page_w, page_h,
+        text_bounds=(0, page_h * .95),
     )
 
 
@@ -228,15 +233,56 @@ def _left_figure_for_right_caption(page, cap: dict) -> Optional[Tuple[float, flo
     return sanitize_figure_region(clean, words, box, page_w, page_h)
 
 
-def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
+def _caption_page_indices(pdf_path, required_keys, max_pages=None):
+    """Scan text in PDFium before expensive vector/layout interpretation.
+
+    Scan the whole source for *every* occurrence of a requested key, preserving
+    ambiguity checks. If text cannot account for all keys, keep the original
+    full-layout fallback rather than assuming the missing figures do not exist.
+    """
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(str(pdf_path))
+    try:
+        limit = min(max_pages, len(document)) if max_pages else len(document)
+        indices, found = set(), set()
+        for index in range(limit):
+            page = document[index]
+            try:
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_bounded() or ''
+                finally:
+                    textpage.close()
+                for match in _CAPTION_SCAN_RE.finditer(text):
+                    key = (match.group(2), bool(re.search(r'extended|sup', match.group(1), re.I)))
+                    if key in required_keys:
+                        indices.add(index)
+                        found.add(key)
+            finally:
+                page.close()
+        return indices if found == set(required_keys) else None
+    finally:
+        document.close()
+
+
+def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, required_keys=None):
     """返回所有独立图号/页码/裁框候选；真实同号冲突交给质量闸拦截。"""
     import pdfplumber
 
     out = []
     seen = set()
+    indices = None
+    if required_keys:
+        try:
+            indices = _caption_page_indices(pdf_path, required_keys, max_pages)
+        except Exception:
+            logger.warning('快速题注扫描失败，保留完整布局解析', exc_info=True)
     with pdfplumber.open(pdf_path) as pdf:
         limit = min(max_pages, len(pdf.pages)) if max_pages else len(pdf.pages)
         for idx in range(limit):
+            if indices is not None and idx not in indices:
+                continue
             page = pdf.pages[idx]
             page_w, page_h = float(page.width), float(page.height)
             lines = _group_lines(page)
@@ -250,7 +296,7 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None):
                 num = re.sub(r"[^0-9]", "", m.group(2))
                 is_ext = bool(re.search(r"extended|sup", m.group(1), re.I))
                 key = (num, is_ext)
-                if not num:
+                if not num or (required_keys and key not in required_keys):
                     continue
                 figure_idx = idx
                 cap_gfx = _without_caption_backgrounds(page, cap, gfx)
@@ -299,6 +345,7 @@ def _version_path(out: Path) -> Path:
 
 def extract_figures_by_caption(
     pdf_path: str, out_dir: str, *, max_pages: Optional[int] = None, use_cache: bool = True,
+    required_keys=None,
 ) -> List[Figure]:
     """题注锚定抽图主入口：找图框 → 渲染裁剪 → List[Figure]（label=图号，喂 match_figure）。
 
@@ -308,11 +355,17 @@ def extract_figures_by_caption(
     mani = _manifest(out)
     if use_cache and mani.exists() and _read_version(out) == _CAPTION_VERSION:
         try:
-            return [Figure(**d) for d in json.loads(mani.read_text(encoding="utf-8"))]
+            cached = [Figure(**d) for d in json.loads(mani.read_text(encoding="utf-8"))]
+            if not required_keys:
+                # A selective cache is not proof of a complete-document scan.
+                if not (out / '.caption_required_keys.json').exists():
+                    return cached
+            elif set(required_keys) <= {(f.label, f.is_extended) for f in cached}:
+                return [f for f in cached if (f.label, f.is_extended) in required_keys]
         except Exception:  # noqa: BLE001
             pass
 
-    boxes = find_figure_boxes(pdf_path, max_pages)
+    boxes = find_figure_boxes(pdf_path, max_pages, required_keys=required_keys)
     if not boxes:
         return []
     out.mkdir(parents=True, exist_ok=True)
@@ -339,6 +392,11 @@ def extract_figures_by_caption(
         except Exception as exc:  # noqa: BLE001 - 单图失败不阻断
             logger.warning("题注图%s(p%d)裁剪失败：%s", num, idx + 1, exc)
     _write_manifest(mani, figs)
+    selection = out / '.caption_required_keys.json'
+    if required_keys:
+        selection.write_text(json.dumps(sorted(required_keys)), encoding='utf-8')
+    else:
+        selection.unlink(missing_ok=True)
     logger.info("题注锚定抽到 %d 张图：%s", len(figs), sorted(f.label for f in figs))
     return figs
 

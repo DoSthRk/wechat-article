@@ -237,7 +237,7 @@ def figure_crop_words(page) -> list:
 
 
 def sanitize_figure_region(elements: Iterable[Mapping], words: Iterable[Mapping],
-                           region: Box, page_w: float, page_h: float) -> Box:
+                           region: Box, page_w: float, page_h: float, *, text_bounds=None) -> Box:
     """Remove identified page headers as whole objects, then refit all four edges.
 
     Unlike the old first-gap heuristic this handles stacked citation/logo bands.
@@ -248,7 +248,7 @@ def sanitize_figure_region(elements: Iterable[Mapping], words: Iterable[Mapping]
     elements, words = list(elements), list(words)
     header = publisher_header_bottom(words, page_h)
     x0, top, x1, bottom = region
-    if not header:
+    if not header and text_bounds is None:
         return region
 
     # Include outlines/boxes surrounding the identified text. A scientific image
@@ -278,12 +278,15 @@ def sanitize_figure_region(elements: Iterable[Mapping], words: Iterable[Mapping]
     new_top = min(float(e['top']) for e in kept)
     # Text outside the graphics union can be the panel label or y-axis title.
     # Only include the figure band; caption text below the input box stays out.
+    text_top, text_bottom = text_bounds if text_bounds is not None else (0, bottom)
+    reach = 24 if text_bounds is not None else 12
     content = kept + [w for w in words
-        if float(w['top']) > header + 1
-        and float(w['bottom']) >= new_top - 12
-        and float(w['top']) < bottom
+        if float(w['top']) > max(header + 1, text_top)
+        and float(w['bottom']) >= new_top - reach
+        and float(w['top']) < min(bottom + (24 if text_bounds is not None else 0), text_bottom)
+        and (text_bounds is None or float(w['bottom']) <= text_bottom)
         and float(w['x1']) >= x0 - 24 and float(w['x0']) <= x1 + 24]
-    pad = 2.0
+    pad = 2.0 if header else 0.0
     result = (max(0.0, min(float(e['x0']) for e in content) - pad),
               max(header + 1, min(float(e['top']) for e in content) - pad),
               min(page_w, max(float(e['x1']) for e in content) + pad),

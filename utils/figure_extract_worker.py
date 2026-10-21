@@ -23,11 +23,11 @@ def _parse_max_pages(raw: str) -> Optional[int]:
     return value if value > 0 else None
 
 
-def _extract(kind: str, pdf_path: str, out_dir: str, max_pages: Optional[int]):
+def _extract(kind: str, pdf_path: str, out_dir: str, max_pages: Optional[int], required_keys=None):
     if kind == "caption":
         from utils.caption_figures import extract_figures_by_caption
 
-        return extract_figures_by_caption(pdf_path, out_dir, max_pages=max_pages)
+        return extract_figures_by_caption(pdf_path, out_dir, max_pages=max_pages, required_keys=required_keys)
     if kind == "legend":
         from utils.pdf_figure_extractor import extract_figures_from_legend_pages
 
@@ -45,19 +45,20 @@ def _extract(kind: str, pdf_path: str, out_dir: str, max_pages: Optional[int]):
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) != 5:
+    if len(argv) not in (5, 6):
         print(
             "usage: python -m utils.figure_extract_worker "
-            "<caption|legend|vision|heuristic> <pdf> <out_dir> <max_pages> <result_json>",
+            "<caption|legend|vision|heuristic> <pdf> <out_dir> <max_pages> <result_json> [required_keys_json]",
             file=sys.stderr,
         )
         return 2
-    kind, pdf_path, out_dir, max_pages_raw, result_json = argv
+    kind, pdf_path, out_dir, max_pages_raw, result_json = argv[:5]
+    required_keys = {(str(label), bool(extended)) for label, extended in json.loads(argv[5])} if len(argv) == 6 else None
     load_dotenv()
     result_path = Path(result_json)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        figs = _extract(kind, pdf_path, out_dir, _parse_max_pages(max_pages_raw))
+        figs = _extract(kind, pdf_path, out_dir, _parse_max_pages(max_pages_raw), required_keys=required_keys)
     except UnsafeFigureCrop as exc:
         result_path.write_text(json.dumps({"error": "unsafe_figure_crop", "message": str(exc)}), encoding="utf-8")
         return 3

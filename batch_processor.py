@@ -736,6 +736,8 @@ def _run_pdf_figure_worker(
         str(_fig_max_pages(job) or ""),
         str(result_path),
     ]
+    if kind == 'caption' and job.extra.get('_required_figure_keys'):
+        cmd.append(json.dumps(job.extra['_required_figure_keys']))
     try:
         proc = subprocess.run(
             cmd,
@@ -1077,6 +1079,10 @@ def _resolve_job_figures(
         kind for kind in planned_figure_strategies(signals, vision_available)
         if kind != "caption" or caption_available
     ]
+    # Narrow layout parsing to all occurrences of the requested captions. Do not
+    # spend the worker's budget interpreting unreferenced vector-heavy appendices.
+    if required_keys:
+        job = replace(job, extra={**job.extra, '_required_figure_keys': sorted(required_keys)})
     budget = _figure_total_budget_seconds()
     started = time.monotonic()
     for kind in strategies:
