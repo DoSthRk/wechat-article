@@ -60,14 +60,15 @@ class ImageReviewApiTests(unittest.TestCase):
         self.db.engine.dispose()
         self.temporary.cleanup()
 
-    def test_authenticated_review_page_has_labeled_form_and_no_implicit_approval(self):
+    def test_authenticated_review_page_has_one_button_and_no_form_or_implicit_approval(self):
         response = self.client.get('/image-review/paper', headers=self.headers)
         self.assertEqual(response.status_code, 200)
         text = response.get_data(as_text=True)
-        self.assertIn('确认并继续发布', text)
-        self.assertIn('仅确认配图', text)
-        self.assertIn('aria-describedby="pages-help pages-error"', text)
-        self.assertNotIn('type="checkbox" checked', text)
+        self.assertIn('图片正确，确认并发布', text)
+        self.assertEqual(text.count('<button '), 1)
+        self.assertNotIn('<input', text)
+        self.assertNotIn('<textarea', text)
+        self.assertNotIn('仅确认配图', text)
 
     def test_direct_cookie_can_view_but_cannot_approve_continue_or_revoke(self):
         self.client.get('/aav')
@@ -81,7 +82,7 @@ class ImageReviewApiTests(unittest.TestCase):
             response = self.client.get(self.api)
             self.assertEqual(response.status_code, 200)
             self.assertFalse(response.get_json()['can_approve'])
-            for action in ('approve', 'continue', 'revoke'):
+            for action in ('confirm', 'approve', 'continue', 'revoke'):
                 with self.subTest(action=action):
                     self.assertEqual(self.client.post(f'{self.api}/{action}', json=self.body).status_code, 401)
             approve.assert_not_called()
@@ -110,7 +111,7 @@ class ImageReviewApiTests(unittest.TestCase):
             routes = [('GET', self.api), ('GET', '/image-review/paper'),
                       ('GET', f'{self.api}/workflow/123456789a'),
                       ('GET', f'{self.api}/assets/{self.bundle_id}/cover.jpg')]
-            routes += [('POST', f'{self.api}/{action}') for action in ('prepare', 'approve', 'continue', 'revoke')]
+            routes += [('POST', f'{self.api}/{action}') for action in ('prepare', 'confirm', 'approve', 'continue', 'revoke')]
             for method, route in routes:
                 with self.subTest(route=route):
                     self.assertEqual(self.client.open(route, method=method, json=self.body,
@@ -135,6 +136,44 @@ class ImageReviewApiTests(unittest.TestCase):
         workflow.assert_called_once_with('images', [{'job_id': 'paper', 'lang': 'zh'}],
                                         owner_line='aav', owner_username='hqq')
         approve.assert_not_called()
+
+    def test_single_confirmation_needs_no_paper_fields_and_always_continues_pinned_bundle(self):
+        with patch('utils.image_packages.confirm_package', return_value={'bundle_id': self.bundle_id, 'status': 'approved'}) as confirm, patch(
+                'utils.image_packages.require_approved_package') as require, patch(
+                'utils.workflow_runner.start_workflow', return_value={'ok': True, 'run_id': 'publish'}) as workflow:
+            response = self.client.post(f'{self.api}/confirm', headers=self.headers,
+                json={'package_id': self.bundle_id, 'images_correct': True, 'reviewer': 'forged'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['approved'])
+        self.assertTrue(response.get_json()['continuation']['ok'])
+        confirm.assert_called_once_with(self.source_job, self.bundle_id, 'hqq', True, expected_job_pk=self.job_pk)
+        require.assert_called_once_with(self.source_job, self.bundle_id, expected_job_pk=self.job_pk)
+        workflow.assert_called_once_with('review_publish', [{'job_id': 'paper', 'lang': 'zh',
+            'expected_package_id': self.bundle_id}], owner_line='aav', owner_username='hqq')
+
+    def test_single_confirmation_requires_boolean_decision_and_rejects_stale_packages(self):
+        for value in (False, None, 1, 'true'):
+            with self.subTest(value=value), patch('utils.image_packages.confirm_package') as confirm:
+                response = self.client.post(f'{self.api}/confirm', headers=self.headers,
+                    json={'package_id': self.bundle_id, 'images_correct': value})
+                self.assertEqual(response.status_code, 400)
+                confirm.assert_not_called()
+        with patch('utils.image_packages.confirm_package', side_effect=ImagePackageError('图片包已过期')), patch(
+                'utils.workflow_runner.start_workflow') as workflow:
+            response = self.client.post(f'{self.api}/confirm', headers=self.headers,
+                json={'package_id': self.bundle_id, 'images_correct': True})
+        self.assertEqual(response.status_code, 409)
+        workflow.assert_not_called()
+
+    def test_single_confirmation_keeps_saved_decision_when_worker_cannot_start(self):
+        with patch('utils.image_packages.confirm_package', return_value={'bundle_id': self.bundle_id, 'status': 'approved'}), patch(
+                'utils.image_packages.require_approved_package'), patch(
+                'utils.workflow_runner.start_workflow', side_effect=RuntimeError('private-error')):
+            response = self.client.post(f'{self.api}/confirm', headers=self.headers,
+                json={'package_id': self.bundle_id, 'images_correct': True})
+        self.assertTrue(response.get_json()['approved'])
+        self.assertFalse(response.get_json()['continuation']['ok'])
+        self.assertNotIn('private-error', response.get_data(as_text=True))
 
     def test_prepare_worker_error_is_recoverable_json_without_secret(self):
         with patch('utils.workflow_runner.start_workflow', side_effect=RuntimeError('private-token')):

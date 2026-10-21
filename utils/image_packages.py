@@ -32,6 +32,7 @@ from utils.wechat_html import find_image_placeholders
 logger = setup_logger('image_packages')
 SCHEMA_VERSION = 1
 REVIEW_POLICY_VERSION = 1
+SINGLE_CONFIRMATION_MODE = 'images_correct_v1'
 CONFIRMATIONS = ('source', 'number', 'completeness', 'cover')
 _ID = re.compile(r'^[0-9a-f]{64}$')
 
@@ -337,12 +338,22 @@ def _get(job, package_id=None, *, decode_previews=True):
                 raise ImagePackageError('批准记录与当前图片包不匹配')
             result['approval'] = approval
             if approval.get('decision') == 'approved':
-                if (not manifest.get('paper_scope') or approval.get('paper_scope') != manifest['paper_scope']
-                        or approval.get('review_policy_version') != REVIEW_POLICY_VERSION
-                        or any(approval.get('confirmations', {}).get(k) is not True for k in CONFIRMATIONS)):
-                    raise ImagePackageError('图片包缺少完整来源范围或审核确认')
-                if approval.get('figure_confirmations') is not None:
-                    _figure_confirmations(approval['figure_confirmations'], manifest)
+                if approval.get('review_policy_version') != REVIEW_POLICY_VERSION:
+                    raise ImagePackageError('图片包审核策略版本不匹配')
+                mode = approval.get('confirmation_mode')
+                if mode == SINGLE_CONFIRMATION_MODE:
+                    if approval.get('images_correct') is not True:
+                        raise ImagePackageError('图片包缺少明确的图片正确确认')
+                elif mode is None:
+                    # Preserve detailed historical approvals without pretending
+                    # the single-button reviewer supplied their old fields.
+                    if (not manifest.get('paper_scope') or approval.get('paper_scope') != manifest['paper_scope']
+                            or any(approval.get('confirmations', {}).get(k) is not True for k in CONFIRMATIONS)):
+                        raise ImagePackageError('图片包缺少完整来源范围或审核确认')
+                    if approval.get('figure_confirmations') is not None:
+                        _figure_confirmations(approval['figure_confirmations'], manifest)
+                else:
+                    raise ImagePackageError('图片包审核确认方式无效')
                 result['status'] = 'approved'
             else:
                 result.update(status='revoked', reason='此图片包的批准已撤销，不能发布')
@@ -578,6 +589,30 @@ def approve_package(job, package_id, reviewer, confirmations, paper_scope, note=
         review_id = _save_review(job, record)
         _set_state(job, bundle_id=final_id, approval_id=review_id, status='approved')
         return _get(job, final_id)
+
+
+def confirm_package(job, package_id, reviewer, images_correct, *, expected_job_pk):
+    """Record the human's single image-correctness decision on this exact bundle."""
+    with version_lock(job.job_id, 'image_job'):
+        reviewer = str(reviewer or '').strip()
+        if not reviewer or images_correct is not True:
+            raise ImagePackageError('请由已登录的审核人明确确认图片正确')
+        package = _get(job, package_id)
+        if package['status'] not in {'needs_review', 'revoked', 'approved'}:
+            raise ImagePackageError(package['reason'] or '当前图片包不能确认，请联系负责人处理')
+        manifest = package['manifest']
+        if (type(expected_job_pk) is not int or type(manifest.get('job_pk')) is not int
+                or manifest['job_pk'] != expected_job_pk):
+            raise ImagePackageError('图片包不属于当前数据库文章版本，不能确认')
+        if package['status'] == 'approved':
+            return package
+        record = {'job_id': job.job_id, 'bundle_id': package_id, 'candidate_id': package_id,
+                  'decision': 'approved', 'reviewer': reviewer, 'reviewed_at': _now(),
+                  'confirmation_mode': SINGLE_CONFIRMATION_MODE, 'images_correct': True,
+                  'review_policy_version': REVIEW_POLICY_VERSION}
+        review_id = _save_review(job, record)
+        _set_state(job, bundle_id=package_id, approval_id=review_id, status='approved')
+        return _get(job, package_id)
 
 
 def revoke_package(job, package_id, reviewer, note=''):

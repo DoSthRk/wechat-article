@@ -585,6 +585,30 @@ def create_app(testing: bool = False) -> Flask:
         except Exception as exc:
             return _review_failure(exc)
 
+    @app.post('/api/image-review/<job_id>/confirm')
+    def api_image_review_confirm(job_id: str):
+        from utils.image_packages import confirm_package, require_approved_package
+        from utils.blog_task_lock import version_lock
+        from utils.workflow_runner import start_review_publication
+        reviewer = _real_reviewer()
+        job, job_pk, owner = _review_job(job_id)
+        data = _review_data()
+        bundle_id = _package_id(data.get('package_id'))
+        if data.get('images_correct') is not True:
+            return jsonify({'ok': False, 'error': '请确认图片正确后再发布。'}), 400
+        try:
+            with version_lock(job_id, 'image_job'):
+                approved = confirm_package(job, bundle_id, reviewer, True, expected_job_pk=job_pk)
+                require_approved_package(job, bundle_id, expected_job_pk=job_pk)
+                try:
+                    continuation = start_review_publication(job_id, bundle_id, owner_line=owner, owner_username=reviewer)
+                except Exception:
+                    continuation = {'ok': False, 'error': '图片确认已保存，但发布未启动。请点击同一按钮重试。'}
+            return jsonify({'ok': True, 'approved': True, 'bundle_id': approved['bundle_id'],
+                            'status': 'approved', 'continuation': continuation})
+        except Exception as exc:
+            return _review_failure(exc)
+
     @app.post('/api/image-review/<job_id>/continue')
     def api_image_review_continue(job_id: str):
         from utils.image_packages import get_package, require_approved_package

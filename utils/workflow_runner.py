@@ -211,3 +211,25 @@ def review_workflow_status(job_id: str, run_id: str) -> Dict[str, Any]:
         if not starting and not _pid_running(state.get('pid')):
             state.update(status='failed', errors=[*state.get('errors', []), '任务进程意外中断，请重新生成候选或核对发布状态'])
     return state
+
+
+def start_review_publication(job_id: str, bundle_id: str, *, owner_line: str, owner_username: str):
+    """Reuse this bundle's accepted/successful task when the human resubmits.
+
+    The caller holds the image_job lock, so parallel confirmations for the same
+    article cannot both reach start_workflow. Failed/interrupted runs may retry.
+    """
+    for path in sorted(RUN_DIR.glob('*.state.json'), reverse=True):
+        run_id = path.name.removesuffix('.state.json')
+        state = review_workflow_status(job_id, run_id)
+        if (state.get('stage') != 'review_publish' or state.get('owner_line') != owner_line
+                or state.get('status') not in {'running', 'done', 'completed'} or state.get('failed')):
+            continue
+        try:
+            selections = json.loads((RUN_DIR / f'{run_id}.selections.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if selections[0].get('expected_package_id') == bundle_id:
+            return {'ok': True, 'run_id': run_id, 'stage': 'review_publish', 'total': 1, 'reused': True}
+    return start_workflow('review_publish', [{'job_id': job_id, 'lang': 'zh', 'expected_package_id': bundle_id}],
+                          owner_line=owner_line, owner_username=owner_username)

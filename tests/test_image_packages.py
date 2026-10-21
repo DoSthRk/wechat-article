@@ -272,6 +272,48 @@ class ImagePackageTests(unittest.TestCase):
         with self.assertRaises(ip.ImagePackageError):
             ip.approve_package(self.job, candidate['bundle_id'], 'reviewer', dict.fromkeys(ip.CONFIRMATIONS, 'true'), self.scope)
 
+    def test_single_confirmation_is_bound_to_bundle_without_fabricated_scope_or_checks(self):
+        candidate = self.build()
+        approved = ip.confirm_package(self.job, candidate['bundle_id'], 'human', True, expected_job_pk=7)
+        self.assertEqual(approved['status'], 'approved')
+        self.assertEqual(approved['bundle_id'], candidate['bundle_id'])
+        self.assertEqual(approved['approval']['confirmation_mode'], ip.SINGLE_CONFIRMATION_MODE)
+        self.assertIs(approved['approval']['images_correct'], True)
+        self.assertIsNone(approved['manifest']['paper_scope'])
+        for field in ('paper_scope', 'confirmations', 'figure_confirmations'):
+            self.assertNotIn(field, approved['approval'])
+        self.assertEqual(ip.require_approved_package(self.job, approved['bundle_id'], expected_job_pk=7).bundle_id,
+                         candidate['bundle_id'])
+        again = ip.confirm_package(self.job, candidate['bundle_id'], 'other-human', True, expected_job_pk=7)
+        self.assertEqual(again['approval'], approved['approval'])
+
+    def test_single_confirmation_rejects_missing_decision_wrong_job_and_changed_source(self):
+        candidate = self.build()
+        for decision in (False, None, 1, 'true'):
+            with self.subTest(decision=decision), self.assertRaises(ip.ImagePackageError):
+                ip.confirm_package(self.job, candidate['bundle_id'], 'human', decision, expected_job_pk=7)
+        for job_pk in (8, None, True, '7', 7.0):
+            with self.subTest(job_pk=job_pk), self.assertRaises(ip.ImagePackageError):
+                ip.confirm_package(self.job, candidate['bundle_id'], 'human', True, expected_job_pk=job_pk)
+        with self.assertRaises(ip.ImagePackageError):
+            ip.confirm_package(self.job, candidate['bundle_id'], '', True, expected_job_pk=7)
+        self.pdf.write_bytes(b'changed PDF')
+        with self.assertRaises(ip.ImagePackageError):
+            ip.confirm_package(self.job, candidate['bundle_id'], 'human', True, expected_job_pk=7)
+
+    def test_single_confirmation_still_invalidates_on_asset_change_and_revocation(self):
+        candidate = self.build()
+        approved = ip.confirm_package(self.job, candidate['bundle_id'], 'human', True, expected_job_pk=7)
+        revoked = ip.revoke_package(self.job, approved['bundle_id'], 'human')
+        self.assertEqual(revoked['status'], 'revoked')
+        with self.assertRaises(ip.ImagePackageError):
+            ip.require_approved_package(self.job)
+        ip.confirm_package(self.job, candidate['bundle_id'], 'human', True, expected_job_pk=7)
+        package = ip.require_approved_package(self.job)
+        Path(package.figures[0].image_path).write_bytes(b'changed image')
+        with self.assertRaises(ip.ImagePackageError):
+            ip.require_approved_package(self.job)
+
     def test_per_figure_confirmations_match_package_and_are_preserved(self):
         candidate = self.build()
         invalid_values = [{}, {'main:1': True}, {'main:1': True, 'main:2': False},

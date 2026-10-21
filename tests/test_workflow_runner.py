@@ -8,6 +8,27 @@ from utils import workflow_runner
 
 
 class WorkflowRunnerTests(unittest.TestCase):
+    def test_single_button_reuses_exact_successful_bundle_but_retries_failures(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(workflow_runner, 'RUN_DIR', Path(temp)), patch.object(
+                workflow_runner, 'start_workflow', return_value={'ok': True, 'run_id': 'new'}) as start:
+            run_id, bundle = '123456789a', 'a'*64
+            path = Path(temp) / f'{run_id}.state.json'
+            state = {'run_id': run_id, 'stage': 'review_publish', 'status': 'done', 'owner_line': 'aav', 'failed': 0}
+            workflow_runner._atomic_write(path, state)
+            (Path(temp) / f'{run_id}.selections.json').write_text(json.dumps([
+                {'job_id': 'paper', 'lang': 'zh', 'expected_package_id': bundle}]))
+            result = workflow_runner.start_review_publication('paper', bundle, owner_line='aav', owner_username='human')
+            self.assertTrue(result['reused'])
+            self.assertEqual(result['run_id'], run_id)
+            start.assert_not_called()
+            workflow_runner.start_review_publication('paper', 'b'*64, owner_line='aav', owner_username='human')
+            self.assertEqual(start.call_count, 1)
+            workflow_runner._atomic_write(path, {**state, 'status': 'failed', 'failed': 1})
+            workflow_runner.start_review_publication('paper', bundle, owner_line='aav', owner_username='human')
+            self.assertEqual(start.call_count, 2)
+            workflow_runner.start_review_publication('other', bundle, owner_line='aav', owner_username='human')
+            self.assertEqual(start.call_count, 3)
+
     def test_review_status_reads_exact_run_and_binds_job(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(workflow_runner, 'RUN_DIR', Path(temp)):
             run_id = '123456789a'
