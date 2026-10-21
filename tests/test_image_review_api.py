@@ -34,7 +34,9 @@ class ImageReviewApiTests(unittest.TestCase):
         ]
         for item in self.patches:
             item.start()
-        self.client = appmod.create_app(testing=False).test_client()
+        application = appmod.create_app(testing=False)
+        application.config['TRUST_PROXY_IDENTITY'] = True  # Simulate the authenticated gateway in these boundary tests.
+        self.client = application.test_client()
         self.headers = {'X-GM-LAB-Username': 'hqq'}
         self.bundle_id = 'a' * 64
         self.final_id = 'b' * 64
@@ -70,7 +72,7 @@ class ImageReviewApiTests(unittest.TestCase):
     def test_direct_cookie_can_view_but_cannot_approve_continue_or_revoke(self):
         self.client.get('/aav')
         page = self.client.get('/image-review/paper').get_data(as_text=True)
-        self.assertIn('https://article.lab.genemedi.cn/image-review/paper', page)
+        self.assertIn('/auth/start?next=/image-review/paper', page)
         self.assertIn('默认用户名不代表已登录', page)
         with patch('utils.image_packages.get_package', return_value=self.package), patch(
                 'utils.image_packages.approve_package') as approve, patch(

@@ -16,10 +16,14 @@ from __future__ import annotations
 import os
 import re
 import sys
+import secrets
+import time
 from pathlib import Path
+from datetime import timedelta
+from urllib.parse import urlencode
 
 import markdown as md_lib
-from flask import Flask, abort, jsonify, make_response, redirect, render_template, request, send_file, url_for
+from flask import Flask, abort, jsonify, make_response, redirect, render_template, request, send_file, session, url_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -49,13 +53,58 @@ def create_app(testing: bool = False) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
+    from utils import lab_sso
+    app.secret_key = 'article-test-session-key' if testing else lab_sso.session_secret()
+    app.config.update(SESSION_COOKIE_NAME='gm_article_session', SESSION_COOKIE_HTTPONLY=True,
+                      SESSION_COOKIE_SAMESITE='Lax', PERMANENT_SESSION_LIFETIME=timedelta(hours=1),
+                      TRUST_PROXY_IDENTITY=testing)
+
+    def _proxy_username():
+        # Direct LAN clients cannot establish an audit identity by forging a header.
+        if app.config['TRUST_PROXY_IDENTITY']:
+            return str(request.headers.get('X-GM-LAB-Username') or '').strip().lower()
+        return ''
+
+    def _review_identity():
+        return lab_sso.username(session) or _proxy_username()
+
+    @app.get('/auth/start')
+    def article_auth_start():
+        state = secrets.token_urlsafe(32)
+        session['lab_login'] = {'state': state, 'expires_at': time.time() + 300,
+                                'next': lab_sso.safe_next(request.args.get('next'))}
+        response = redirect(lab_sso.LAB_URL + '/sso/article?' + urlencode({'state': state}))
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        return response
+
+    @app.get('/auth/callback')
+    def article_auth_callback():
+        pending = session.pop('lab_login', None)
+        state, ticket = request.args.get('state', ''), request.args.get('ticket', '')
+        if (not isinstance(pending, dict) or pending.get('expires_at', 0) <= time.time()
+                or not secrets.compare_digest(str(pending.get('state', '')), state)
+                or not 32 <= len(ticket) <= 128):
+            abort(400, description='登录状态已失效，请重新从 GM-LAB 进入')
+        try:
+            identity = lab_sso.exchange(ticket)
+        except Exception:
+            abort(502, description='GM-LAB 登录核验未完成，请重新登录后重试')
+        session.clear()
+        session['lab_identity'] = identity
+        session.permanent = True
+        _line_access()
+        response = redirect(lab_sso.safe_next(pending.get('next')))
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        return response
 
     def _direct_line() -> str:
         line_id = str(request.cookies.get(_DIRECT_LINE_COOKIE) or "").strip().lower()
         return line_id if line_id in _DIRECT_LINE_USERS else ""
 
     def _username() -> str:
-        username = str(request.headers.get("X-GM-LAB-Username") or "").strip().lower()
+        username = _review_identity()
         if not username:
             username = _DIRECT_LINE_USERS.get(_direct_line(), "")
         if testing and not username:
@@ -142,7 +191,7 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/")
     def index():
-        if not request.headers.get("X-GM-LAB-Username") and not _direct_line() and not testing:
+        if not _review_identity() and not _direct_line() and not testing:
             return render_template("line_select.html", lines=_LINE_LABELS)
         return redirect(url_for("operator"))
 
@@ -186,7 +235,7 @@ def create_app(testing: bool = False) -> Flask:
             username=username,
             line_id=line_id,
             line_label=_LINE_LABELS.get(line_id, "全部业务线"),
-            direct_mode=bool(_direct_line() and not request.headers.get("X-GM-LAB-Username")),
+            direct_mode=bool(_direct_line() and not _review_identity()),
         )
 
     @app.get("/admin")
@@ -383,7 +432,7 @@ def create_app(testing: bool = False) -> Flask:
 
     def _real_reviewer() -> str:
         # 业务线快捷 cookie 只用于查看，不能成为审批身份。
-        if not testing and not str(request.headers.get('X-GM-LAB-Username') or '').strip():
+        if not testing and not _review_identity():
             abort(401)
         return _username()
 
@@ -416,7 +465,7 @@ def create_app(testing: bool = False) -> Flask:
         bundle_id = package.get('bundle_id')
         payload = {'ok': True, 'job_id': job_id, 'bundle_id': bundle_id,
                    'status': package.get('status') or 'missing', 'reason': package.get('reason') or '',
-                   'can_approve': bool(str(request.headers.get('X-GM-LAB-Username') or '').strip()) or testing,
+                   'can_approve': bool(_review_identity()) or testing,
                    'reviewer': _username(), 'approval': package.get('approval'),
                    'paper_scope': manifest.get('paper_scope') or {},
                    'source_binding': (manifest.get('source') or {}).get('binding'),
@@ -460,8 +509,8 @@ def create_app(testing: bool = False) -> Flask:
     def image_review(job_id: str):
         _review_job(job_id)
         return render_template('image_review.html', job_id=job_id, username=_username(),
-                               review_login_url='https://article.lab.genemedi.cn' + url_for('image_review', job_id=job_id),
-                               can_approve=bool(str(request.headers.get('X-GM-LAB-Username') or '').strip()) or testing)
+                               review_login_url=url_for('article_auth_start', next=url_for('image_review', job_id=job_id)),
+                               can_approve=bool(_review_identity()) or testing)
 
     @app.get('/api/image-review/<job_id>')
     def api_image_review(job_id: str):
