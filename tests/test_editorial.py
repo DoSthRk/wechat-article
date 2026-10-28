@@ -331,7 +331,7 @@ class EditorialTests(unittest.TestCase):
         aav={**admin,'X-Editorial-Line':'aav','X-CSRF-Token':self.csrf}
         self.assertEqual(self.client.get(f'/api/editorial/{other.id}',headers=aav).status_code,403)
         self.assertEqual(self.client.get(f'/api/editorial/tasks/{task["id"]}',headers=aav).status_code,403)
-        for action in ('prepare','publish','crop','restore'):
+        for action in ('prepare','publish','crop','restore','inbox-archive','inbox-restore'):
             self.assertEqual(self.client.post(f'/api/editorial/{other.id}/{action}',headers=aav,json={}).status_code,403)
         self.assertEqual(self.client.post('/api/editorial/upload',headers=aav,data={'line':'solidex'}).status_code,403)
         self.assertFalse(self.store.tasks('publish'))
@@ -344,6 +344,51 @@ class EditorialTests(unittest.TestCase):
             self.assertEqual(self.client.get('/'+line,headers=self.headers).location,'/workbench/'+line)
         self.assertEqual(self.client.get('/image-review/paper',headers=self.headers).location,f'/workbench/aav#edit/{self.pk}')
         self.assertIn('next=/workbench/solidex',self.client.get('/workbench/solidex').location)
+
+    def test_remove_and_restore_inbox_preserves_all_article_assets(self):
+        originals={p:p.read_bytes() for p in (self.pdf,self.output/'article.md',self.output/'meta.json')}
+        history=self.store.history(self.pk);head=self.store.head(self.pk)
+        body={'expected_revision':head['revision']}
+        with patch('utils.editorial_api.kick') as kick:
+            response=self.client.post(f'/api/editorial/{self.pk}/inbox-archive',headers=self.write_headers,json=body)
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertTrue(self.client.get('/api/editorial/articles',headers=self.headers).json['articles'][0]['archived'])
+            with self.assertRaises(Conflict):self.save()
+            with self.assertRaises(Conflict):self.store.enqueue('prepare',self.pk,'',{'owner':'hqq'})
+            restored=self.client.post(f'/api/editorial/{self.pk}/inbox-restore',headers=self.write_headers,json=body)
+            self.assertEqual(restored.status_code,200)
+            kick.assert_not_called()
+        self.assertFalse(self.store.archived_jobs('aav'))
+        self.assertEqual(self.store.history(self.pk),history)
+        self.assertEqual(self.store.head(self.pk),head)
+        for path,original in originals.items():self.assertEqual(path.read_bytes(),original)
+        with self.store.connection() as conn:
+            events=conn.execute('SELECT active,author,snapshot FROM inbox_archive_events ORDER BY created').fetchall()
+        self.assertEqual([(r['active'],r['author']) for r in events],[(1,'hqq'),(0,'hqq')])
+        self.assertEqual(json.loads(events[0]['snapshot'])['job_id'],'paper')
+
+    def test_inbox_remove_requires_identity_csrf_and_current_revision(self):
+        url=f'/api/editorial/{self.pk}/inbox-archive'
+        body={'expected_revision':self.initial['revision']}
+        self.assertEqual(self.client.post(url,headers=self.headers,json=body).status_code,403)
+        self.save('Another writer changed this')
+        self.assertEqual(self.client.post(url,headers=self.write_headers,json=body).status_code,409)
+        self.assertFalse(self.store.archived_jobs('aav'))
+
+    def test_inbox_remove_never_removes_publication_records_or_active_tasks(self):
+        task=self.task()
+        response=self.client.post(f'/api/editorial/{self.pk}/inbox-archive',headers=self.write_headers,json={'expected_revision':task['revision']})
+        self.assertEqual(response.status_code,409)
+        with self.assertRaises(Conflict):self.store.set_inbox_archived(self.pk,'aav',True,expected=task['revision'],author='hqq',snapshot={})
+        self.assertFalse(self.store.archived_jobs('aav'))
+        self.assertEqual(self.store.task(task['id'])['status'],'queued')
+
+    def test_inbox_remove_legacy_published_item_is_rejected(self):
+        self.db.upsert_distribution(self.pk,'genemedi_blog',account='genemedi',lang='zh',publish_status='published',external_url='https://example.test/published',external_id='untouched')
+        with self.store.connection(write=True) as conn:conn.execute('DELETE FROM heads WHERE job_pk=?',(self.pk,))
+        response=self.client.post(f'/api/editorial/{self.pk}/inbox-archive',headers=self.write_headers,json={'expected_revision':None})
+        self.assertEqual(response.status_code,409)
+        self.assertEqual(self.db.get_distribution(self.pk,'genemedi_blog',account='genemedi',lang='zh').external_id,'untouched')
 
     def test_channel_failure_does_not_repeat_successes(self):
         task=self.task();workflow=Mock()

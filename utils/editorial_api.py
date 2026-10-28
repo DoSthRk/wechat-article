@@ -57,6 +57,12 @@ def register(app, reviewer, access, has_identity):
         if not isinstance(value, dict): raise EditorialError('请求必须是 JSON 对象')
         return value
 
+    def is_inbox(item, latest, head):
+        generating=latest and latest['kind']=='prepare' and latest['status'] in {'queued','running','failed'}
+        published=any(d.get('external_url') and d.get('publish_status')=='published' for d in item.get('distributions',[]))
+        record=(latest and latest['kind']=='publish') or (not head and published)
+        return not generating and not record
+
     @app.errorhandler(EditorialError)
     def error(exc):
         return jsonify(ok=False, error=str(exc), conflict=isinstance(exc, Conflict)), 409 if isinstance(exc, Conflict) else 400
@@ -83,6 +89,7 @@ def register(app, reviewer, access, has_identity):
         identity(); line_filter = selected_line(); db = get_db_manager(); store = Store()
         records, _ = db.list_article_overview(page_size=10000)
         result = []; seen = set(); tasks = store.tasks()
+        archived = store.archived_jobs(line_filter)
         for item in records:
             if item['job_id'] in seen: continue
             seen.add(item['job_id'])
@@ -98,9 +105,30 @@ def register(app, reviewer, access, has_identity):
             published = any(d['external_url'] and d['publish_status']=='published' for d in item['distributions'])
             result.append({'job_pk':pk,'job_id':item['job_id'],'line':line,'title':title or item['job_id'],
                 'has_article':bool(item['title']), 'revision':head['revision'] if head else None,
+                'archived':pk in archived, 'can_archive':is_inbox(item,latest,head) and pk not in archived,
                 'legacy_published':published, 'distributions':item['distributions'], 'task':latest,
                 'held':item['job_id'] in {'免疫客文章-4-3','免疫客文章-4-4'}})
         return jsonify(ok=True, articles=result)
+
+    @app.post('/api/editorial/<int:pk>/inbox-archive')
+    @app.post('/api/editorial/<int:pk>/inbox-restore')
+    def editorial_inbox_archive(pk):
+        body=data(); db,source=job(pk); store=Store()
+        archived=request.path.endswith('/inbox-archive')
+        records,_=db.list_article_overview(page_size=10000)
+        item=next((r for r in records if r['job_id']==source.job_id),None)
+        if item is None: abort(404)
+        related=[t for t in store.tasks() if t['job_pk']==pk]
+        if archived and not is_inbox(item,related[0] if related else None,store.head(pk)):
+            raise Conflict('仅可移除审核草稿箱中的文章，不能删除生成任务或发布记录')
+        from utils.auto_blog import AutoBlogTask
+        with db.get_session() as conn:
+            if conn.query(AutoBlogTask).filter(AutoBlogTask.job_pk==pk,AutoBlogTask.status.in_(('queued','running'))).first():
+                raise Conflict('旧版发布任务仍在处理此文章，暂不能移出草稿箱')
+        store.set_inbox_archived(pk,source.line,archived,expected=body.get('expected_revision'),
+                                author=identity(),snapshot={'job_pk':pk,'job_id':source.job_id,'title':item['title'],
+                                'revision':body.get('expected_revision'),'line':source.line,'distributions':item['distributions']})
+        return jsonify(ok=True,archived=archived,job_pk=pk)
 
     @app.get('/api/editorial/capabilities')
     def editorial_capabilities():

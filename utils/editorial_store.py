@@ -53,6 +53,12 @@ class Store:
                     created TEXT NOT NULL, updated TEXT NOT NULL,
                     UNIQUE(kind, job_pk, revision));
                 CREATE INDEX IF NOT EXISTS editorial_task_state ON tasks(kind, status);
+                CREATE TABLE IF NOT EXISTS inbox_archives (
+                    job_pk INTEGER PRIMARY KEY, line TEXT NOT NULL, active INTEGER NOT NULL,
+                    snapshot TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS inbox_archive_events (
+                    id TEXT PRIMARY KEY, job_pk INTEGER NOT NULL, active INTEGER NOT NULL,
+                    author TEXT NOT NULL, created TEXT NOT NULL, snapshot TEXT NOT NULL);
             ''')
         os.chmod(self.root / 'editorial.sqlite3', 0o600)
 
@@ -117,6 +123,7 @@ class Store:
         name = self.put(job_pk, encode(payload), '.json')
         revision = name[:-5]
         with self.connection(write=True) as db:
+            self._require_inbox(db, job_pk)
             head = db.execute('SELECT * FROM heads WHERE job_pk=?', (job_pk,)).fetchone()
             if (head['revision'] if head else None) != expected:
                 raise Conflict('另一位同事已保存了新版本。您的修改仍在页面中，请先核对最新版本。')
@@ -131,6 +138,7 @@ class Store:
 
     def enqueue(self, kind: str, job_pk: int, revision: str, payload: dict) -> dict:
         with self.connection(write=True) as db:
+            self._require_inbox(db, job_pk)
             existing = db.execute('SELECT * FROM tasks WHERE kind=? AND job_pk=? AND revision=?', (kind, job_pk, revision)).fetchone()
             if existing: return self._task(existing)
             if kind == 'publish':
@@ -170,6 +178,7 @@ class Store:
             row = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
             if not row: raise EditorialError('任务不存在')
             task = self._task(row)
+            self._require_inbox(db, task['job_pk'])
             if task['status'] not in {'failed', 'partial'}: raise Conflict('此任务不能重试，请先核对当前结果')
             payload = task['payload']
             if task['kind'] == 'publish':
@@ -182,3 +191,28 @@ class Store:
             payload.pop('error', None)
             db.execute("UPDATE tasks SET status='queued',payload=?,updated=? WHERE id=?", (encode(payload).decode(), now(), task_id))
         return self.task(task_id)
+
+    @staticmethod
+    def _require_inbox(db, job_pk):
+        if db.execute('SELECT job_pk FROM inbox_archives WHERE job_pk=? AND active=1',(job_pk,)).fetchone():
+            raise Conflict('此草稿已移出草稿箱，请先恢复后再编辑或发布')
+
+    def archived_jobs(self, line):
+        with self.connection() as db:
+            return {row['job_pk'] for row in db.execute('SELECT job_pk FROM inbox_archives WHERE line=? AND active=1',(line,))}
+
+    def set_inbox_archived(self, job_pk, line, archived, *, expected, author, snapshot):
+        """只改变草稿箱可见性，保留正文、PDF、修订、任务及发布回执。"""
+        with self.connection(write=True) as db:
+            head=db.execute('SELECT revision FROM heads WHERE job_pk=?',(job_pk,)).fetchone()
+            if (head['revision'] if head else None) != expected:
+                raise Conflict('草稿已被修改，请刷新列表后再操作')
+            if db.execute("SELECT id FROM tasks WHERE job_pk=? AND status IN ('queued','running','uncertain')",(job_pk,)).fetchone():
+                raise Conflict('这篇文章仍有任务处理中或结果待核对，暂不能移出草稿箱')
+            current=db.execute('SELECT active FROM inbox_archives WHERE job_pk=?',(job_pk,)).fetchone()
+            if current and bool(current['active']) == archived: return
+            stamp=now(); saved=encode(snapshot).decode()
+            db.execute('INSERT INTO inbox_archives VALUES(?,?,?,?,?) ON CONFLICT(job_pk) DO UPDATE SET active=excluded.active,snapshot=excluded.snapshot,updated=excluded.updated',
+                       (job_pk,line,int(archived),saved,stamp))
+            db.execute('INSERT INTO inbox_archive_events VALUES(?,?,?,?,?,?)',
+                       (uuid.uuid4().hex,job_pk,int(archived),author,stamp,saved))
