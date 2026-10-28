@@ -39,6 +39,20 @@ class TestCaptionRegex(unittest.TestCase):
 class TestBoxForCaption(unittest.TestCase):
     W, H = 600.0, 800.0
 
+    def test_left_column_flow_diagram_never_absorbs_right_column_prose(self):
+        graphics = [_el(40, 60, 294, 370)]
+        words = [dict(_el(310, top, 560, top+10), text='x'*60) for top in (80, 100, 120, 140)]
+        words += [dict(_el(80, 350, 260, 360), text='Analyzed n=4')]
+        box = cf._box_for_caption(400, 415, graphics, [400], [415], self.W, self.H,
+                                  words=words, caption_x0=40)
+        self.assertLess(box[2], 300)
+
+    def test_unknown_graphics_crossing_caption_fail_closed_instead_of_clamping(self):
+        from utils.figure_crop_geometry import UnsafeFigureCrop
+        graphics = [dict(_el(100, 100, 500, 600), object_type='image')]
+        with self.assertRaises(UnsafeFigureCrop):
+            cf._box_for_caption(500, 515, graphics, [500], [515], self.W, self.H, words=[])
+
     def test_detached_panel_titles_and_axis_labels_fit_inside_caption_boundaries(self):
         graphics = [_el(80, 90, 520, 400)]
         words = [dict(_el(80, 65, 90, 75), text='a'),
@@ -180,6 +194,78 @@ class TestSelectiveCaptionParsing(unittest.TestCase):
                                           json.dumps([['1', False], ['5', False]])]), 0)
             extract.assert_called_once_with('caption', 'source.pdf', temp, None,
                                             required_keys={('1', False), ('5', False)})
+
+
+class TestNativeVectorClips(unittest.TestCase):
+    def test_only_axis_aligned_rectangles_are_accepted(self):
+        from utils.pdf_vector_clips import _rectangle
+        self.assertEqual(_rectangle([(10, 20), (30, 20), (30, 40), (10, 40), (10, 20)]), (10, 20, 30, 40))
+        self.assertIsNone(_rectangle([(10, 20), (30, 30), (20, 40), (0, 30)]))
+        self.assertIsNone(_rectangle([(10, 20), (30, 20), (20, 40)]))
+
+    def test_known_clip_changes_bounds_but_never_changes_pixels_or_unknown_assets(self):
+        from utils import pdf_vector_clips as clips
+        line = dict(_el(100, 100, 500, 700), object_type='line', pts=[(100, 700), (500, 100)])
+        image = dict(_el(100, 100, 500, 700), object_type='image')
+        key = clips._line_key(line['pts'])
+        with patch.object(clips, '_native_clips', return_value={key: (300, 400, 450, 560)}):
+            result = clips.clip_caption_lines('source.pdf', 0, [line, image], [590], 600, 800)
+        self.assertEqual(result[0]['bottom'], 560)
+        self.assertEqual(result[0]['clip_evidence'], 'native_pdf_rectangle')
+        self.assertIs(result[1], image)
+        self.assertEqual(line['bottom'], 700)  # Immutable source geometry.
+        with patch.object(clips, '_native_clips', return_value={}):
+            self.assertEqual(clips.clip_caption_lines('source.pdf', 0, [line], [590], 600, 800), [line])
+
+    def test_native_rectangle_evidence_requires_all_matching_paths_to_agree(self):
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        import pypdfium2 as pdfium
+        import pypdfium2.raw as raw
+        from utils import pdf_vector_clips as clips
+        rectangle = [(150, 200), (350, 200), (350, 600), (150, 600), (150, 200)]
+        obj = SimpleNamespace(type=raw.FPDF_PAGEOBJ_PATH, points=[(100, 100), (400, 700)],
+                              clip=rectangle, get_matrix=lambda: pdfium.PdfMatrix())
+        unbounded = SimpleNamespace(**{**vars(obj), 'clip': None})
+        page, doc = MagicMock(), MagicMock()
+        page.get_rotation.return_value = 0
+        page.get_size.return_value = (600, 800)
+        page.get_bbox.return_value = (0, 0, 600, 800)
+        page.get_objects.return_value = [obj]
+        doc.__getitem__.return_value = page
+
+        def segment(points, index):
+            return SimpleNamespace(point=points[index], index=index)
+
+        def read_point(seg, x, y):
+            x.value, y.value = seg.point
+            return True
+
+        replacements = {
+            'FPDFPath_CountSegments': lambda o: len(o.points),
+            'FPDFPath_GetPathSegment': lambda o, i: segment(o.points, i),
+            'FPDFPathSegment_GetType': lambda s: raw.FPDF_SEGMENT_MOVETO if s.index == 0 else raw.FPDF_SEGMENT_LINETO,
+            'FPDFPathSegment_GetPoint': read_point,
+            'FPDFPageObj_GetClipPath': lambda o: o.clip,
+            'FPDFClipPath_CountPaths': lambda _c: 1,
+            'FPDFClipPath_CountPathSegments': lambda c, _i: len(c),
+            'FPDFClipPath_GetPathSegment': lambda c, _i, j: segment(c, j),
+        }
+        key = clips._line_key([(100, 700), (400, 100)])
+        with ExitStack() as stack:
+            stack.enter_context(patch('pypdfium2.PdfDocument', return_value=doc))
+            for name, replacement in replacements.items():
+                stack.enter_context(patch.object(raw, name, side_effect=replacement))
+            self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {key: (150, 200, 350, 600)})
+            # An identical visible unbounded line must not be hidden by another
+            # overlaid path's clipping evidence.
+            page.get_objects.return_value = [obj, unbounded]
+            self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {})
+            page.get_rotation.return_value = 90
+            self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {})
+        self.assertEqual(page.close.call_count, 3)
+        self.assertEqual(doc.close.call_count, 3)
 
 
 class TestCrossPageCaption(unittest.TestCase):

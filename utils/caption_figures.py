@@ -42,7 +42,7 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 10    # v10: selective layout parsing; retain labels within caption-bounded figure bands
+_CAPTION_VERSION = 11    # v11: respect column boundaries and explicit PDF line clips
 
 
 def caption_enabled() -> bool:
@@ -119,7 +119,7 @@ def _union_box(band: list) -> Optional[Tuple[float, float, float, float]]:
 
 def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
                      cap_tops: List[float], cap_bottoms: List[float],
-                     page_w: float, page_h: float, words=None) -> Optional[Tuple[float, float, float, float]]:
+                     page_w: float, page_h: float, words=None, caption_x0=None) -> Optional[Tuple[float, float, float, float]]:
     """题注对应那张图的框：图相对题注通常在**上方**（少数在下方）。
 
     关键简化：正文没有图形元素，所以「相邻两题注之间的图形并集」天然只含图、不含正文 —— 无需
@@ -132,8 +132,19 @@ def _box_for_caption(cap_top: float, cap_bottom: float, gfx: list,
         box = _union_box(elements)
         if box is None:
             return None
+        if any(float(e['top']) < text_bounds[0] or float(e['bottom']) > text_bounds[1] for e in elements):
+            from utils.figure_crop_geometry import UnsafeFigureCrop
+            raise UnsafeFigureCrop('图形跨越题注边界，缺少可验证的 PDF 裁切范围，需先处理后再确认')
         if words is not None:
-            return sanitize_figure_region(elements, words, box, page_w, page_h, text_bounds=text_bounds)
+            fitted_words = words
+            if caption_x0 is not None and caption_x0 < page_w * .45 and box[2] <= page_w * .5:
+                from utils.figure_quality import prose_lines
+                if prose_lines(words, (page_w * .5, text_bounds[0], page_w, text_bounds[1])) >= 3:
+                    # Refit labels only inside this figure's column. A nearby
+                    # right-column word can otherwise grow the crop by its full
+                    # width even though there are no right-column graphics.
+                    fitted_words = [w for w in words if float(w['x1']) <= page_w * .5]
+            return sanitize_figure_region(elements, fitted_words, box, page_w, page_h, text_bounds=text_bounds)
         return trim_detached_edge_bands(elements, box, page_w, page_h)
 
     # 上方：上一题注以下、本题注以上
@@ -292,6 +303,8 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, require
             gfx = _gfx(page)
             cap_tops = [ln["top"] for _, ln in caps]
             cap_bottoms = [ln["bottom"] for _, ln in caps]
+            from utils.pdf_vector_clips import clip_caption_lines
+            gfx = clip_caption_lines(pdf_path, idx, gfx, cap_tops, page_w, page_h)
             for m, cap in caps:
                 num = re.sub(r"[^0-9]", "", m.group(2))
                 is_ext = bool(re.search(r"extended|sup", m.group(1), re.I))
@@ -308,7 +321,7 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, require
                 if box is None:
                     box = _box_for_caption(cap["top"], cap["bottom"], cap_gfx,
                                            cap_tops, cap_bottoms, page_w, page_h,
-                                           words=cap_words)
+                                           words=cap_words, caption_x0=float(cap['x0']))
                 facing = 'facing page' in cap['text'].lower()
                 if box is None and idx + 1 < limit and (facing or float(cap["top"]) >= page_h * 0.65):
                     box = _following_page_figure_box(pdf.pages[idx + 1])
