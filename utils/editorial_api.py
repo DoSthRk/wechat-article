@@ -60,7 +60,7 @@ def register(app, reviewer, access, has_identity):
     def is_inbox(item, latest, head):
         generating=latest and latest['kind']=='prepare' and latest['status'] in {'queued','running','failed'}
         published=any(d.get('external_url') and d.get('publish_status')=='published' for d in item.get('distributions',[]))
-        record=(latest and latest['kind']=='publish') or (not head and published)
+        record=(latest and latest['kind']=='publish' and latest['status']!='cancelled') or (not head and published)
         return not generating and not record
 
     @app.errorhandler(EditorialError)
@@ -192,7 +192,9 @@ def register(app, reviewer, access, has_identity):
         job(pk); store=Store(); head=store.head(pk)
         if not head: return jsonify(ok=True, ready=False, tasks=[t for t in store.tasks('prepare') if t['job_pk']==pk])
         info=store.revision(pk,head['revision'])
-        return jsonify(ok=True,ready=True,draft=info,history=store.history(pk))
+        cancelled=next((t['payload'].get('cancel_id') for t in store.tasks('publish')
+                        if t['job_pk']==pk and t['revision']==head['revision'] and t['status']=='cancelled'),None)
+        return jsonify(ok=True,ready=True,draft=info,history=store.history(pk),cancelled_schedule=cancelled)
 
     @app.put('/api/editorial/<int:pk>')
     def editorial_save(pk):
@@ -263,8 +265,15 @@ def register(app, reviewer, access, has_identity):
             if active: raise Conflict('旧版多语言任务尚未完成，请待原任务结束后再提交新版本')
         info,_,_=service.validate_publication(db,store,pk,head['revision'])
         task=store.enqueue('publish',pk,head['revision'],{'reviewer':identity(),'reviewed_at':now(),
-             'title':info['title'],'line':source.line,'confirmed':True,'targets':{key:{'status':'pending'} for key in ['zh','wechat','en','ja','ko','ru']}})
+             'title':info['title'],'line':source.line,'confirmed':True,'scheduled_for':body.get('scheduled_for'),
+             'reschedule_cancel_id':body.get('reschedule_cancel_id'),
+             'targets':{key:{'status':'pending'} for key in ['zh','wechat','en','ja','ko','ru']}})
         kick('publish');return jsonify(ok=True,task=task),202
+
+    @app.post('/api/editorial/tasks/<task_id>/cancel-schedule')
+    def editorial_cancel_schedule(task_id):
+        body=data();store=Store();task=store.task(task_id);job(task['job_pk'])
+        return jsonify(ok=True,task=store.cancel_schedule(task_id,author=identity(),schedule_id=body.get('schedule_id')))
 
     @app.get('/api/editorial/tasks/<task_id>')
     def editorial_task(task_id):

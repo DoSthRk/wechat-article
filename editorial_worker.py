@@ -168,6 +168,8 @@ def run_publish(db, store, task):
     from batch_processor import _resolve_wechat_account
     from utils.blog_pipeline import BlogWorkflow
     pk = task['job_pk']; job = source_job(db, pk); payload = task['payload']
+    if task['status'] in {'scheduled','cancelled'}:
+        raise EditorialError('定时任务尚未到执行阶段或已取消，不能发布')
     if payload.get('confirmed') is not True or not payload.get('reviewer'):
         raise EditorialError('缺少实名审核确认，不能发布')
     client = WeChatClient(account=_resolve_wechat_account(job))
@@ -245,16 +247,17 @@ def main(kind):
             temporary = store.root / 'capabilities.tmp'
             temporary.write_text(json.dumps(capabilities,ensure_ascii=False));temporary.replace(store.root/'capabilities.json')
         while True:
-            tasks = [t for t in reversed(store.tasks(kind)) if t['status'] in {'queued', 'running'}]
+            tasks = [t for t in reversed(store.tasks(kind)) if t['status'] in {'scheduled', 'queued', 'running'}]
+            if kind == 'publish':
+                for task in store.tasks('publish'):
+                    if task['status'] not in {'scheduled','cancelled','queued','running'} and any(n['status'] in {'pending','sending'} for n in task['payload'].get('notices', {}).values()):
+                        notify(store, task)
             if not tasks:
-                if kind == 'publish':
-                    for task in store.tasks('publish'):
-                        if task['status'] not in {'queued','running'} and any(n['status'] in {'pending','sending'} for n in task['payload'].get('notices', {}).values()):
-                            notify(store, task)
                 time.sleep(5)
                 continue
             for task in tasks:
-                store.update_task(task['id'], status='running', payload=task['payload'])
+                task = store.claim(task['id'])
+                if not task: continue
                 try:
                     (run_prepare if kind == 'prepare' else run_publish)(db, store, task)
                 except Exception as exc:

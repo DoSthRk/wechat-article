@@ -3,13 +3,14 @@ import StarterKit from '@tiptap/starter-kit';
 import { TableKit } from '@tiptap/extension-table';
 import Superscript from '@tiptap/extension-superscript';
 import Subscript from '@tiptap/extension-subscript';
+import { beijingInput, scheduledISO, beijingTime } from '../static/editorial-schedule.mjs';
 
 const $ = id => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const workbenchLine = document.body.dataset.line;
-let pk, draft, editor, selectedKey, change = 0, savedChange = 0, savePromise, saveTimer, pollTimer, routeToken = 0, cropKey, rect, pageSize;
+let pk, draft, editor, selectedKey, change = 0, savedChange = 0, savePromise, saveTimer, pollTimer, routeToken = 0, cropKey, rect, pageSize, cancelledSchedule;
 const labels = {wechat:'公众号公开文章',zh:'中文 Blog',en:'English Blog',ja:'日本語 Blog',ko:'한국어 Blog',ru:'Русский Blog'};
-const states = {queued:'排队中',running:'处理中',waiting:'微信审核中',done:'已完成',failed:'失败',partial:'部分完成',uncertain:'结果待核对',pending:'待处理'};
+const states = {scheduled:'定时待发布',cancelled:'定时已取消',queued:'排队中',running:'处理中',waiting:'微信审核中',done:'已完成',failed:'失败',partial:'部分完成',uncertain:'结果待核对',pending:'待处理'};
 function message(text,error=false){$('notice').hidden=!text;$('notice').textContent=text;$('notice').classList.toggle('error',error);const modal=document.querySelector('dialog[open]');if(modal){let alert=modal.querySelector('.dialog-error');if(!alert){alert=element('p','','dialog-error error');alert.setAttribute('role','alert');modal.append(alert);}alert.textContent=error?text:'';}}
 function button(text, action, primary=false){const b=document.createElement('button');b.textContent=text;b.className=primary?'primary':'';b.addEventListener('click',()=>Promise.resolve(action()).catch(e=>message(e.message,true)));return b;}
 function element(tag,text,className=''){const n=document.createElement(tag);n.textContent=text;n.className=className;return n;}
@@ -47,16 +48,17 @@ async function openEditor(id,token){pk=Number(id);draft=null;editor?.destroy();e
   let result=await api(endpoint());if(token!==routeToken)return;
   if(!result.ready){await api(endpoint('/prepare'),'POST',{});const poll=async()=>{try{const data=await api(endpoint());if(token!==routeToken)return;if(data.ready){showEditor(data);return;}const task=data.tasks?.[0];if(task?.status==='failed'){$('editor-loading').replaceChildren(element('p',task.payload.error||'草稿准备失败'),button('重试准备',()=>openEditor(id,token)));return;}pollTimer=setTimeout(poll,3000);}catch(e){message(e.message,true);}};pollTimer=setTimeout(poll,1500);return;}showEditor(result);
 }
-function showEditor(result){setDraft(result.draft,result.history);$('editor-layout').hidden=false;$('editor-loading').hidden=true;$('article-line').textContent=`${draft.line?.toUpperCase()||''} · 站内审核草稿`;}
+function showEditor(result){setDraft(result.draft,result.history);cancelledSchedule=result.cancelled_schedule;$('editor-layout').hidden=false;$('editor-loading').hidden=true;$('article-line').textContent=`${draft.line?.toUpperCase()||''} · 站内审核草稿`;}
 async function loadList(view,token){clearTimeout(pollTimer);const {articles}=await api('/api/editorial/articles');if(token!==routeToken)return;
   const generation=a=>a.task?.kind==='prepare'&&['queued','running','failed'].includes(a.task.status);
-  const record=a=>a.task?.kind==='publish'||(!a.revision&&a.legacy_published);
+  const record=a=>(a.task?.kind==='publish'&&a.task.status!=='cancelled')||(!a.revision&&a.legacy_published);
   $('inbox-count').textContent=articles.filter(a=>!a.archived&&!generation(a)&&!record(a)&&!a.held).length;$('generation-count').textContent=articles.filter(generation).length;
   const list=$('article-list');list.replaceChildren();for(const a of articles.filter(a=>view==='archived'?a.archived:view==='generating'?generation(a):view==='records'?record(a):!a.archived&&!generation(a)&&!record(a))){
     const card=element('article','', 'draft-card');const copy=element('div','', 'draft-copy');copy.append(element('div',`${a.line.toUpperCase()} · ${a.job_id}`,'meta'),element('h2',a.title));
     if(view==='archived'){copy.append(element('p','已从草稿箱移除。源 PDF、正文和历史记录保留。'),button('恢复到草稿箱',async()=>{await api(`/api/editorial/${a.job_pk}/inbox-restore`,'POST',{expected_revision:a.revision});await loadList(view,token);message('已恢复到审核草稿箱。');}));card.append(copy);list.append(card);continue;}
     copy.append(element('p',a.held?'已暂缓发布，请联系负责人。':a.task?states[a.task.status]||a.task.status:a.legacy_published?'历史发布记录；公众号草稿不代表已经公开发布。':'待审核，可编辑正文及配图'));
     if(a.task?.payload.error)copy.append(element('p',a.task.payload.error,'error'));
+    if(a.task?.status==='scheduled')copy.append(element('p',`预约 ${beijingTime(a.task.payload.scheduled_for)} 开始发布`));
     const actions=element('div','', 'actions');if(a.has_article&&!a.held)actions.append(button('编辑审核',()=>location.hash=`edit/${a.job_pk}`,true));
     if(view==='inbox'&&a.can_archive)actions.append(button('移出草稿箱',async()=>{await api(`/api/editorial/${a.job_pk}/inbox-archive`,'POST',{expected_revision:a.revision});await loadList(view,token);message('已移出草稿箱，可在“已移除草稿”中恢复。');}));
     if(!a.has_article&&!a.held&&!generation(a))actions.append(button('生成待审稿',async()=>{await api(`/api/editorial/${a.job_pk}/prepare`,'POST',{});location.hash='generating';},true));
@@ -67,10 +69,19 @@ async function loadList(view,token){clearTimeout(pollTimer);const {articles}=awa
   }if(!list.children.length)list.append(element('div',view==='generating'?'当前没有生成任务。上传 PDF 后自动开始。':'当前没有文章。','empty'));
   pollTimer=setTimeout(()=>loadList(view,token).catch(e=>message(e.message,true)),5000);
 }
-async function showResult(id,token){const {task}=await api(`/api/editorial/tasks/${id}`);if(token!==routeToken)return;const summary=$('result-summary');summary.replaceChildren();const box=element('div','');box.append(element('span',states[task.status]||task.status,'badge'),element('h2',task.payload.title||'文章发布'),element('p',task.payload.error||'后台使用已确认版本；您可以关闭此页面。'));summary.append(box,button('返回编辑',()=>location.hash=`edit/${task.job_pk}`));
-  $('target-list').replaceChildren();for(const [key,target] of Object.entries(task.payload.targets||{})){const row=element('div','', 'target-row');row.append(element('strong',labels[key]||key));const detail=element('div',target.error||'');if(target.url){detail.replaceChildren();const link=element('a','打开已发布文章','text-link');link.href=target.url;link.target='_blank';link.rel='noopener';detail.append(link);}row.append(detail);const publishedPending=key==='wechat'&&target.provider_publish_status===0&&target.status!=='done';const status=element('div',publishedPending?'已发布，结果待核对':states[target.status]||target.status,'target-state '+target.status);if(target.status==='failed')status.append(button(key==='wechat'&&target.publish_id?'重新核对发布结果':'重试本渠道',async()=>{await api(`/api/editorial/tasks/${id}/retry`,'POST',{target:key});await showResult(id,token);}));row.append(status);$('target-list').append(row);}
-  const notices=$('notification-list');notices.replaceChildren(element('h2','飞书通知'));for(const [key,n]of Object.entries(task.payload.notices||{}))notices.append(element('p',`${key.endsWith(':self')?'本人':'张晓妍'}：${n.status==='sent'?'已发送':n.error||'等待发送'}`));if(!Object.keys(task.payload.notices||{}).length)notices.append(element('p','等待发布结果后通知。'));
-  if(['queued','running'].includes(task.status))pollTimer=setTimeout(()=>showResult(id,token).catch(e=>message(e.message,true)),3000);
+async function showResult(id,token){clearTimeout(pollTimer);const {task}=await api(`/api/editorial/tasks/${id}`);if(token!==routeToken)return;const summary=$('result-summary');summary.replaceChildren();const box=element('div','');box.append(element('span',states[task.status]||task.status,'badge'),element('h2',task.payload.title||'文章发布'),element('p',task.payload.error||(task.status==='scheduled'?'已保存预约，可关闭页面。后续编辑不改变本次发布版本；需要调整时请先取消定时，再重新审核确认。':task.status==='cancelled'?'定时已取消，不会执行本次发布。可以返回编辑后重新确认。':'后台使用已确认版本；您可以关闭此页面。')));if(task.payload.scheduled_for)box.append(element('p',`预约时间：${beijingTime(task.payload.scheduled_for)}`));summary.append(box,button('返回编辑',()=>location.hash=`edit/${task.job_pk}`));
+  if(task.status==='scheduled')summary.append(button('取消定时发布',async()=>{await api(`/api/editorial/tasks/${id}/cancel-schedule`,'POST',{schedule_id:task.payload.schedule_id});await showResult(id,token);}));
+  $('target-list').replaceChildren();
+  for(const [key,target] of Object.entries(task.payload.targets||{})){
+    const row=element('div','', 'target-row');row.append(element('strong',labels[key]||key));const detail=element('div',target.error||'');
+    if(target.url){detail.replaceChildren();const link=element('a','打开已发布文章','text-link');link.href=target.url;link.target='_blank';link.rel='noopener';detail.append(link);}row.append(detail);
+    const publishedPending=key==='wechat'&&target.provider_publish_status===0&&target.status!=='done';
+    const statusText=task.status==='cancelled'?'已取消':task.status==='scheduled'?'等待预约时间':publishedPending?'已发布，结果待核对':states[target.status]||target.status;
+    const status=element('div',statusText,'target-state '+target.status);
+    if(target.status==='failed')status.append(button(key==='wechat'&&target.publish_id?'重新核对发布结果':'重试本渠道',async()=>{await api(`/api/editorial/tasks/${id}/retry`,'POST',{target:key});await showResult(id,token);}));row.append(status);$('target-list').append(row);
+  }
+  const notices=$('notification-list');notices.replaceChildren(element('h2','飞书通知'));for(const [key,n]of Object.entries(task.payload.notices||{}))notices.append(element('p',`${key.endsWith(':self')?'本人':'张晓妍'}：${n.status==='sent'?'已发送':n.error||'等待发送'}`));if(!Object.keys(task.payload.notices||{}).length)notices.append(element('p',task.status==='cancelled'?'定时已取消，不会发送发布通知。':'等待发布结果后通知。'));
+  if(['scheduled','queued','running'].includes(task.status)||Object.values(task.payload.notices||{}).some(n=>['pending','sending'].includes(n.status)))pollTimer=setTimeout(()=>showResult(id,token).catch(e=>message(e.message,true)),3000);
 }
 async function route(){const token=++routeToken;clearTimeout(pollTimer);clearTimeout(saveTimer);if(editor&&savedChange!==change){try{await save();}catch(e){message(e.message,true);return;}}message('');const [view,id]=(location.hash.slice(1)||'inbox').split('/');for(const name of ['list','editor','result'])$(`${name}-view`).hidden=name!==(view==='edit'?'editor':view==='result'?'result':'list');document.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('active',a.dataset.nav===(view==='edit'?'inbox':view==='result'?'records':view)));window.scrollTo(0,0);try{if(view==='edit')await openEditor(id,token);else if(view==='result')await showResult(id,token);else{$('list-title').textContent=view==='generating'?'生成中':view==='records'?'发布记录':view==='archived'?'已移除草稿':'审核草稿箱';$('list-help').textContent=view==='archived'?'仅从草稿箱移除，原文件及历史记录保留，可随时恢复。':'直接编辑正文、调整配图，完成后确认公开发布。';await loadList(view,token);}}catch(e){message(e.message,true);}}
 window.addEventListener('hashchange',route);
@@ -85,8 +96,11 @@ action('figure-insert',()=>$('insert-dialog').showModal());action('insert-confir
 action('link-open',()=>{$('link-url').value=editor.getAttributes('link').href||'';$('link-dialog').showModal();});action('link-apply',()=>{const href=$('link-url').value.trim();if(!/^(https?:\/\/|mailto:)/i.test(href))throw Error('请填写 http、https 或邮件链接');editor.chain().focus().extendMarkRange('link').setLink({href}).run();$('link-dialog').close();});action('link-remove',()=>{editor.chain().focus().unsetLink().run();$('link-dialog').close();});
 async function preview(platform){await save();$('preview-frame').src=endpoint(`/preview/${draft.revision}/${platform}`);$('preview-dialog').showModal();}
 action('preview-open',()=>preview('wechat'));document.querySelectorAll('[data-preview]').forEach(b=>b.addEventListener('click',()=>preview(b.dataset.preview).catch(e=>message(e.message,true))));
-action('release-open',async()=>{await save();if(!draft)throw Error('草稿未准备好');const keys=figureKeys();if(!keys.length||keys.some(k=>!draft.figures[k]))throw Error('正文仍有未补齐的配图，请先从原页裁剪');$('confirm-title').textContent=draft.title;$('confirm-line').textContent=`已保存版本 ${draft.revision.slice(0,8)} · ${draft.line==='solidex'?'SOLIDEX / 免疫客公众号':'AAV 公众号'}`;$('release-dialog').showModal();});
-action('publish-button',async()=>{$('publish-button').disabled=true;try{const {task}=await api(endpoint('/publish'),'POST',{revision:draft.revision,confirmed:true});$('release-dialog').close();location.hash=`result/${task.id}`;}finally{$('publish-button').disabled=false;}});
+function updateReleaseMode(){const timed=$('release-mode').value==='scheduled';$('schedule-fields').hidden=!timed;$('publish-button').textContent=timed?'确认正文及图片正确，预约发布':'确认正文及图片正确，并发布';$('schedule-error').textContent='';}
+$('release-mode').addEventListener('change',updateReleaseMode);
+$('schedule-time').addEventListener('input',()=>{$('schedule-error').textContent='';});
+action('release-open',async()=>{await save();if(!draft)throw Error('草稿未准备好');const keys=figureKeys();if(!keys.length||keys.some(k=>!draft.figures[k]))throw Error('正文仍有未补齐的配图，请先从原页裁剪');$('confirm-title').textContent=draft.title;$('confirm-line').textContent=`已保存版本 ${draft.revision.slice(0,8)} · ${draft.line==='solidex'?'SOLIDEX / 免疫客公众号':'AAV 公众号'}`;$('release-mode').value='now';$('schedule-time').value=beijingInput(Date.now()+5*60000);$('schedule-time').min=beijingInput(Date.now()+2*60000);updateReleaseMode();$('release-dialog').querySelectorAll('.dialog-error').forEach(e=>e.textContent='');$('release-dialog').showModal();});
+action('publish-button',async()=>{$('publish-button').disabled=true;try{let scheduled_for=null;if($('release-mode').value==='scheduled'){try{scheduled_for=scheduledISO($('schedule-time').value);}catch(e){$('schedule-error').textContent=e.message;$('schedule-time').focus();return;}}const {task}=await api(endpoint('/publish'),'POST',{revision:draft.revision,confirmed:true,scheduled_for,reschedule_cancel_id:cancelledSchedule});$('release-dialog').close();location.hash=`result/${task.id}`;}finally{$('publish-button').disabled=false;}});
 action('restore-open',()=>$('restore-dialog').showModal());action('restore-confirm',async()=>{await save();const result=await api(endpoint('/restore'),'POST',{expected_revision:draft.revision,revision:$('history-list').value});setDraft(result.draft);$('restore-dialog').close();message('已恢复为新修订，历史版本保留。');});
 action('backup-download',()=>{const blob=new Blob([JSON.stringify({title:$('article-title').value,digest:$('article-digest').value,document:editor.getJSON(),expected_revision:draft.revision},null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=`article-${pk}-editing-backup.json`;link.click();URL.revokeObjectURL(url);});
 

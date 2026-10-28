@@ -34,7 +34,7 @@ MODULES = (
     'test_wechat_draft_repair', 'test_distribute', 'test_auto_cover',
     'test_database', 'test_workflow_runner', 'test_dashboard_api', 'test_panel_runner',
 )
-UI_MODULES = ('test_image_review_ui', 'test_operator_state')
+UI_MODULES = ('test_image_review_ui', 'test_operator_state', 'test_editorial_schedule_ui')
 
 
 def copy_source(source, destination):

@@ -18,6 +18,20 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def publication_time(value, *, future=True) -> str | None:
+    if value is None: return None
+    try:
+        if not isinstance(value, str): raise ValueError()
+        stamp = datetime.fromisoformat(value)
+        if stamp.tzinfo is None: raise ValueError()
+        stamp = stamp.astimezone(timezone.utc)
+        if future and (stamp - datetime.fromisoformat(now())).total_seconds() < 60:
+            raise EditorialError('定时发布时间需至少晚于当前时间 1 分钟，请重新选择')
+        return stamp.isoformat()
+    except (ValueError, TypeError, OverflowError):
+        raise EditorialError('请选择有效的定时发布时间（北京时间）') from None
+
+
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -140,16 +154,61 @@ class Store:
         with self.connection(write=True) as db:
             self._require_inbox(db, job_pk)
             existing = db.execute('SELECT * FROM tasks WHERE kind=? AND job_pk=? AND revision=?', (kind, job_pk, revision)).fetchone()
-            if existing: return self._task(existing)
+            if existing and existing['status'] == 'cancelled':
+                previous = self._task(existing)
+                if payload.get('reschedule_cancel_id') != previous['payload'].get('cancel_id'):
+                    return previous  # 取消前提交的迟到请求不能重新激活预约。
+            if existing and existing['status'] != 'cancelled':
+                old = self._task(existing)
+                if old['status'] == 'scheduled' and old['payload'].get('scheduled_for') != publication_time(payload.get('scheduled_for'), future=False):
+                    raise Conflict('此版本已有定时任务，请先取消原定时再重新设置')
+                return old
             if kind == 'publish':
                 head = db.execute('SELECT revision FROM heads WHERE job_pk=?', (job_pk,)).fetchone()
                 if not head or head['revision'] != revision:
                     raise Conflict('审核期间草稿已变化，请重新预览后发布')
-            if kind == 'publish' and db.execute("SELECT id FROM tasks WHERE job_pk=? AND kind='publish' AND status IN ('queued','running','uncertain')", (job_pk,)).fetchone():
+            if kind == 'publish' and db.execute("SELECT id FROM tasks WHERE job_pk=? AND kind='publish' AND status IN ('scheduled','queued','running','uncertain')", (job_pk,)).fetchone():
                 raise Conflict('这篇文章还有正在发布或结果待核对的版本，请先处理原发布任务。')
+            state = 'queued'
+            if kind == 'publish' and payload.get('scheduled_for') is not None:
+                payload = {**payload, 'scheduled_for': publication_time(payload['scheduled_for']), 'schedule_timezone': 'Asia/Shanghai', 'schedule_id':uuid.uuid4().hex}
+                state = 'scheduled'
+            if existing:
+                previous = self._task(existing)['payload']
+                payload = {**payload, 'schedule_history': previous.get('schedule_history', []) + [{k:previous.get(k) for k in
+                    ('scheduled_for','reviewer','reviewed_at','cancelled_at','cancelled_by','schedule_id','cancel_id')}]}
+                db.execute('UPDATE tasks SET status=?,payload=?,updated=? WHERE id=?',
+                           (state, encode(payload).decode(), now(), existing['id']))
+                return self._task(db.execute('SELECT * FROM tasks WHERE id=?', (existing['id'],)).fetchone())
             task_id = uuid.uuid4().hex
             db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?)',
-                       (task_id, kind, job_pk, revision, 'queued', encode(payload).decode(), now(), now()))
+                       (task_id, kind, job_pk, revision, state, encode(payload).decode(), now(), now()))
+        return self.task(task_id)
+
+    def claim(self, task_id: str) -> dict | None:
+        """执行器持队列锁后调用；与取消使用同一短事务，避免列表快照触发已取消任务。"""
+        with self.connection(write=True) as db:
+            row = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if not row or row['status'] not in {'scheduled','queued','running'}: return None
+            task = self._task(row); payload = task['payload']; stamp = now()
+            if payload.get('scheduled_for') and datetime.fromisoformat(payload['scheduled_for']) > datetime.fromisoformat(stamp):
+                return None
+            if row['status'] == 'scheduled': payload['schedule_started_at'] = stamp
+            db.execute("UPDATE tasks SET status='running',payload=?,updated=? WHERE id=?", (encode(payload).decode(),stamp,task_id))
+            return {**task, 'status':'running', 'payload':payload, 'updated':stamp}
+
+    def cancel_schedule(self, task_id: str, *, author: str, schedule_id: str) -> dict:
+        with self.connection(write=True) as db:
+            row = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if not row: raise EditorialError('任务不存在')
+            task = self._task(row)
+            if task['status'] == 'cancelled': return task
+            if not schedule_id or schedule_id != task['payload'].get('schedule_id'):
+                raise Conflict('定时安排已变化，请刷新页面后再取消')
+            if task['kind'] != 'publish' or task['status'] != 'scheduled':
+                raise Conflict('任务已开始或不是待执行的定时任务，不能取消；请查看发布结果')
+            payload = task['payload']; payload.update(cancelled_at=now(), cancelled_by=author, cancel_id=uuid.uuid4().hex)
+            db.execute("UPDATE tasks SET status='cancelled',payload=?,updated=? WHERE id=?", (encode(payload).decode(),now(),task_id))
         return self.task(task_id)
 
     @staticmethod
@@ -207,7 +266,7 @@ class Store:
             head=db.execute('SELECT revision FROM heads WHERE job_pk=?',(job_pk,)).fetchone()
             if (head['revision'] if head else None) != expected:
                 raise Conflict('草稿已被修改，请刷新列表后再操作')
-            if db.execute("SELECT id FROM tasks WHERE job_pk=? AND status IN ('queued','running','uncertain')",(job_pk,)).fetchone():
+            if db.execute("SELECT id FROM tasks WHERE job_pk=? AND status IN ('scheduled','queued','running','uncertain')",(job_pk,)).fetchone():
                 raise Conflict('这篇文章仍有任务处理中或结果待核对，暂不能移出草稿箱')
             current=db.execute('SELECT active FROM inbox_archives WHERE job_pk=?',(job_pk,)).fetchone()
             if current and bool(current['active']) == archived: return

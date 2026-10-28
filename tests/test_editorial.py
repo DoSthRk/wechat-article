@@ -188,6 +188,91 @@ class EditorialTests(unittest.TestCase):
         self.assertNotEqual(image_packages.get_package(service.source_job(self.db,self.pk))['status'],'approved')
         kick.assert_called_once_with('publish')
 
+    def scheduled(self):
+        info=self.cropped()
+        with patch('utils.editorial_store.now',return_value='2030-01-01T00:00:00+00:00'):
+            response=self.client.post(f'/api/editorial/{self.pk}/publish',json={
+                'revision':info['revision'],'confirmed':True,'scheduled_for':'2030-01-01T10:00:00+08:00'},headers=self.write_headers)
+        self.assertEqual(response.status_code,202,response.get_json())
+        return response.get_json()['task']
+
+    def test_schedule_is_persistent_frozen_and_never_claimed_early(self):
+        task=self.scheduled()
+        self.assertEqual(task['status'],'scheduled')
+        self.assertEqual(task['payload']['scheduled_for'],'2030-01-01T02:00:00+00:00')
+        self.assertEqual(task['payload']['schedule_timezone'],'Asia/Shanghai')
+        self.assertEqual(task['payload']['reviewer'],'hqq')
+        newer=self.save('Later draft')
+        self.assertNotEqual(newer['revision'],task['revision'])
+        with self.assertRaises(Conflict):self.store.enqueue('publish',self.pk,newer['revision'],task['payload'])
+        with self.assertRaises(Conflict):self.store.set_inbox_archived(self.pk,'aav',True,expected=newer['revision'],author='hqq',snapshot={})
+        restored=Store(self.root/'editorial')
+        with patch('utils.editorial_store.now',return_value='2030-01-01T01:59:59+00:00'):
+            self.assertIsNone(restored.claim(task['id']))
+        self.assertEqual(restored.task(task['id'])['status'],'scheduled')
+        with patch('utils.editorial_store.now',return_value='2030-01-01T02:00:00+00:00'):
+            claimed=restored.claim(task['id'])
+        self.assertEqual(claimed['status'],'running');self.assertEqual(claimed['revision'],task['revision'])
+        self.assertEqual(service.validate_publication(self.db,restored,self.pk,claimed['revision'])[0]['title'],'Article')
+        with self.assertRaises(Conflict):restored.cancel_schedule(task['id'],author='hqq',schedule_id=task['payload']['schedule_id'])
+
+    def test_cancel_schedule_blocks_stale_worker_snapshot_and_can_rebook(self):
+        task=self.scheduled();path=f'/api/editorial/tasks/{task["id"]}/cancel-schedule'
+        self.assertEqual(self.client.post(path,json={},headers=self.headers).status_code,403)
+        self.assertEqual(self.client.post(path+'?line=solidex',json={},headers=self.write_headers).status_code,403)
+        response=self.client.post(path,json={'schedule_id':task['payload']['schedule_id']},headers=self.write_headers)
+        self.assertEqual(response.status_code,200);self.assertEqual(response.json['task']['status'],'cancelled')
+        editor=self.client.get(f'/api/editorial/{self.pk}',headers=self.headers).json
+        self.assertEqual(editor['cancelled_schedule'],response.json['task']['payload']['cancel_id'])
+        with patch('utils.editorial_store.now',return_value='2030-01-02T00:00:00+00:00'):
+            self.assertIsNone(self.store.claim(task['id']))
+        with self.assertRaises(Conflict):self.store.retry(task['id'],'wechat')
+        with patch('utils.editorial_store.now',return_value='2030-01-01T00:00:00+00:00'):
+            late=self.store.enqueue('publish',self.pk,task['revision'],task['payload'])
+            self.assertEqual(late['status'],'cancelled')
+            rebooked=self.store.enqueue('publish',self.pk,task['revision'],{**task['payload'],'reschedule_cancel_id':response.json['task']['payload']['cancel_id']})
+        self.assertEqual(rebooked['status'],'scheduled');self.assertEqual(rebooked['id'],task['id'])
+        self.assertEqual(rebooked['payload']['schedule_history'][0]['cancelled_by'],'hqq')
+        self.assertNotIn('cancelled_at',rebooked['payload'])
+        with self.assertRaises(Conflict):self.store.cancel_schedule(task['id'],author='hqq',schedule_id=task['payload']['schedule_id'])
+        self.assertEqual(self.store.task(task['id'])['status'],'scheduled')
+
+    def test_schedule_requires_future_explicit_timezone_and_confirmation(self):
+        info=self.cropped();path=f'/api/editorial/{self.pk}/publish'
+        with patch('utils.editorial_store.now',return_value='2030-01-01T00:00:00+00:00'):
+            for value in ['',False,42,'bad','2030-01-01T10:00','2029-12-31T10:00:00+08:00',
+                          '2030-01-01T08:00:30+08:00','2030-02-30T10:00:00+08:00']:
+                with self.subTest(value=value):
+                    response=self.client.post(path,json={'revision':info['revision'],'confirmed':True,'scheduled_for':value},headers=self.write_headers)
+                    self.assertEqual(response.status_code,400,response.get_json())
+            self.assertEqual(self.client.post(path,json={'revision':info['revision'],'scheduled_for':'2030-01-01T10:00:00+08:00'},headers=self.write_headers).status_code,400)
+        self.assertFalse(self.store.tasks('publish'))
+
+    def test_schedule_duplicate_is_idempotent_and_requires_cancel_for_new_time(self):
+        task=self.scheduled()
+        with patch('utils.editorial_store.now',return_value='2030-01-01T00:00:00+00:00'):
+            same=self.store.enqueue('publish',self.pk,task['revision'],task['payload'])
+            self.assertEqual(same['id'],task['id'])
+            for equivalent in ['2030-01-01T02:00:00.000Z','2030-01-01T10:00:00+08:00']:
+                duplicate=self.store.enqueue('publish',self.pk,task['revision'],{**task['payload'],'scheduled_for':equivalent})
+                self.assertEqual(duplicate['id'],task['id'])
+            with self.assertRaises(Conflict):self.store.enqueue('publish',self.pk,task['revision'],{**task['payload'],'scheduled_for':'2030-01-01T04:00:00+00:00'})
+        self.assertEqual(len(self.store.tasks('publish')),1)
+
+    def test_schedule_worker_skips_future_then_runs_original_revision_at_due_time(self):
+        task=self.scheduled();stamp=['2030-01-01T01:59:59+00:00']
+        def tick(_seconds):
+            if stamp[0].endswith('01:59:59+00:00'):stamp[0]='2030-01-01T02:00:00+00:00'
+            else:raise InterruptedError('stop test worker')
+        with patch('editorial_worker.Store',return_value=self.store),patch('editorial_worker.WeChatClient'), \
+             patch('utils.editorial_store.now',side_effect=lambda:stamp[0]),patch('editorial_worker.time.sleep',side_effect=tick), \
+             patch('editorial_worker.run_publish') as publish:
+            with self.assertRaises(InterruptedError):editorial_worker.main('publish')
+        publish.assert_called_once()
+        claimed=publish.call_args.args[2]
+        self.assertEqual(claimed['id'],task['id']);self.assertEqual(claimed['revision'],task['revision'])
+        self.assertEqual(claimed['payload']['schedule_started_at'],'2030-01-01T02:00:00+00:00')
+
     def test_legacy_mutations_blocked_when_v2_enabled(self):
         self.application.config['EDITORIAL_WORKBENCH']=True
         self.assertEqual(self.client.post('/api/run',json={},headers=self.headers).status_code,409)
