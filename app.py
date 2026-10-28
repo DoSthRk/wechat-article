@@ -756,14 +756,22 @@ def create_app(testing: bool = False) -> Flask:
     @app.get("/api/workflow/preflight")
     def api_workflow_preflight():
         _line_access()
+        from config import asset_public_base_url, asset_storage_mode
+        try:
+            pdf_public_base = asset_public_base_url(os.getenv("SOURCE_PDF_PUBLIC_BASE_URL", ""))
+            image_public_base = asset_public_base_url(os.getenv("ALIYUN_OSS_CDN_BASE_URL", ""))
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 503
         cms_required = (
             "GENEMEDI_BLOG_USER", "GENEMEDI_BLOG_PASSWORD",
             "GENEMEDI_BLOG_CHINESE_LANGCODE", "ALIYUN_OSS_ACCESS_KEY_ID",
             "ALIYUN_OSS_ACCESS_KEY_SECRET", "ALIYUN_OSS_ENDPOINT",
-            "ALIYUN_OSS_BUCKET", "ALIYUN_OSS_CDN_BASE_URL",
+            "ALIYUN_OSS_BUCKET",
         )
         cms_missing = [name for name in cms_required if not os.getenv(name, "").strip()]
-        source_pdf_mode = os.getenv("SOURCE_PDF_STORAGE", "ssh").strip().lower()
+        if not image_public_base:
+            cms_missing.append("ARTICLE_ASSET_PUBLIC_BASE_URL")
+        source_pdf_mode = asset_storage_mode("SOURCE_PDF_STORAGE")
         if source_pdf_mode == "ssh":
             from utils.source_pdf_store import (
                 DEFAULT_PUBLIC_BASE_URL, DEFAULT_SSH_HOST, DEFAULT_SSH_KNOWN_HOSTS,
@@ -783,7 +791,7 @@ def create_app(testing: bool = False) -> Flask:
                 "SOURCE_PDF_OSS_ACCESS_KEY_SECRET": os.getenv("SOURCE_PDF_OSS_ACCESS_KEY_SECRET") or os.getenv("ALIYUN_OSS_ACCESS_KEY_SECRET", ""),
                 "SOURCE_PDF_OSS_ENDPOINT": os.getenv("SOURCE_PDF_OSS_ENDPOINT") or os.getenv("ALIYUN_OSS_ENDPOINT", ""),
                 "SOURCE_PDF_OSS_BUCKET": os.getenv("SOURCE_PDF_OSS_BUCKET") or os.getenv("ALIYUN_OSS_BUCKET", ""),
-                "SOURCE_PDF_PUBLIC_BASE_URL": os.getenv("SOURCE_PDF_PUBLIC_BASE_URL", ""),
+                "SOURCE_PDF_PUBLIC_BASE_URL": pdf_public_base,
             }
         source_pdf_missing = [name for name, value in source_pdf_values.items() if not (value or "").strip()]
         return jsonify({
@@ -793,7 +801,10 @@ def create_app(testing: bool = False) -> Flask:
                 "configured": source_pdf_mode in {"ssh", "oss"} and not source_pdf_missing,
                 "mode": source_pdf_mode,
                 "missing": source_pdf_missing,
+                "public_base_url": source_pdf_values.get("SOURCE_PDF_PUBLIC_BASE_URL", ""),
             },
+            "blog_images": {"mode": asset_storage_mode("BLOG_IMAGE_STORAGE"),
+                            "public_base_url": image_public_base},
             "translation_languages": ["en", "ja", "ko", "ru"],
             "cms_languages": ["zh", "en", "ja", "ko", "ru"],
         })

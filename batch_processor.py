@@ -560,16 +560,26 @@ def _safe_product_name(job: Job) -> str:
 
 def _ensure_source_pdf_published(db, job_pk: int, job: Job) -> str:
     """Upload the original PDF once and verify its public URL before drafting."""
+    from config import asset_public_base_url, asset_storage_mode
+
     path, digest, size = inspect_pdf(job.pdf)
+    try:
+        target_base = asset_public_base_url() if asset_storage_mode("SOURCE_PDF_STORAGE") == "oss" else ""
+    except ValueError as exc:
+        raise SourcePdfError(str(exc)) from exc
     db_job = db.get_job(job_pk)
     if (
         db_job
         and db_job.source_pdf_url
         and db_job.source_pdf_sha256 == digest
         and int(db_job.source_pdf_size or 0) == size
+        and (not target_base or db_job.source_pdf_url.startswith(target_base + "/"))
     ):
         try:
-            verify_public_pdf(db_job.source_pdf_url)
+            if target_base:
+                verify_public_pdf(db_job.source_pdf_url, expected_sha256=digest, expected_size=size)
+            else:
+                verify_public_pdf(db_job.source_pdf_url)
             logger.info("[%s] 复用已校验原文 PDF：%s", job.job_id, db_job.source_pdf_url)
             return db_job.source_pdf_url
         except SourcePdfError as exc:

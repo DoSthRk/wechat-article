@@ -9,6 +9,29 @@ call sites it replaces.
 from __future__ import annotations
 
 import os
+from typing import Mapping, Optional
+from urllib.parse import urlsplit
+
+
+def asset_storage_mode(legacy_variable: str, env: Optional[Mapping[str, str]] = None) -> str:
+    """One explicit setting switches both PDF and image storage together."""
+    values = os.environ if env is None else env
+    mode = values.get("ARTICLE_ASSET_STORAGE")
+    if mode is None:
+        mode = values.get(legacy_variable, "oss")
+    return mode.strip().lower()
+
+
+def asset_public_base_url(fallback: str = "", env: Optional[Mapping[str, str]] = None) -> str:
+    values = os.environ if env is None else env
+    base = values.get("ARTICLE_ASSET_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return fallback.strip().rstrip("/")
+    parsed = urlsplit(base)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+            or parsed.password or parsed.path or parsed.query or parsed.fragment):
+        raise ValueError("ARTICLE_ASSET_PUBLIC_BASE_URL must be an HTTPS origin without a path")
+    return base
 
 
 def _str_env(key: str, default: str = "") -> str:
