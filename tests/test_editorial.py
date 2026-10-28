@@ -241,6 +241,55 @@ class EditorialTests(unittest.TestCase):
         with self.assertRaises(EditorialError):editorial_worker.publish_wechat(self.db,self.store,task,client,service.source_job(self.db,self.pk),'bundle')
         client.submit_publication.assert_not_called()
 
+    def test_wechat_http_receipt_reconciles_existing_publication_without_resubmit(self):
+        task=self.task();expected=self.expected(task,'submitted');client=Mock()
+        target=task['payload']['targets']['wechat'];target.update(publish_id='existing',status='pending')
+        raw='http://mp.weixin.qq.com/s?__biz=abc&mid=123&idx=1&sn=signature#rd'
+        client.publication_status.return_value={'publish_status':0,'article_id':'article1','article_detail':{'item':[{'article_url':raw}]}}
+        client.published_article.return_value={'news_item':[expected]}
+        editorial_worker.publish_wechat(self.db,self.store,task,client,service.source_job(self.db,self.pk),'bundle')
+        self.assertEqual(target['url'],raw.replace('http:','https:',1))
+        self.assertEqual(target['status'],'done')
+        client.publication_status.assert_called_once_with('existing')
+        client.get_draft.assert_not_called();client.submit_publication.assert_not_called()
+
+    def test_wechat_invalid_link_retains_success_receipt_and_never_resubmits(self):
+        base=self.task()
+        for url in ['', 'https://evil.test/s/x', 'https://mp.weixin.qq.com.evil.test/s/x',
+                    'https://user@mp.weixin.qq.com/s/x', 'https://mp.weixin.qq.com:80/s/x',
+                    'https://mp.weixin.qq.com/other', 'https://mp.weixin.qq.com/s/\nx', '//mp.weixin.qq.com/s/x']:
+            with self.subTest(url=url):
+                task=deepcopy(base);self.expected(task,'submitted');client=Mock()
+                target=task['payload']['targets']['wechat'];target['publish_id']='existing'
+                client.publication_status.return_value={'publish_status':0,'article_id':'article1','article_detail':{'item':[{'article_url':url}]}}
+                with self.assertRaisesRegex(EditorialError,'已确认发布'):
+                    editorial_worker.publish_wechat(self.db,self.store,task,client,service.source_job(self.db,self.pk),'bundle')
+                saved=self.store.task(task['id'])['payload']['targets']['wechat']
+                self.assertEqual(saved['article_id'],'article1');self.assertEqual(saved['provider_publish_status'],0)
+                self.assertEqual(saved['publish_id'],'existing')
+                client.publication_status.return_value={'publish_status':2}
+                with self.assertRaises(EditorialError):
+                    editorial_worker.publish_wechat(self.db,self.store,task,client,service.source_job(self.db,self.pk),'bundle')
+                self.assertEqual(target['publish_id'],'existing')
+                client.submit_publication.assert_not_called()
+
+    def test_wechat_receipt_diagnostic_is_readonly_and_line_scoped(self):
+        task=self.task();task['payload']['targets']['wechat']['publish_id']='existing'
+        self.store.update_task(task['id'],status='partial',payload=task['payload'])
+        before=self.store.task(task['id'])
+        path=f'/api/editorial/tasks/{task["id"]}/wechat-receipt'
+        with patch('utils.wechat_client.WeChatClient') as factory:
+            factory.return_value.publication_status.return_value={'publish_status':0,'article_id':'article1','unneeded':'hidden'}
+            self.assertEqual(self.application.test_client().get(path).status_code,401)
+            self.assertEqual(self.client.get(path+'?line=solidex',headers=self.headers).status_code,403)
+            factory.assert_not_called()
+            response=self.client.get(path+'?line=aav',headers=self.headers)
+            self.assertEqual(response.status_code,200)
+            self.assertNotIn('unneeded',response.json['receipt'])
+            factory.return_value.publication_status.assert_called_once_with('existing')
+            factory.return_value.submit_publication.assert_not_called()
+        self.assertEqual(self.store.task(task['id']),before)
+
     def test_superseded_release_cannot_retry(self):
         old=self.task();old['payload']['targets']['zh']['status']='failed'
         self.store.update_task(old['id'],status='failed',payload=old['payload'])

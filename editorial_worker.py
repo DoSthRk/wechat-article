@@ -52,6 +52,21 @@ def verify_wechat(expected, actual):
         raise EditorialError('公众号回读的正文、图片、标题或封面与审核版本不一致')
 
 
+def wechat_public_url(value):
+    # 微信成功回执也会使用 http；只规范化官方文章地址，保留签名查询参数。
+    url = str(value or '')
+    try:
+        parts = urlsplit(url)
+        if (not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url)
+                and parts.scheme in {'http', 'https'}
+                and parts.netloc.lower() == 'mp.weixin.qq.com'
+                and (parts.path == '/s' or parts.path.startswith('/s/'))):
+            return parts._replace(scheme='https').geturl()
+    except ValueError:
+        pass
+    raise EditorialError('微信已确认发布，但公开链接待核对；不会重复发文')
+
+
 def publish_wechat(db, store, task, client, job, bundle_id):
     from batch_processor import _distribute_one, _resolve_wechat_account
     payload = task['payload']; target = payload['targets']['wechat']; pk = task['job_pk']
@@ -59,6 +74,8 @@ def publish_wechat(db, store, task, client, job, bundle_id):
     if target.get('phase') in {'draft_intent', 'submit_intent'}:
         target.update(status='uncertain', error='上次请求中断，远端结果待负责人核对，不能盲目重复发文')
         checkpoint(); return
+    if target.get('provider_publish_status') == 0 and not target.get('publish_id'):
+        raise EditorialError('微信已确认发布，原发布号缺失，请负责人核对；不会重复发文')
     if not target.get('media_id'):
         def receipt(phase, data):
             if phase == 'intent':
@@ -98,19 +115,20 @@ def publish_wechat(db, store, task, client, job, bundle_id):
     if code == 1:
         target.update(status='waiting', error='微信正在审核发布，可关闭页面等待'); checkpoint(); return
     if code != 0:
-        if code in {2, 3, 4}:
+        if code in {2, 3, 4} and target.get('provider_publish_status') != 0:
             target.update(phase='publish_rejected', rejected_publish_id=target.pop('publish_id'))
             raise EditorialError(f'微信公开发布失败（状态 {code}），请核对内容后处理')
         raise EditorialError(f'微信发布状态异常（状态 {code}），已停止自动重发')
     article_id = status.get('article_id')
+    target.update(phase='published_unverified', provider_publish_status=0)
+    if article_id: target['article_id'] = str(article_id)
+    checkpoint()
     items = (status.get('article_detail') or {}).get('item') or []
-    if not article_id or not items: raise EditorialError('微信成功回执缺少文章标识或链接')
-    url = str(items[0].get('article_url') or '')
-    if urlsplit(url).scheme != 'https' or urlsplit(url).hostname != 'mp.weixin.qq.com':
-        raise EditorialError('微信未返回有效的公开文章链接')
+    if not article_id or not items: raise EditorialError('微信已确认发布，但成功回执缺少文章标识或链接；不会重复发文')
+    url = wechat_public_url(items[0].get('article_url'))
     actual = client.published_article(str(article_id))
     news = actual.get('news_item') or []
-    if not news: raise EditorialError('公众号已提交，但公开文章回读未完成')
+    if not news: raise EditorialError('微信已确认发布，但公开文章回读未完成；不会重复发文')
     verify_wechat(expected, news[0])
     target.update(status='done', phase='verified', url=url, article_id=str(article_id), error=None)
     db.upsert_distribution(pk, 'wechat', account=_resolve_wechat_account(job), lang='zh',

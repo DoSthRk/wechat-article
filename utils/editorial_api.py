@@ -271,6 +271,22 @@ def register(app, reviewer, access, has_identity):
         task=Store().task(task_id);job(task['job_pk'])
         return jsonify(ok=True,task=task)
 
+    @app.get('/api/editorial/tasks/<task_id>/wechat-receipt')
+    def editorial_wechat_receipt(task_id):
+        """实名、同业务线只读诊断：仅查询已保存的发布号，不提交或修改任务。"""
+        task=Store().task(task_id);_,source=job(task['job_pk'])
+        target=task['payload'].get('targets',{}).get('wechat',{})
+        if task['kind']!='publish' or not target.get('publish_id'):
+            raise EditorialError('此任务没有可查询的微信发布回执')
+        from batch_processor import _resolve_wechat_account
+        from utils.wechat_client import WeChatClient, WeChatAPIError
+        try:
+            receipt=WeChatClient(account=_resolve_wechat_account(source)).publication_status(target['publish_id'])
+        except WeChatAPIError:
+            raise EditorialError('微信发布回执查询暂未完成，请稍后再查') from None
+        return jsonify(ok=True,receipt={key:receipt.get(key) for key in
+                       ('publish_status','article_id','article_detail','fail_idx')})
+
     @app.post('/api/editorial/tasks/<task_id>/retry')
     def editorial_retry(task_id):
         body=data();store=Store();task=store.task(task_id);job(task['job_pk'])
