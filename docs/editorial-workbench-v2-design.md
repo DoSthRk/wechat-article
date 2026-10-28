@@ -133,7 +133,7 @@
 
 ## 实现与运行
 
-- 正式入口 `/workbench`，旧工作台与审核链接转向新入口。沿用 GM-LAB 实名登录和业务线权限；旧写入 API 在启用后返回 409，业务线快捷 cookie 不能保存或批准。
+- 独立入口 `/workbench/aav` 与 `/workbench/solidex`，旧 `/aav`、`/solidex` 与审核链接保留所属业务线。管理员 `/workbench` 先选择业务线，单线人员直接进入自己的工作台。草稿、生成、发布记录和上传均限定当前业务线，采用页面级请求参数而非可被其他标签页覆盖的会话选择。沿用 GM-LAB 实名登录和业务线权限；旧写入 API 在启用后返回 409，业务线快捷 cookie 不能保存或批准。
 - 前端为本地打包的 Tiptap 3.32.0，结构化 JSON 保留上下标。运行 `cd frontend && npm ci --ignore-scripts && npm run build` 更新提交到仓库的 `static/editorial-editor.js`；生产不需要 Node 或 CDN。
 - 修订、裁框、冻结请求、渠道回执存在共享 `runtime/editorial/`；独立 SQLite WAL 加不可变哈希文件。备份应包含整个目录及原有共享输入、输出、主数据库。不能只备份一份 SQLite 主文件而遗漏 WAL 和资产。
 - 生成与发布各一个持锁进程，处理慢任务不占 Web 请求。Web 服务后台每 30 秒检查队列进程；意外退出后从回执恢复。读取页面和任务状态不触发外部发布。

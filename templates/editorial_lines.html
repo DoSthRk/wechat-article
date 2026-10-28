@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>选择业务线 · GM-LAB</title><link rel="stylesheet" href="{{ url_for('static',filename='editorial.css') }}"></head>
+<body><header class="topbar"><span class="brand">GM<span>·</span>LAB <small>内容工作台</small></span><div class="identity"><span>{{ username }}</span><a href="https://lab.genemedi.cn/">返回 GM-LAB</a></div></header>
+<main><div class="page-heading"><div><h1>选择业务线</h1><p>AAV 与 SOLIDEX 的审核草稿、生成任务和发布记录分别管理。</p></div></div><div class="actions">
+<a class="button primary" href="{{ url_for('editorial_page',line_id='aav') }}">进入 AAV 工作台</a>
+<a class="button primary" href="{{ url_for('editorial_page',line_id='solidex') }}">进入 SOLIDEX 工作台</a>
+</div></main></body></html>

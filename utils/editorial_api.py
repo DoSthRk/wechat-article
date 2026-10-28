@@ -21,6 +21,18 @@ def register(app, reviewer, access, has_identity):
         lines = access()
         if line not in {'aav', 'solidex'} or (lines is not None and line not in lines): abort(403)
 
+    def selected_line(required=True):
+        # 每个页面把自身业务线随请求传入，不用会被另一标签页覆盖的 session/cookie。
+        header, query = request.headers.get('X-Editorial-Line'), request.args.get('line')
+        if header and query and header != query: raise EditorialError('业务线参数不一致')
+        line = header or query
+        if not line:
+            lines = access()
+            if lines and len(lines) == 1: line = next(iter(lines))
+        if line: allowed(line)
+        elif required: raise EditorialError('请先进入 AAV 或 SOLIDEX 的独立工作台')
+        return line
+
     def job(pk):
         identity()
         db = get_db_manager()
@@ -28,6 +40,8 @@ def register(app, reviewer, access, has_identity):
         if not record: abort(404)
         source = service.source_job(db, pk)
         allowed(source.line)
+        selected = selected_line(required=request.method not in {'GET','HEAD','OPTIONS'})
+        if selected and source.line != selected: abort(403)
         if db.find_job_pk(source.job_id) != pk: raise Conflict('这是历史任务记录，请返回工作台打开当前文章')
         return db, source
 
@@ -48,17 +62,25 @@ def register(app, reviewer, access, has_identity):
         return jsonify(ok=False, error=str(exc), conflict=isinstance(exc, Conflict)), 409 if isinstance(exc, Conflict) else 400
 
     @app.get('/workbench')
-    def editorial_page():
+    @app.get('/workbench/<line_id>')
+    def editorial_page(line_id=None):
+        if line_id and line_id not in {'aav','solidex'}: abort(404)
         if not has_identity() and not app.config['TESTING']:
-            return redirect(url_for('article_auth_start', next='/workbench'))
+            return redirect(url_for('article_auth_start', next=url_for('editorial_page',line_id=line_id)))
         who = identity()
-        session.setdefault('editorial_csrf', secrets.token_urlsafe(32))
         lines = access()
-        return render_template('editorial.html', username=who, lines=sorted(lines or {'aav','solidex'}), csrf=session['editorial_csrf'])
+        if line_id is None:
+            if lines and len(lines)==1:
+                return redirect(url_for('editorial_page',line_id=next(iter(lines))))
+            return render_template('editorial_lines.html',username=who)
+        allowed(line_id)
+        session.setdefault('editorial_csrf', secrets.token_urlsafe(32))
+        return render_template('editorial.html', username=who, line_id=line_id,
+                               can_switch=lines is None or len(lines)>1, csrf=session['editorial_csrf'])
 
     @app.get('/api/editorial/articles')
     def editorial_articles():
-        identity(); db = get_db_manager(); store = Store(); lines = access()
+        identity(); line_filter = selected_line(); db = get_db_manager(); store = Store()
         records, _ = db.list_article_overview(page_size=10000)
         result = []; seen = set(); tasks = store.tasks()
         for item in records:
@@ -67,7 +89,7 @@ def register(app, reviewer, access, has_identity):
             pk = db.find_job_pk(item['job_id'])
             try: line = service.source_job(db, pk).line
             except Exception: continue
-            if lines is not None and line not in lines: continue
+            if line != line_filter: continue
             head = store.head(pk)
             related = [t for t in tasks if t['job_pk'] == pk]
             latest = related[0] if related else None
@@ -91,6 +113,7 @@ def register(app, reviewer, access, has_identity):
     @app.post('/api/editorial/upload')
     def editorial_upload():
         csrf(); line = request.form.get('line', ''); allowed(line)
+        if selected_line() != line: abort(403)
         file = request.files.get('file')
         if not file or not file.filename.lower().endswith('.pdf'): raise EditorialError('请选择 PDF 文件')
         raw = file.read()

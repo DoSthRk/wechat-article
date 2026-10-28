@@ -199,17 +199,21 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/")
     def index():
+        if app.config['EDITORIAL_WORKBENCH']:
+            return redirect(url_for('editorial_page'))
         if not _review_identity() and not _direct_line() and not testing:
             return render_template("line_select.html", lines=_LINE_LABELS)
         return redirect(url_for("operator"))
 
     @app.get("/select-line")
     def select_line():
+        if app.config['EDITORIAL_WORKBENCH']:
+            return redirect(url_for('editorial_page'))
         return render_template("line_select.html", lines=_LINE_LABELS)
 
     def _direct_operator(line_id: str):
         if app.config['EDITORIAL_WORKBENCH']:
-            return redirect(url_for('editorial_page'))
+            return redirect(url_for('editorial_page',line_id=line_id))
         response = make_response(render_template(
             "operator.html",
             username=_DIRECT_LINE_USERS[line_id],
@@ -523,7 +527,9 @@ def create_app(testing: bool = False) -> Flask:
         if app.config['EDITORIAL_WORKBENCH']:
             pk = get_db_manager().find_job_pk(job_id)
             if pk is None: abort(404)
-            return redirect(url_for('editorial_page') + f'#edit/{pk}')
+            from utils.editorial_service import source_job
+            line_id = source_job(get_db_manager(),pk).line
+            return redirect(url_for('editorial_page',line_id=line_id) + f'#edit/{pk}')
         _review_job(job_id)
         return render_template('image_review.html', job_id=job_id, username=_username(),
                                review_login_url=url_for('article_auth_start', next=url_for('image_review', job_id=job_id)),

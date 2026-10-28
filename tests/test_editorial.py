@@ -81,7 +81,7 @@ class EditorialTests(unittest.TestCase):
         self.application.config['TRUST_PROXY_IDENTITY']=True
         self.client=self.application.test_client()
         self.headers={'X-GM-LAB-Username':'hqq'}
-        self.client.get('/workbench',headers=self.headers)
+        self.client.get('/workbench',headers=self.headers,follow_redirects=True)
         with self.client.session_transaction() as session:self.csrf=session['editorial_csrf']
         self.write_headers={**self.headers,'X-CSRF-Token':self.csrf}
         self.initial=service.initialize(self.db,self.store,self.pk,'hqq')
@@ -301,6 +301,49 @@ class EditorialTests(unittest.TestCase):
         self.assertIsNotNone(self.store.head(record.id))
         self.assertFalse(self.store.tasks('publish'))
         self.assertEqual(self.store.task(task['id'])['status'],'done')
+
+    def test_admin_workbenches_have_separate_entries_and_fixed_upload_line(self):
+        headers={'X-GM-LAB-Username':'admin'}
+        choice=self.client.get('/workbench',headers=headers)
+        self.assertIn('进入 AAV 工作台',choice.text)
+        self.assertIn('进入 SOLIDEX 工作台',choice.text)
+        self.assertNotIn('id="article-list"',choice.text)
+        for line in ('aav','solidex'):
+            response=self.client.get('/workbench/'+line,headers=headers)
+            self.assertEqual(response.status_code,200)
+            self.assertIn(f'data-line="{line}"',response.text)
+            self.assertNotIn('id="upload-line"',response.text)
+            self.assertIn(f'文章将进入 {line.upper()} 审核草稿箱',response.text)
+        self.assertEqual(self.client.get('/workbench/solidex',headers=self.headers).status_code,403)
+        self.assertEqual(self.client.get('/workbench',headers=self.headers).location,'/workbench/aav')
+
+    def test_admin_lists_and_tasks_are_separated_even_in_parallel_tabs(self):
+        parent=self.db.get_or_create_task('solidex-fixture')
+        other=self.db.upsert_job(parent.id,'solidex-paper',pdf_path=str(self.pdf),template_id='oncology_wechat_pop_sci',product_id='solidex_pan_t_cell_iso_kit',line_id='solidex',status=JobStatus.GENERATED)
+        self.db.upsert_article(other.id,title='SOLIDEX article',content_dir=str(self.output))
+        task=self.store.enqueue('prepare',other.id,'',{'owner':'admin','line':'solidex'})
+        admin={'X-GM-LAB-Username':'admin'}
+        self.assertEqual(self.client.get('/api/editorial/articles',headers=admin).status_code,400)
+        for line,expected in [('solidex',other.id),('aav',self.pk),('solidex',other.id)]:
+            self.client.get('/workbench/'+line,headers=admin)
+            response=self.client.get('/api/editorial/articles',headers={**admin,'X-Editorial-Line':line})
+            self.assertEqual([a['job_pk'] for a in response.json['articles']],[expected])
+        aav={**admin,'X-Editorial-Line':'aav','X-CSRF-Token':self.csrf}
+        self.assertEqual(self.client.get(f'/api/editorial/{other.id}',headers=aav).status_code,403)
+        self.assertEqual(self.client.get(f'/api/editorial/tasks/{task["id"]}',headers=aav).status_code,403)
+        for action in ('prepare','publish','crop','restore'):
+            self.assertEqual(self.client.post(f'/api/editorial/{other.id}/{action}',headers=aav,json={}).status_code,403)
+        self.assertEqual(self.client.post('/api/editorial/upload',headers=aav,data={'line':'solidex'}).status_code,403)
+        self.assertFalse(self.store.tasks('publish'))
+
+    def test_legacy_line_entries_and_review_links_keep_line(self):
+        self.application.config['EDITORIAL_WORKBENCH']=True
+        for path in ('/','/select-line'):
+            self.assertEqual(self.client.get(path,headers=self.headers).location,'/workbench')
+        for line in ('aav','solidex'):
+            self.assertEqual(self.client.get('/'+line,headers=self.headers).location,'/workbench/'+line)
+        self.assertEqual(self.client.get('/image-review/paper',headers=self.headers).location,f'/workbench/aav#edit/{self.pk}')
+        self.assertIn('next=/workbench/solidex',self.client.get('/workbench/solidex').location)
 
     def test_channel_failure_does_not_repeat_successes(self):
         task=self.task();workflow=Mock()

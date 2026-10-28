@@ -55,7 +55,9 @@ elif mode=='after':
     no_old_workers()
     expected=(root/'editor-bundle.sha256').read_text().strip()
     assert hashlib.sha256(get('/static/editorial-editor.js',raw=True)).hexdigest()==expected
-    for path,target in [('/operator','/workbench'),('/workbench','/auth/start')]:
+    for path,target in [('/operator','/workbench'),('/workbench','/auth/start'),
+                        ('/aav','/workbench/aav'),('/solidex','/workbench/solidex'),
+                        ('/workbench/solidex','next=/workbench/solidex')]:
         try:build_opener(NoRedirect()).open(Request(base+path,headers={'Cookie':'gm_article_line=aav'}),timeout=10)
         except HTTPError as exc:
             assert exc.code==302 and target in exc.headers['Location'], (path,exc.code)
