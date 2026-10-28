@@ -53,6 +53,8 @@ def create_app(testing: bool = False) -> Flask:
     app = Flask(__name__)
     app.config["TESTING"] = testing
     app.config["MAX_CONTENT_LENGTH"] = _MAX_UPLOAD_BYTES
+    from utils.editorial_runner import enabled as editorial_enabled
+    app.config['EDITORIAL_WORKBENCH'] = editorial_enabled()
     from utils import lab_sso
     app.secret_key = 'article-test-session-key' if testing else lab_sso.session_secret()
     app.config.update(SESSION_COOKIE_NAME='gm_article_session', SESSION_COOKIE_HTTPONLY=True,
@@ -67,6 +69,12 @@ def create_app(testing: bool = False) -> Flask:
 
     def _review_identity():
         return lab_sso.username(session) or _proxy_username()
+
+    @app.before_request
+    def _editorial_legacy_boundary():
+        if (app.config['EDITORIAL_WORKBENCH'] and request.path.startswith('/api/')
+                and not request.path.startswith('/api/editorial/') and request.method not in {'GET', 'HEAD', 'OPTIONS'}):
+            return jsonify(ok=False, error='工作台已升级，请从新版编辑审核页面保存并发布。旧发布入口已停用。'), 409
 
     @app.get('/auth/start')
     def article_auth_start():
@@ -200,6 +208,8 @@ def create_app(testing: bool = False) -> Flask:
         return render_template("line_select.html", lines=_LINE_LABELS)
 
     def _direct_operator(line_id: str):
+        if app.config['EDITORIAL_WORKBENCH']:
+            return redirect(url_for('editorial_page'))
         response = make_response(render_template(
             "operator.html",
             username=_DIRECT_LINE_USERS[line_id],
@@ -227,6 +237,8 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get("/operator")
     def operator():
+        if app.config['EDITORIAL_WORKBENCH']:
+            return redirect(url_for('editorial_page'))
         username = _username()
         allowed = _line_access()
         line_id = next(iter(allowed)) if allowed and len(allowed) == 1 else ""
@@ -325,7 +337,8 @@ def create_app(testing: bool = False) -> Flask:
                         state.update(current=None, errors=[])
         from utils import auto_blog
         try:
-            auto_blog.kick()
+            if not app.config['EDITORIAL_WORKBENCH']:
+                auto_blog.kick()
         except Exception:
             app.logger.exception("Automatic Blog worker launch failed; queue retained")
         states["auto"] = auto_blog.status(allowed=allowed)
@@ -507,6 +520,10 @@ def create_app(testing: bool = False) -> Flask:
 
     @app.get('/image-review/<job_id>')
     def image_review(job_id: str):
+        if app.config['EDITORIAL_WORKBENCH']:
+            pk = get_db_manager().find_job_pk(job_id)
+            if pk is None: abort(404)
+            return redirect(url_for('editorial_page') + f'#edit/{pk}')
         _review_job(job_id)
         return render_template('image_review.html', job_id=job_id, username=_username(),
                                review_login_url=url_for('article_auth_start', next=url_for('image_review', job_id=job_id)),
@@ -865,10 +882,16 @@ def create_app(testing: bool = False) -> Flask:
         content = md_lib.markdown(md_text, extensions=["tables", "fenced_code", "sane_lists"])
         return render_template("markdown_preview.html", job_id=job_id, content=content, wechat=wechat)
 
+    from utils.editorial_api import register as register_editorial
+    register_editorial(app, _real_reviewer, _line_access, _review_identity)
     if not testing:
         from utils import auto_blog
         try:
-            auto_blog.kick()
+            if app.config['EDITORIAL_WORKBENCH']:
+                from utils.editorial_runner import start_watchdog
+                start_watchdog()
+            else:
+                auto_blog.kick()
         except Exception:
             app.logger.exception("Automatic Blog recovery failed; queue retained")
     return app

@@ -444,7 +444,7 @@ class BlogWorkflow:
 
     @serialized_version
     def publish(self, job_id: str, lang: str, *, force: bool = False, job_pk: Optional[int] = None,
-                expected_package_id: Optional[str] = None) -> Dict[str, Any]:
+                expected_package_id: Optional[str] = None, receipt_callback=None) -> Dict[str, Any]:
         job_pk = self._resolve_job_pk(job_id, job_pk)
         if job_pk is None:
             raise BlogPipelineError(f"Unknown job: {job_id}")
@@ -507,6 +507,8 @@ class BlogWorkflow:
                 payload["cover_url"] = cover_url
             client = self.blog_client_factory()
             require_blog_package(source_job, package.bundle_id, expected_job_pk=job_pk)
+            if receipt_callback:
+                receipt_callback('cms_intent')
             result = (
                 client.update(distribution.external_id, payload, publish=True)
                 if distribution.external_id and not legacy_publication
@@ -520,6 +522,8 @@ class BlogWorkflow:
                 external_url=public_url,
                 image_package_id=package.bundle_id, image_verification_status='pending_readback',
             )
+            if receipt_callback:
+                receipt_callback('cms_saved')
             verify_cms_payload(client, str(result.get('uuid') or distribution.external_id or ''), payload)
             self.blog_url_verifier(public_url)
             verify_public_page_images(public_url, _PublicImages(html, public_url).urls, cover_url=cover_url)

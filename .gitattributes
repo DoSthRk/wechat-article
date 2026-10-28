@@ -1,0 +1,2 @@
+# Bundled editor contains literal Markdown hard-break spaces.
+static/editorial-editor.js -whitespace

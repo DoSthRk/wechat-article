@@ -9,7 +9,7 @@
 - ``add_permanent_material(local_path, type)``：``/cgi-bin/material/add_material``，
   返回永久素材 ``media_id``（可作草稿封面 ``thumb_media_id``；与 uploadimg 不同）
 
-不实现：freepublish、消息群发。
+公开发布通过 freepublish；不实现消息群发。
 
 access_token 缓存策略：内存 + 文件，**按账户隔离** ``runtime/wechat_token_{account}.json``。
 多账户（AAV / 免疫客）各自一个 token 文件，避免互相覆盖（微信每个账户同一时刻只允许
@@ -213,6 +213,32 @@ class WeChatClient:
             self._maybe_invalidate_token(data)
             raise WeChatAPIError(f"get_draft failed: {data}", errcode=data.get("errcode"), raw=data)
         return data
+
+    def _public_post(self, endpoint: str, payload: dict) -> dict:
+        """公开发布请求不自动重试，避免结果不明时重复发文。"""
+        token = self.get_access_token()
+        status, body = self._http_post_json(f'{WECHAT_API_BASE}/cgi-bin/freepublish/{endpoint}?access_token={token}', payload)
+        data = self._parse_json(body)
+        if status != 200 or data.get('errcode', 0) != 0:
+            self._maybe_invalidate_token(data)
+            raise WeChatAPIError('微信公开发布接口未接受请求', errcode=data.get('errcode'), raw=data)
+        return data
+
+    def publication_access(self) -> dict:
+        """只读检查发布列表权限；提交权限仍以正式提交回执为准。"""
+        return self._public_post('batchget', {'offset': 0, 'count': 1, 'no_content': 1})
+
+    def submit_publication(self, media_id: str) -> str:
+        data = self._public_post('submit', {'media_id': media_id})
+        if not data.get('publish_id'):
+            raise WeChatAPIError('微信未返回 publish_id，结果需要核对')
+        return str(data['publish_id'])
+
+    def publication_status(self, publish_id: str) -> dict:
+        return self._public_post('get', {'publish_id': publish_id})
+
+    def published_article(self, article_id: str) -> dict:
+        return self._public_post('getarticle', {'article_id': article_id})
 
     def upload_image(self, local_path: str) -> str:
         """POST /cgi-bin/media/uploadimg。仅供公众号图文正文里 <img src> 用。

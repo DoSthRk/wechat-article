@@ -1,0 +1,7 @@
+{
+  "name": "gm-article-editor",
+  "private": true,
+  "scripts": {"build": "esbuild editor.js --bundle --minify --format=iife --target=es2020 --outfile=../static/editorial-editor.js --legal-comments=eof"},
+  "dependencies": {"@tiptap/core":"3.32.0","@tiptap/pm":"3.32.0","@tiptap/starter-kit":"3.32.0","@tiptap/extension-table":"3.32.0","@tiptap/extension-superscript":"3.32.0","@tiptap/extension-subscript":"3.32.0"},
+  "devDependencies": {"esbuild":"0.28.2"}
+}

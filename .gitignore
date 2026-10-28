@@ -41,3 +41,4 @@ Thumbs.db
 
 # 本地设计/浏览器草图
 .superpowers/
+frontend/node_modules/

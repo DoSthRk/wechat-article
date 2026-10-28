@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GM-LAB · 内容工作台 V2 交互原型</title>
+  <link rel="stylesheet" href="workbench.css">
+</head>
+<body>
+  <div class="prototype">交互原型 · 示例仅保存在当前浏览器，不会生成或发布真实文章</div>
+  <header class="topbar"><a class="brand" href="#inbox">GM<span>·</span>LAB <small>内容工作台</small></a><div class="identity"><span class="line">SOLIDEX</span><span>业务编辑</span><span class="avatar" aria-hidden="true">编</span></div></header>
+  <div class="workspace">
+    <aside class="sidebar"><p class="eyebrow">内容管理</p><nav aria-label="工作台导航"><a href="#inbox" data-route="inbox">审核草稿箱 <b>1</b></a><a href="#generating" data-route="generating">生成中 <b id="generation-count">0</b></a><a href="#records" data-route="records">发布记录 <b id="record-count">0</b></a></nav><div class="sidebar-note"><span class="status-dot"></span>先编辑审核，再公开发布<p>公众号与 Blog 共用审核后的正文和配图。</p></div></aside>
+    <main id="main">
+      <section id="inbox-view" class="view">
+        <div class="page-heading"><div><p class="eyebrow">REVIEW INBOX</p><h1>审核草稿箱</h1><p>文章已准备好。在这里完成编辑、配图调整和发布。</p></div><button class="primary" id="upload-open">＋ 上传 PDF</button></div>
+        <div class="workflow"><span>01 上传 PDF</span><i>→</i><span>02 后台生成</span><i>→</i><strong>03 编辑审核</strong><i>→</i><span>04 公开发布</span></div>
+        <div class="list-heading"><h2>待审核 <span class="count">1</span></h2><span>只需处理内容，不必管理后台步骤</span></div>
+        <article class="draft-card"><img id="card-figure" src="assets/figure-1.jpg" alt="示例论文 Figure 1 完整配图"><div class="draft-copy"><div class="meta"><span class="badge">待审核</span><span>SOLIDEX · 免疫文章 7-1</span></div><h2 id="card-title">体内 CAR-T 治疗多发性骨髓瘤：随访研究解读</h2><p>正文、配图和封面可直接编辑。完成后一次提交公众号及多语言 Blog。</p><div class="card-bottom"><span>原文 PDF 已保留 · 1 张示例配图</span><a href="#editor" class="button primary">编辑审核 <span aria-hidden="true">↗</span></a></div></div></article>
+        <div class="quiet-note"><strong>配图有问题，也能在这里解决。</strong><p>打开文章，点击图片上的“调整裁剪”，从 PDF 原页重新框选。文字修改与图片修改一起保存。</p></div>
+      </section>
+      <section id="generating-view" class="view" hidden><div class="page-heading"><div><p class="eyebrow">GENERATION QUEUE</p><h1>生成中</h1><p>后台处理完成后，文章会进入审核草稿箱。</p></div><button id="generate-upload" class="primary">＋ 上传 PDF</button></div><div id="generation-empty" class="empty">当前没有生成任务。上传 PDF 后自动开始，无需再点击“生成”。</div><div id="generation-demo" class="panel" hidden><span class="badge">演示任务</span><h2 id="demo-filename"></h2><p>已演示“上传后自动入队”。此原型不上传文件或调用生成模型。</p><button id="finish-demo">模拟生成完成，查看审核草稿</button></div></section>
+      <section id="editor-view" class="view" hidden>
+        <div class="editor-heading"><div><a class="back" href="#inbox">← 审核草稿箱</a><div class="editor-meta"><span class="badge">待审核</span><span id="save-state" role="status" aria-live="polite">示例草稿</span></div></div><div class="actions"><button id="preview-open">预览排版</button><button id="release-open" class="primary">进入发布 →</button></div></div>
+        <div class="editor-layout">
+          <article class="paper"><div class="paper-top"><label for="article-title">文章标题</label><input id="article-title" maxlength="120" value="体内 CAR-T 治疗多发性骨髓瘤：随访研究解读"><label for="article-digest">摘要</label><textarea id="article-digest" rows="2" maxlength="250">围绕原文的研究设计、结果与局限展开解读。此处为交互示例文字，供体验编辑流程。</textarea></div>
+            <div class="toolbar" role="toolbar" aria-label="正文格式"><button data-command="formatBlock" data-value="p">正文</button><button data-command="formatBlock" data-value="h2">小标题</button><button data-command="bold" aria-label="加粗"><b>B</b></button><button data-command="italic" aria-label="斜体"><i>I</i></button><button data-command="insertUnorderedList">列表</button><button data-command="undo" aria-label="撤销正文修改">撤销</button></div>
+            <div id="article-body" class="article-body" contenteditable="true" role="textbox" aria-label="文章正文，可直接编辑" aria-multiline="true"><h2>研究背景与核心问题</h2><p>这里展示一份可编辑的文章草稿。您可以直接修改文字，选中内容后设置加粗，或者把段落设为小标题。</p><p>正式使用时，这里将载入系统生成的完整正文。发布与翻译均使用最后审核的版本，人工修改不会被后台重新生成覆盖。</p><h2>研究设计与配图</h2><p>下方为已有论文的真实配图，用于体验裁剪操作。可以打开完整 PDF 原页，调整选区并查看结果。</p></div>
+            <figure class="article-figure"><div class="figure-tools"><span>Figure 1 · 原文第 2 页</span><button id="crop-open">调整裁剪</button></div><img id="article-figure" src="assets/figure-1.jpg" alt="原文 Figure 1 的配图"><figcaption><label class="sr-only" for="figure-caption">图注</label><textarea id="figure-caption" rows="2">图 1｜配图示例。图注可编辑，正式稿应根据原文核对。</textarea></figcaption></figure>
+            <div class="template-note">公众号发布时沿用现有排版、产品模块及“阅读原文”引导。正文不重复文章大标题。</div>
+          </article>
+          <aside class="inspector"><section class="panel"><div class="panel-title"><h2>原文与配图</h2><span class="badge neutral">已关联</span></div><p>原始 PDF 始终保留。裁剪只产生新图片，不改变原文。</p><button id="source-open" class="wide">查看原页 / 调整裁剪</button><dl><dt>来源</dt><dd>免疫文章 7-1</dd><dt>当前配图</dt><dd>Figure 1 · 第 2 页</dd></dl></section><section class="panel"><h2>文章封面</h2><div class="cover"><img id="cover-image" src="assets/figure-1.jpg" alt="封面示意，完整容纳当前配图"></div><p>当前示例采用完整配图留白适配，避免截断面板。正式版独立编辑封面。</p></section><section class="panel"><h2>草稿版本</h2><p id="revision-label">生成原稿 · 示例</p><button id="restore-open" class="wide">恢复示例原稿</button><p class="small">正式版将保留每次修订及编辑人。此原型只演示本机保存。</p></section></aside>
+        </div>
+      </section>
+      <section id="records-view" class="view" hidden><div class="page-heading"><div><p class="eyebrow">PUBLICATION HISTORY</p><h1>发布记录</h1><p>每个渠道独立记录结果，部分失败只重试对应渠道。</p></div></div><div id="records-empty" class="empty">尚未进行发布演示。请在审核草稿中点击“进入发布”。</div><div id="records-content" hidden><div class="result-summary"><div><span class="badge" id="release-badge">模拟发布中</span><h2 id="release-title"></h2><p id="release-description">已提交，可以关闭页面。正式版将在完成后发送飞书通知。</p></div><a href="#editor" class="button">返回编辑</a></div><div id="target-list" class="target-list"></div><p class="small">此处为模拟结果，不代表真实账号权限、远端发布或通知发送。</p></div></section>
+    </main>
+  </div>
+  <dialog id="upload-dialog"><div class="dialog-heading"><div><p class="eyebrow">NEW ARTICLE</p><h2>上传 PDF</h2></div><button data-close aria-label="关闭上传窗口">×</button></div><p>业务线：SOLIDEX。上传后自动生成，完成后进入审核草稿箱。</p><label class="file-drop">选择 PDF 文件<input id="pdf-input" type="file" accept="application/pdf,.pdf"></label><p class="small">原型仅读取文件名，不上传或读取 PDF 内容。</p></dialog>
+  <dialog id="crop-dialog" class="crop-dialog"><div class="dialog-heading"><div><p class="eyebrow">FIGURE 1 · PDF PAGE 2</p><h2>从原页重新裁剪</h2></div><button data-close aria-label="关闭裁剪窗口">×</button></div><p>在原页拖动框选，或调整右侧数值。保留图中所有面板、坐标轴和标签。</p><div class="crop-layout"><div id="crop-stage" class="crop-stage"><img id="source-image" src="assets/source-page-2.png" alt="论文第 2 页原始页面，供核对并框选 Figure 1" draggable="false"><div id="crop-box" aria-hidden="true"></div></div><div class="crop-controls"><h3>裁剪区域</h3><p class="small">数值为原页宽高的百分比</p><div class="coordinate-grid"><label>左侧 X<input id="crop-x" type="number" min="0" max="99" step="0.1"></label><label>顶部 Y<input id="crop-y" type="number" min="0" max="99" step="0.1"></label><label>宽度<input id="crop-w" type="number" min="1" max="100" step="0.1"></label><label>高度<input id="crop-h" type="number" min="1" max="100" step="0.1"></label></div><p id="crop-error" role="alert"></p><button id="crop-reset" class="wide">恢复初始裁框</button><h3>裁剪预览</h3><canvas id="crop-preview" aria-label="当前选区预览"></canvas><p class="small">应用后只更新这一张配图。正文保持当前编辑内容。</p></div></div><div class="dialog-actions"><button data-close>取消</button><button class="primary" id="crop-apply">应用裁剪</button></div></dialog>
+  <dialog id="preview-dialog" class="preview-dialog"><div class="dialog-heading"><div><p class="eyebrow">LAYOUT PREVIEW</p><h2>发布前预览</h2></div><button data-close aria-label="关闭预览">×</button></div><div class="preview-tabs"><button data-preview="wechat" aria-pressed="true">公众号</button><button data-preview="blog" aria-pressed="false">Blog</button></div><p class="small">排版示意。正式版将使用现有完整公众号模板生成预览。</p><div id="preview-content" class="preview-content wechat"></div></dialog>
+  <dialog id="release-dialog"><div class="dialog-heading"><div><p class="eyebrow">PUBLISH APPROVED VERSION</p><h2>确认并公开发布</h2></div><button data-close aria-label="关闭发布窗口">×</button></div><p class="release-callout">公开发布文章，不向公众号关注者群发消息。</p><h3 id="confirm-title"></h3><p>将使用您刚刚保存的正文、配图和封面。</p><ul class="release-targets"><li>公众号 <span>免疫客 · 公开文章</span></li><li>Blog <span>中文 / English / 日本語 / 한국어 / Русский</span></li><li>完成通知 <span>沿用当前飞书收信人</span></li></ul><p class="small">公众号接口权限须在正式接入时验证。原型不会调用任何发布接口。</p><div class="dialog-actions"><button data-close>返回编辑</button><button id="publish-demo" class="primary">模拟确认并发布</button></div></dialog>
+  <dialog id="restore-dialog"><div class="dialog-heading"><h2>恢复示例原稿</h2><button data-close aria-label="关闭恢复窗口">×</button></div><p>这将清除本机原型中的文字和裁剪修改，恢复演示初始状态。</p><div class="dialog-actions"><button data-close>保留修改</button><button id="restore-confirm" class="primary">恢复示例</button></div></dialog>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="workbench.js"></script>
+</body>
+</html>

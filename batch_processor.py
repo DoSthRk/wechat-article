@@ -359,7 +359,7 @@ def _serialized_wechat(function):
 def _distribute_one(
     db, job_pk: int, job: Job,
     get_client: Callable[[str], WeChatClient],
-    args: argparse.Namespace, *, expected_package_id=None,
+    args: argparse.Namespace, *, expected_package_id=None, enqueue_followups=True, receipt_callback=None,
 ) -> bool:
     """投放阶段：取基准正文 → 该线对应账户的公众号草稿（已有 media_id 则走 PATCH）。"""
     article = db.get_article(job_pk)
@@ -466,6 +466,9 @@ def _distribute_one(
         db.update_job_status(job_pk, JobStatus.GENERATED, error_message=f'needs_review: {exc}')
         return False
     except TemplateAssetError as exc:
+        if not enqueue_followups:
+            db.update_job_status(job_pk, JobStatus.GENERATED, error_message='阅读原文引导图准备失败，未提交公开发布')
+            return False
         logger.warning("[%s] 阅读原文引导图失败，继续生成草稿：%s", job.job_id, exc)
     else:
         logger.info("[%s] 已追加阅读原文引导图：%s", job.job_id, guide_url)
@@ -481,6 +484,8 @@ def _distribute_one(
     media_id = ''
     try:
         require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
+        if receipt_callback:
+            receipt_callback('intent', {'content': payload['content'], 'title': payload['title'], 'thumb_media_id': thumb_media_id})
         if existing and existing.wechat_media_id:
             try:
                 client.update_draft(existing.wechat_media_id, 0, payload)
@@ -496,6 +501,8 @@ def _distribute_one(
         else:
             media_id = client.create_draft([payload])
             logger.info("[%s] POST wechat/%s media_id=%s", job.job_id, account, media_id)
+        if receipt_callback:
+            receipt_callback('draft', {'media_id': media_id})
         from utils.wechat_draft_repair import _Body, _first, _image_key
         actual = _first(client.get_draft(media_id))
         expected_images = [_image_key(url) for url in _Body(payload['content']).images]
@@ -505,6 +512,9 @@ def _distribute_one(
             raise WeChatAPIError('公众号草稿图片/封面回读不匹配，未启动多语言发布')
         require_approved_package(job, expected_package_id=package.bundle_id, expected_job_pk=job_pk)
     except Exception as exc:
+        if receipt_callback:
+            receipt_callback('error', {'definite': isinstance(exc, WeChatAPIError) and exc.errcode is not None,
+                                       'code': exc.errcode if isinstance(exc, WeChatAPIError) else None})
         db.upsert_distribution(
             job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
             publish_status="failed", publish_error=str(exc), assembled_dir=article.content_dir,
@@ -517,7 +527,7 @@ def _distribute_one(
 
     db.upsert_distribution(
         job_pk, WECHAT_PLATFORM, account=account, lang=DEFAULT_LANG,
-        wechat_media_id=media_id, publish_status="published", publish_error=None,
+        wechat_media_id=media_id, publish_status="published" if enqueue_followups else "drafted", publish_error=None,
         assembled_dir=article.content_dir,
         image_package_id=package.bundle_id, image_verification_status='verified',
         image_receipt_json=json.dumps({'image_package_id': package.bundle_id,
@@ -525,7 +535,9 @@ def _distribute_one(
             'image_keys': actual_images, 'draft_readback_verified': True,
             'wide_cover_crop_verified': True, 'square_preview_status': 'not_reviewed'}, ensure_ascii=False),
     )
-    db.update_job_status(job_pk, JobStatus.PUBLISHED)
+    db.update_job_status(job_pk, JobStatus.PUBLISHED if enqueue_followups else JobStatus.GENERATED)
+    if not enqueue_followups:
+        return True
     try:
         count = enqueue_auto_blog(db, job_pk, job.job_id, owner_line=job.line or "",
                                   image_package_id=package.bundle_id)
