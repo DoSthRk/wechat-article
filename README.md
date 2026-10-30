@@ -148,10 +148,28 @@ A：DB 里 `article_drafts.wechat_media_id` 非空时走 `draft/update`（更新
 `python-dotenv` 只补充未设置的环境变量，不覆盖服务已有配置。凭据不入 Git。
 
 中文 Blog 发布前会默认发布任务对应的原文 PDF，并把已通过公网校验的 HTTPS 地址写入
-CMS `field_source_pdf_url`。默认 `SOURCE_PDF_STORAGE=ssh`，以内容哈希命名上传到
-`genemedi.net`；容量不足时可切换为 `oss`。公众号草稿的 `content_source_url` 指向
+CMS `field_source_pdf_url`。图片与 PDF 默认上传 OSS，通过独立资源域名分发，避免持续占用
+官网源站磁盘与下载带宽。统一配置 `ARTICLE_ASSET_STORAGE=oss` 和
+`ARTICLE_ASSET_PUBLIC_BASE_URL=https://img.genemedi.cn`；统一配置优先于历史的
+`BLOG_IMAGE_STORAGE`、`SOURCE_PDF_STORAGE` 和各自公开地址，方便一起切换及回退。
+公众号草稿的 `content_source_url` 指向
 已验证公开的 `https://genemedi.cn/blog/{slug}`，不再直接指向 PDF。PDF、CMS 或公开
 Blog 任一质量门失败，都会在公众号草稿发生任何创建或覆盖前终止投放。
+
+资源域名必须先完成 CDN HTTPS、私有 OSS 回源以及图片/PDF 完整内容校验，再启用统一
+配置。OSS/CDN 失败会阻止发布，不会自动把文件转存官网。图片和 PDF 使用内容哈希命名，
+设置一年不可变缓存；PDF 回读校验完整 SHA-256 和大小，图片保持已批准的内容与尺寸校验。
+已有任务缓存的官网 PDF 地址在启用新资源域名后不会继续复用，下一次发布会上传并保存新地址。
+紧急回退需显式设置 `ARTICLE_ASSET_STORAGE=ssh`，并将
+`SOURCE_PDF_PUBLIC_BASE_URL` 改回 `https://www.genemedi.net/uploads/papers`；不自动删除历史文件。
+
+历史资源迁移使用 `scripts/migrate_article_assets.py` 的 `plan → upload → apply` 三阶段。
+`plan` 保存全部待修改 CMS 原值、逐文件 SHA-256 和精确 URL 映射；只改正文中的资源地址、
+封面地址和 PDF 地址，不重新生成文章，也不改变发布状态。后两阶段必须传入
+`--confirm-plan-sha256`，且 `apply` 必须具有全部 OSS/CDN 文件的完整回读回执。
+已存在但内容不同的 OSS 对象、源文件变化和并发 CMS 编辑都会阻止覆盖。
+每条 CMS 更新保存独立写前记录并回读；`rollback` 只恢复仍与迁移后值一致的字段，保留
+人工后续修改。CMS 分页中出现的同主机 HTTP 链接会升级为 HTTPS，再携带认证访问。
 
 投放时还会把 `assets/source-pdf-guide-v1.png` 上传为公众号图片，
 并作为最后一个正文模块追加在产品模块之后，提示读者点击文末“阅读原文”获取原 PDF。

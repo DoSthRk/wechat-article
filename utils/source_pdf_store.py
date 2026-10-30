@@ -1,8 +1,8 @@
 """Publish original article PDFs and verify their public GeneMedi URL.
 
-The default production backend copies PDFs to ``genemedi.net`` over SSH.  An
-OSS backend is also available as a capacity fallback.  Objects are addressed by
-their SHA-256 digest, so re-uploading the same paper is idempotent.
+The default backend stores PDFs in OSS behind a dedicated asset domain.  The
+legacy SSH backend remains available for an explicit rollback. Objects are
+addressed by SHA-256, so re-uploading the same paper is idempotent.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib import request as urllib_request
 from urllib.parse import quote
+
+from config import asset_public_base_url, asset_storage_mode
 
 
 class SourcePdfError(Exception):
@@ -116,19 +118,32 @@ def provision_source_pdf_ssh(env: Optional[Mapping[str, str]] = None) -> dict[st
     }
 
 
-def verify_public_pdf(url: str, *, timeout: float = 20.0) -> None:
+def verify_public_pdf(url: str, *, timeout: float = 20.0,
+                      expected_sha256: Optional[str] = None,
+                      expected_size: Optional[int] = None) -> None:
     """Verify that a public URL returns readable PDF bytes over HTTP(S)."""
     if not url.lower().startswith("https://"):
         raise SourcePdfError(f"原文 PDF 必须使用 HTTPS：{url}")
-    request = urllib_request.Request(
-        url,
-        headers={"Range": "bytes=0-1023", "User-Agent": "GeneMedi-PDF-Verify/1.0"},
-    )
+    headers = {"User-Agent": "GeneMedi-PDF-Verify/2.0"}
+    if expected_sha256 is None:
+        headers["Range"] = "bytes=0-1023"
+    request = urllib_request.Request(url, headers=headers)
     try:
         with urllib_request.urlopen(request, timeout=timeout) as response:
             status = int(getattr(response, "status", 200) or 200)
             content_type = (response.headers.get_content_type() or "").lower()
             first = response.read(1024)
+            digest = hashlib.sha256(first)
+            size = len(first)
+            if expected_sha256 is not None:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if expected_size is not None and size > expected_size:
+                        raise SourcePdfError("原文 PDF 公网大小超过源文件")
     except Exception as exc:
         raise SourcePdfError(f"原文 PDF 公网校验失败：{url}：{exc}") from exc
     if status not in {200, 206}:
@@ -137,6 +152,11 @@ def verify_public_pdf(url: str, *, timeout: float = 20.0) -> None:
         raise SourcePdfError(f"原文 PDF Content-Type 异常：{content_type or 'missing'}")
     if b"%PDF-" not in first:
         raise SourcePdfError("原文 PDF 公网内容校验失败：响应中没有 PDF 文件头")
+    if expected_sha256 is not None:
+        if status != 200 or digest.hexdigest() != expected_sha256:
+            raise SourcePdfError("原文 PDF 公网内容哈希与源文件不一致")
+        if expected_size is not None and size != expected_size:
+            raise SourcePdfError("原文 PDF 公网大小与源文件不一致")
 
 
 class SshSourcePdfStore:
@@ -263,7 +283,7 @@ class SshSourcePdfStore:
 
 
 class OssSourcePdfStore:
-    """Content-addressed OSS uploader used when the origin disk is unsuitable."""
+    """Content-addressed OSS uploader independent of the website origin disk."""
 
     def __init__(self, bucket: Any, prefix: str, public_base_url: str) -> None:
         self.bucket = bucket
@@ -272,13 +292,17 @@ class OssSourcePdfStore:
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "OssSourcePdfStore":
-        values = env or os.environ
+        values = os.environ if env is None else env
+        try:
+            public_base = asset_public_base_url(values.get("SOURCE_PDF_PUBLIC_BASE_URL", ""), values)
+        except ValueError as exc:
+            raise SourcePdfError(str(exc)) from exc
         config = {
             "access_id": (values.get("SOURCE_PDF_OSS_ACCESS_KEY_ID") or values.get("ALIYUN_OSS_ACCESS_KEY_ID") or "").strip(),
             "access_secret": (values.get("SOURCE_PDF_OSS_ACCESS_KEY_SECRET") or values.get("ALIYUN_OSS_ACCESS_KEY_SECRET") or "").strip(),
             "endpoint": (values.get("SOURCE_PDF_OSS_ENDPOINT") or values.get("ALIYUN_OSS_ENDPOINT") or "").strip(),
             "bucket": (values.get("SOURCE_PDF_OSS_BUCKET") or values.get("ALIYUN_OSS_BUCKET") or "").strip(),
-            "public_base_url": values.get("SOURCE_PDF_PUBLIC_BASE_URL", "").strip(),
+            "public_base_url": public_base,
         }
         missing = [name for name, value in config.items() if not value]
         if missing:
@@ -308,18 +332,19 @@ class OssSourcePdfStore:
                     headers={
                         "Content-Type": "application/pdf",
                         "Cache-Control": "public, max-age=31536000, immutable",
+                        "x-oss-meta-sha256": digest,
                     },
                 )
         except Exception as exc:
             raise SourcePdfError(f"原文 PDF OSS 上传失败：{path.name}：{exc}") from exc
         url = f"{self.public_base_url}/{quote(key, safe='/')}"
-        verify_public_pdf(url)
+        verify_public_pdf(url, expected_sha256=digest, expected_size=size)
         return PublishedSourcePdf(url=url, sha256=digest, size=size)
 
 
 def create_source_pdf_store(env: Optional[Mapping[str, str]] = None):
-    values = env or os.environ
-    mode = values.get("SOURCE_PDF_STORAGE", "ssh").strip().lower()
+    values = os.environ if env is None else env
+    mode = asset_storage_mode("SOURCE_PDF_STORAGE", values)
     if mode == "ssh":
         return SshSourcePdfStore.from_env(values)
     if mode == "oss":

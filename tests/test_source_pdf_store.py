@@ -1,4 +1,6 @@
 import subprocess
+import hashlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +11,8 @@ from utils.source_pdf_store import (
     SourcePdfError,
     SshSourcePdfStore,
     inspect_pdf,
+    create_source_pdf_store,
+    verify_public_pdf,
 )
 
 
@@ -58,7 +62,46 @@ class SourcePdfStoreTests(unittest.TestCase):
         self.assertTrue(key.endswith(f"{result.sha256}.pdf"))
         self.assertEqual(path, str(self.pdf))
         self.assertEqual(headers["Content-Type"], "application/pdf")
-        verify.assert_called_once_with(result.url)
+        verify.assert_called_once_with(result.url, expected_sha256=result.sha256, expected_size=result.size)
+
+    def test_common_setting_overrides_legacy_ssh_backend(self):
+        with patch("utils.source_pdf_store.OssSourcePdfStore.from_env") as oss:
+            create_source_pdf_store({"ARTICLE_ASSET_STORAGE": "oss", "SOURCE_PDF_STORAGE": "ssh"})
+        oss.assert_called_once()
+
+    def test_new_install_defaults_to_oss(self):
+        with patch("utils.source_pdf_store.OssSourcePdfStore.from_env") as oss:
+            create_source_pdf_store({})
+        oss.assert_called_once()
+
+    def test_pdf_readback_rejects_changed_bytes_and_partial_response(self):
+        from email.message import Message
+
+        data = self.pdf.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        for served, status in [(data + b"changed", 200), (data, 206)]:
+            with self.subTest(status=status):
+                response = io.BytesIO(served)
+                response.status = status
+                response.headers = Message()
+                response.headers["Content-Type"] = "application/pdf"
+                with patch("utils.source_pdf_store.urllib_request.urlopen", return_value=response):
+                    with self.assertRaises(SourcePdfError):
+                        verify_public_pdf("https://img.example/paper.pdf", expected_sha256=digest,
+                                          expected_size=len(data))
+
+    def test_pdf_readback_accepts_only_full_matching_file(self):
+        from email.message import Message
+
+        data = self.pdf.read_bytes()
+        response = io.BytesIO(data)
+        response.status = 200
+        response.headers = Message()
+        response.headers["Content-Type"] = "application/pdf"
+        with patch("utils.source_pdf_store.urllib_request.urlopen", return_value=response) as request:
+            verify_public_pdf("https://img.example/paper.pdf",
+                              expected_sha256=hashlib.sha256(data).hexdigest(), expected_size=len(data))
+        self.assertFalse(request.call_args.args[0].has_header("Range"))
 
     def test_ssh_upload_checks_capacity_and_uses_atomic_remote_name(self):
         key = self.base / "key"

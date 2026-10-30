@@ -23,6 +23,7 @@ from urllib.parse import urljoin
 import markdown as md_lib
 
 from db.database import BLOG_SOURCE_LANG, BLOG_TARGET_LANGS, DatabaseManager
+from config import asset_public_base_url, asset_storage_mode
 from utils.blog_urls import blog_slug, public_blog_url, verify_public_blog_url
 from utils.blog_task_lock import serialized_version
 from utils.figure_strategy import figure_key_from_description
@@ -58,12 +59,16 @@ class OssImageStore:
 
     @classmethod
     def from_env(cls) -> "OssImageStore":
+        try:
+            public_base = asset_public_base_url(os.getenv("ALIYUN_OSS_CDN_BASE_URL", ""))
+        except ValueError as exc:
+            raise BlogPipelineError(str(exc)) from exc
         required = {
             "ALIYUN_OSS_ACCESS_KEY_ID": os.getenv("ALIYUN_OSS_ACCESS_KEY_ID", "").strip(),
             "ALIYUN_OSS_ACCESS_KEY_SECRET": os.getenv("ALIYUN_OSS_ACCESS_KEY_SECRET", "").strip(),
             "ALIYUN_OSS_ENDPOINT": os.getenv("ALIYUN_OSS_ENDPOINT", "").strip(),
             "ALIYUN_OSS_BUCKET": os.getenv("ALIYUN_OSS_BUCKET", "").strip(),
-            "ALIYUN_OSS_CDN_BASE_URL": os.getenv("ALIYUN_OSS_CDN_BASE_URL", "").strip(),
+            "ALIYUN_OSS_CDN_BASE_URL": public_base,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
@@ -86,7 +91,12 @@ class OssImageStore:
         suffix = path.suffix.lower() if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else ".png"
         key = "/".join(part for part in (self.prefix, f"{digest}{suffix}") if part)
         try:
-            self.bucket.put_object_from_file(key, str(path))
+            self.bucket.put_object_from_file(key, str(path), headers={
+                "Content-Type": {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                                 ".png": "image/png", ".webp": "image/webp"}[suffix],
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "x-oss-meta-sha256": digest,
+            })
         except Exception as exc:
             raise BlogPipelineError(f"OSS upload failed for {path.name}: {exc}") from exc
         return verify_public_image(f"{self.cdn_base_url}/{key}", expected_path=path)
@@ -279,7 +289,7 @@ class SshImageStore:
 
 
 def create_blog_image_store() -> Any:
-    mode = os.getenv("BLOG_IMAGE_STORAGE", "ssh").strip().lower()
+    mode = asset_storage_mode("BLOG_IMAGE_STORAGE")
     if mode == "ssh":
         return SshImageStore.from_env()
     if mode == "oss":
