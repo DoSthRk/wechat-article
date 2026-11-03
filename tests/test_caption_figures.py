@@ -14,6 +14,28 @@ def _el(x0, top, x1, bottom):
 
 
 class TestCaptionRegex(unittest.TestCase):
+    def test_wrapped_prose_and_supplementary_cross_reference_are_not_legends(self):
+        for text in ['Fig. 3 B, with the corresponding images', 'Fig. 2 A, and donor maps']:
+            lines = cf._group_lines(_FakePage(_words(text, 400)))
+            self.assertIsNone(cf._caption_match(lines, 0))
+        lines = cf._group_lines(_FakePage(_words('Figure S2. Clinical correlations, related to', 400)
+                                         + _words('Fig. 3. (A) Sequential changes', 412)))
+        self.assertIsNone(cf._caption_match(lines, 1))
+        real = cf._group_lines(_FakePage(_words('Figure 3. Glomerular trajectory', 400)))
+        self.assertIsNotNone(cf._caption_match(real, 0))
+
+    def test_native_rectangle_clip_is_used_without_guessing_caption_edge(self):
+        from utils import pdf_vector_clips as clips
+        rectangle = dict(_el(10, 240, 250, 540), object_type='rect',
+                         pts=[(10,240),(250,240),(250,540),(10,540)])
+        key=clips._line_key(rectangle['pts'] + [rectangle['pts'][0]])
+        with patch.object(clips, '_native_clips', return_value={key:(98,499,144,511)}):
+            result=clips.clip_caption_lines('source.pdf',7,[rectangle],[518],600,800)
+        self.assertEqual(result[0]['bottom'],511)
+        self.assertEqual(result[0]['top'],499)
+        with patch.object(clips, '_native_clips', return_value={}):
+            self.assertEqual(clips.clip_caption_lines('source.pdf',7,[rectangle],[518],600,800),[rectangle])
+
     def test_matches(self):
         for t, num in [
             ("Figure 1. Integrative single-cell analysis", "1"),
@@ -258,14 +280,18 @@ class TestNativeVectorClips(unittest.TestCase):
             for name, replacement in replacements.items():
                 stack.enter_context(patch.object(raw, name, side_effect=replacement))
             self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {key: (150, 200, 350, 600)})
+            rect_obj = SimpleNamespace(**{**vars(obj), 'points':[(100,100),(400,100),(400,700),(100,700),(100,100)]})
+            rect_key = clips._line_key([(100,700),(400,700),(400,100),(100,100)])
+            page.get_objects.return_value = [rect_obj]
+            self.assertEqual(clips._native_clips('source.pdf',0,{rect_key},600,800),{rect_key:(150,200,350,600)})
             # An identical visible unbounded line must not be hidden by another
             # overlaid path's clipping evidence.
             page.get_objects.return_value = [obj, unbounded]
             self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {})
             page.get_rotation.return_value = 90
             self.assertEqual(clips._native_clips('source.pdf', 0, {key}, 600, 800), {})
-        self.assertEqual(page.close.call_count, 3)
-        self.assertEqual(doc.close.call_count, 3)
+        self.assertEqual(page.close.call_count, 4)
+        self.assertEqual(doc.close.call_count, 4)
 
 
 class TestCrossPageCaption(unittest.TestCase):

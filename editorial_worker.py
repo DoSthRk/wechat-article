@@ -18,6 +18,7 @@ from db.database import get_db_manager, JobStatus
 from utils.editorial_store import Store, now
 from utils.editorial_service import initialize, source_job, activate_package, validate_publication
 from utils.editorial_document import EditorialError
+from utils.editorial_figures import recover as recover_figures, figure_status
 from utils.blog_task_lock import version_lock
 from utils.wechat_client import WeChatClient, WeChatAPIError
 
@@ -30,17 +31,14 @@ def run_prepare(db, store, task):
         if not _generate_one(db, pk, job, ArticleAnalyzer()):
             raise EditorialError('文章生成未完成，请查看生成诊断后重试')
     if not store.head(pk):
-        from utils.image_packages import get_package, build_package
-        package = get_package(job)
-        if not package.get('manifest'):
-            try:
-                build_package(job, job_pk=pk)
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception('Automatic figures unavailable; opening manual editor for job %s', pk)
-        initialize(db, store, pk, task['payload']['owner'])
+        info = initialize(db, store, pk, task['payload']['owner'])
+        recover_figures(db, store, pk, task['payload']['owner'], info['revision'])
+    elif task['payload'].get('recover_figures'):
+        recover_figures(db, store, pk, task['payload']['owner'], task['revision'])
     task['payload']['revision'] = store.head(pk)['revision']
-    store.update_task(task['id'], status='done', payload=task['payload'])
+    status = figure_status(store.revision(pk, task['payload']['revision']))
+    task['payload']['figures'] = status
+    store.update_task(task['id'], status='needs_images' if status['missing'] or not status['total'] else 'done', payload=task['payload'])
 
 
 def verify_wechat(expected, actual):

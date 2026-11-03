@@ -10,6 +10,8 @@ import ctypes
 
 
 def _line_key(points):
+    if len(points) > 2 and all(abs(a-b) < .01 for a,b in zip(points[0], points[-1])):
+        points = points[:-1]
     return tuple(sorted(tuple(round(float(v), 2) for v in point) for point in points))
 
 
@@ -46,13 +48,15 @@ def _native_clips(pdf_path, page_index, keys, page_w, page_h):
                 or any(abs(a-b) > .01 for a, b in zip(page.get_bbox(), (0, 0, page_w, page_h)))):
             return {}
         for obj in page.get_objects(max_depth=1):
-            if obj.type != raw.FPDF_PAGEOBJ_PATH or raw.FPDFPath_CountSegments(obj) != 2:
+            if obj.type != raw.FPDF_PAGEOBJ_PATH or raw.FPDFPath_CountSegments(obj) not in (2, 4, 5):
                 continue
-            segments = [raw.FPDFPath_GetPathSegment(obj, i) for i in range(2)]
-            if [raw.FPDFPathSegment_GetType(s) for s in segments] != [raw.FPDF_SEGMENT_MOVETO, raw.FPDF_SEGMENT_LINETO]:
+            segments = [raw.FPDFPath_GetPathSegment(obj, i) for i in range(raw.FPDFPath_CountSegments(obj))]
+            if [raw.FPDFPathSegment_GetType(s) for s in segments] != [raw.FPDF_SEGMENT_MOVETO] + [raw.FPDF_SEGMENT_LINETO] * (len(segments)-1):
                 continue
             matrix = obj.get_matrix()
             points = [matrix.on_point(*point(s)) for s in segments]
+            if len(points) > 2 and _rectangle(points) is None:
+                continue
             key = _line_key([(x, page_h-y) for x, y in points])
             if key not in keys:
                 continue
@@ -84,7 +88,8 @@ def _native_clips(pdf_path, page_index, keys, page_w, page_h):
 
 
 def clip_caption_lines(pdf_path, page_index, graphics, caption_tops, page_w, page_h):
-    targets = [g for g in graphics if g.get('object_type') == 'line' and len(g.get('pts', [])) == 2
+    targets = [g for g in graphics if ((g.get('object_type') == 'line' and len(g.get('pts', [])) == 2)
+               or (g.get('object_type') == 'rect' and len(g.get('pts', [])) in (4, 5)))
                and any(float(g['top']) < top < float(g['bottom']) for top in caption_tops)]
     if not targets:
         return graphics

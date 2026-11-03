@@ -53,17 +53,21 @@ def initialize(db, store: Store, pk: int, author: str) -> dict:
                 finally: page.close()
         finally: document.close()
         figures = {}
+        figure_diagnostics = {}
         from utils.image_packages import get_package
         try:
             package = get_package(job)
             if package.get('manifest') and package.get('status') in {'needs_review', 'approved', 'revoked'}:
                 for item in package['manifest']['figures']:
                     key = f'{"extended" if item["is_extended"] else "main"}:{item["label"]}'
-                    raw = Path(package['directory'], item['path']).read_bytes()
-                    with Image.open(io.BytesIO(raw)) as image:
-                        output = io.BytesIO(); image.convert('RGB').save(output, 'JPEG', quality=95)
-                    figures[key] = {'asset': store.put(pk, output.getvalue(), '.jpg'), 'page': item['page'],
-                                    'bbox': item['bbox'], 'caption': item.get('caption', ''), 'origin': 'automatic'}
+                    try:
+                        raw = Path(package['directory'], item['path']).read_bytes()
+                        with Image.open(io.BytesIO(raw)) as image:
+                            output = io.BytesIO(); image.convert('RGB').save(output, 'JPEG', quality=95)
+                        figures[key] = {'asset': store.put(pk, output.getvalue(), '.jpg'), 'page': item['page'],
+                                        'bbox': item['bbox'], 'caption': item.get('caption', ''), 'origin': 'automatic'}
+                    except (ValueError, OSError):
+                        figure_diagnostics[key] = '图片读取失败，请重试缺图或从原页裁剪'
         except (ValueError, OSError):
             # 图片不足留在编辑器补图，源文绑定失败仍然阻断。
             figures = {}
@@ -73,7 +77,7 @@ def initialize(db, store: Store, pk: int, author: str) -> dict:
                    'source_hash': source_hash, 'pdf_asset': pdf_asset, 'pages': pages,
                    'figures': figures, 'cover_key': next(iter(figures), keys[0] if keys else ''),
                    'cover_asset': None, 'original_markdown_asset': store.put(pk, text.encode(), '.md'),
-                   'generation_warning': article.block_reason or ''}
+                   'generation_warning': article.block_reason or '', 'figure_diagnostics': figure_diagnostics}
         return store.save(pk, job.job_id, job.line, payload, expected=None, author=author)
 
 

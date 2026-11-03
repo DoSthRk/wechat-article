@@ -42,7 +42,24 @@ _NEXT_PAGE_CAPTION_RE = re.compile(
 _LINE_TOL = 3.0          # 同一行 top 容差 (pt)
 _MIN_FIG_PT = 40.0       # 图框任一边 < 此值 → 视为噪声，丢弃
 _RENDER_SCALE = 1.6
-_CAPTION_VERSION = 11    # v11: respect column boundaries and explicit PDF line clips
+_CAPTION_VERSION = 13    # Reject prose references; native clips and caption-safe padding.
+
+
+def _caption_match(lines, index):
+    line = lines[index]
+    match = _CAPTION_RE.match(line['text'])
+    if not match:
+        return None
+    tail = line['text'][match.end():]
+    # A line-wrapped reference such as "Fig. 3 B, with ..." is not a legend.
+    if re.match(r'\s+[A-Za-z](?:\s*[,);]|\s+and\b)', tail):
+        return None
+    if index:
+        previous = lines[index-1]
+        if (0 <= line['top'] - previous['bottom'] <= 12
+                and re.search(r'(?:related\s+to|shown\s+in|see)\s*$', previous['text'], re.I)):
+            return None
+    return match
 
 
 def caption_enabled() -> bool:
@@ -224,6 +241,24 @@ def _detached_preceding_box(page):
     return _following_page_figure_box(page)
 
 
+def _preceding_top_figure_box(page):
+    """A top-of-next-page legend may follow a large figure plus bottom prose."""
+    lines = _group_lines(page)
+    if any(_caption_match(lines, i) for i in range(len(lines))):
+        return None
+    width, height = float(page.width), float(page.height)
+    gfx = [e for e in _gfx(page) if not is_rule_line(e, width, height)]
+    box = _union_box(gfx)
+    if box is None or len(gfx) < 150 or box[1] > height * .2 or box[3]-box[1] < height * .4:
+        return None
+    prose_top = min([line['top'] for line in lines if line['top'] > box[3]
+                     and line['n_words'] >= 10 and len(line['text']) >= 70], default=height * .95)
+    if prose_top < box[3]:
+        return None
+    return sanitize_figure_region(gfx, figure_crop_words(page), box, width, height,
+                                  text_bounds=(0, prose_top - 1))
+
+
 def _left_figure_for_right_caption(page, cap: dict) -> Optional[Tuple[float, float, float, float]]:
     """Recover a figure occupying the left column beside its right-column legend."""
     page_w, page_h = float(page.width), float(page.height)
@@ -277,7 +312,7 @@ def _caption_page_indices(pdf_path, required_keys, max_pages=None):
         document.close()
 
 
-def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, required_keys=None):
+def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, required_keys=None, boundaries=None):
     """返回所有独立图号/页码/裁框候选；真实同号冲突交给质量闸拦截。"""
     import pdfplumber
 
@@ -297,7 +332,7 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, require
             page = pdf.pages[idx]
             page_w, page_h = float(page.width), float(page.height)
             lines = _group_lines(page)
-            caps = [(m, ln) for ln in lines if (m := _CAPTION_RE.match(ln["text"]))]
+            caps = [(m, ln) for i, ln in enumerate(lines) if (m := _caption_match(lines, i))]
             if not caps:
                 continue
             gfx = _gfx(page)
@@ -336,6 +371,8 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, require
                         box = _full_page_figure_box(pdf.pages[idx - 1])
                     else:
                         box = _detached_preceding_box(pdf.pages[idx - 1])
+                        if box is None and cap['top'] <= page_h * .12:
+                            box = _preceding_top_figure_box(pdf.pages[idx - 1])
                     if box is not None:
                         figure_idx = idx - 1
                 if box is None:
@@ -344,6 +381,8 @@ def find_figure_boxes(pdf_path: str, max_pages: Optional[int] = None, *, require
                 if candidate_key in seen:
                     continue
                 out.append((num, is_ext, figure_idx, box, cap["text"][:80]))
+                if boundaries is not None and figure_idx == idx and box[3] <= cap['top']:
+                    boundaries[(num, is_ext, figure_idx)] = cap['top'] - 1
                 seen.add(candidate_key)
     return out
 
@@ -378,7 +417,8 @@ def extract_figures_by_caption(
         except Exception:  # noqa: BLE001
             pass
 
-    boxes = find_figure_boxes(pdf_path, max_pages, required_keys=required_keys)
+    boundaries = {}
+    boxes = find_figure_boxes(pdf_path, max_pages, required_keys=required_keys, boundaries=boundaries)
     if not boxes:
         return []
     out.mkdir(parents=True, exist_ok=True)
@@ -391,7 +431,9 @@ def extract_figures_by_caption(
             w, h = pil.size
             # Keep antialiased edge labels and panel letters inside the crop.
             box = (max(0, box[0] - 3), max(0, box[1] - 3),
-                   min(w / _RENDER_SCALE, box[2] + 3), min(h / _RENDER_SCALE, box[3] + 3))
+                   min(w / _RENDER_SCALE, box[2] + 3),
+                   min(h / _RENDER_SCALE, box[3] + 3,
+                       max(box[3], boundaries.get((num, is_ext, idx), h / _RENDER_SCALE))))
             x0, y0, x1, y1 = (int(v * _RENDER_SCALE) for v in box)
             crop = pil.crop((max(0, x0), max(0, y0), min(w, x1), min(h, y1)))
             tag = f"cap{num}{'e' if is_ext else ''}_p{idx + 1}"

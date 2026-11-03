@@ -101,13 +101,18 @@ def register(app, reviewer, access, has_identity):
             related = [t for t in tasks if t['job_pk'] == pk]
             latest = related[0] if related else None
             title = item['title']
-            if head: title = store.revision(pk, head['revision'])['title']
+            figure_state = None
+            if head:
+                from utils.editorial_figures import figure_status
+                info = store.revision(pk, head['revision'])
+                title = info['title']
+                figure_state = figure_status(info)
             published = any(d['external_url'] and d['publish_status']=='published' for d in item['distributions'])
             result.append({'job_pk':pk,'job_id':item['job_id'],'line':line,'title':title or item['job_id'],
                 'has_article':bool(item['title']), 'revision':head['revision'] if head else None,
                 'archived':pk in archived, 'can_archive':is_inbox(item,latest,head) and pk not in archived,
                 'legacy_published':published, 'distributions':item['distributions'], 'task':latest,
-                'held':item['job_id'] in {'免疫客文章-4-3','免疫客文章-4-4'}})
+                'figures':figure_state, 'held':item['job_id'] in {'免疫客文章-4-3','免疫客文章-4-4'}})
         return jsonify(ok=True, articles=result)
 
     @app.post('/api/editorial/<int:pk>/inbox-archive')
@@ -195,6 +200,18 @@ def register(app, reviewer, access, has_identity):
         cancelled=next((t['payload'].get('cancel_id') for t in store.tasks('publish')
                         if t['job_pk']==pk and t['revision']==head['revision'] and t['status']=='cancelled'),None)
         return jsonify(ok=True,ready=True,draft=info,history=store.history(pk),cancelled_schedule=cancelled)
+
+    @app.post('/api/editorial/<int:pk>/recover-figures')
+    def editorial_recover_figures(pk):
+        body=data(); db,source=job(pk); store=Store(); head=store.head(pk)
+        if not head or head['revision'] != body.get('expected_revision'):
+            raise Conflict('草稿已变化，请刷新后重试缺图')
+        if any(t['job_pk']==pk and t['status'] in {'scheduled','queued','running','uncertain'} for t in store.tasks()):
+            raise Conflict('该文章还有进行中的任务，请等待完成后再补图')
+        task=store.enqueue('prepare',pk,head['revision'],{'owner':identity(),'line':source.line,'recover_figures':True})
+        if task['status']=='failed': task=store.retry(task['id'])
+        kick('prepare')
+        return jsonify(ok=True,task=task),202
 
     @app.put('/api/editorial/<int:pk>')
     def editorial_save(pk):

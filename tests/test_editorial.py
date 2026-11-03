@@ -393,15 +393,65 @@ class EditorialTests(unittest.TestCase):
             editorial_worker.run_prepare(self.db,self.store,task)
         generate.assert_not_called();build.assert_not_called()
         self.assertEqual(self.store.head(self.pk)['revision'],edited['revision'])
-        self.assertEqual(self.store.task(task['id'])['status'],'done')
+        self.assertEqual(self.store.task(task['id'])['status'],'needs_images')
 
     def test_failed_automatic_crop_still_opens_manual_editor(self):
         with self.store.connection(write=True) as conn:conn.execute('DELETE FROM heads WHERE job_pk=?',(self.pk,))
         task=self.store.enqueue('prepare',self.pk,'',{'owner':'hqq'})
-        with patch('utils.image_packages.get_package',return_value={}),patch('utils.image_packages.build_package',side_effect=TimeoutError('extract timeout')):
+        with patch('utils.image_packages.get_package',return_value={}),patch('batch_processor._resolve_job_figures',side_effect=TimeoutError('extract timeout')):
             editorial_worker.run_prepare(self.db,self.store,task)
         self.assertIsNotNone(self.store.head(self.pk))
-        self.assertEqual(self.store.task(task['id'])['status'],'done')
+        self.assertEqual(self.store.task(task['id'])['status'],'needs_images')
+
+    def test_recovery_preserves_body_and_manual_image_when_one_missing_figure_fails(self):
+        from utils.editorial_figures import recover, figure_status
+        from utils.figure_crop_geometry import UnsafeFigureCrop
+        from utils.pdf_figure_extractor import Figure
+        original=self.cropped()
+        document=deepcopy(original['document'])
+        document['content'] += [{'type':'figure','attrs':{'key':key,'caption':key}}
+                                for key in ['main:2','main:3']]
+        current=self.save('Human title',document=document)
+        path=self.root/'candidate.jpg';Image.new('RGB',(300,300),'orange').save(path)
+        candidate=Figure('2',False,'Second figure',1,str(path),300,300,(100,100,400,400))
+        with patch('batch_processor._resolve_job_figures',side_effect=[([candidate],self.root),UnsafeFigureCrop('ambiguous figure')]) as resolve:
+            result=recover(self.db,self.store,self.pk,'hqq',current['revision'])
+        self.assertEqual(resolve.call_count,2)
+        for key in ['document','title','digest','source_hash','pdf_asset','cover_key','cover_asset','original_markdown_asset']:
+            self.assertEqual(result[key],current[key],key)
+        self.assertEqual(result['figures']['main:1'],current['figures']['main:1'])
+        self.assertIn('main:2',result['figures']);self.assertNotIn('main:3',result['figures'])
+        self.assertEqual(figure_status(result)['missing'],['main:3'])
+        with self.assertRaises(EditorialError):service.validate_publication(self.db,self.store,self.pk,result['revision'])
+        self.assertFalse(self.store.tasks('publish'))
+        response=self.client.get('/api/editorial/articles',headers=self.headers)
+        self.assertEqual(response.json['articles'][0]['figures']['available'],2)
+
+    def test_recovery_rejects_changed_source_and_concurrent_body_edit(self):
+        from utils.editorial_figures import recover
+        current=self.initial
+        def edit(*args,**kwargs):
+            self.save('Concurrent human title')
+            return [],self.root
+        with patch('batch_processor._resolve_job_figures',side_effect=edit):
+            with self.assertRaises(Conflict):recover(self.db,self.store,self.pk,'hqq',current['revision'])
+        self.assertEqual(self.store.revision(self.pk,self.store.head(self.pk)['revision'])['title'],'Concurrent human title')
+        self.pdf.write_bytes(b'changed PDF')
+        with patch('batch_processor._resolve_job_figures') as resolve:
+            with self.assertRaises(EditorialError):recover(self.db,self.store,self.pk,'hqq',self.store.head(self.pk)['revision'])
+        resolve.assert_not_called()
+
+    def test_recover_endpoint_requires_revision_csrf_and_line_and_only_queues_prepare(self):
+        endpoint=f'/api/editorial/{self.pk}/recover-figures'
+        data={'expected_revision':self.initial['revision']}
+        self.assertEqual(self.client.post(endpoint,json=data,headers=self.headers).status_code,403)
+        self.assertEqual(self.client.post(endpoint,json={'expected_revision':'stale'},headers=self.write_headers).status_code,409)
+        response=self.client.post(endpoint,json=data,headers=self.write_headers)
+        self.assertEqual(response.status_code,202)
+        self.assertEqual(response.json['task']['kind'],'prepare')
+        self.assertTrue(response.json['task']['payload']['recover_figures'])
+        self.assertEqual(self.client.post(endpoint,json=data,headers=self.write_headers).status_code,409)
+        self.assertFalse(self.store.tasks('publish'))
 
     def test_upload_queues_generation_and_duplicate_does_not_overwrite(self):
         image=Image.new('RGB',(600,800),'orange');raw=io.BytesIO();image.save(raw,'PDF',resolution=72)
@@ -428,13 +478,13 @@ class EditorialTests(unittest.TestCase):
         record=self.db.upsert_job(parent.id,'fresh-paper',pdf_path=str(self.pdf),template_id='aav_academic_soft_intro',product_id='purprox_aaveasy_spin_columns',line_id='aav',status=JobStatus.PENDING)
         task=self.store.enqueue('prepare',record.id,'',{'owner':'hqq','line':'aav'})
         analyzer=Mock();analyzer.analyze.return_value=AnalysisResult(job_id='fresh-paper',success=True,markdown='# Generated article\n\n## Results\n\nReviewed later.\n\n[图片:Figure 1 Experiment]',model='test-model')
-        with patch('core.main.ArticleAnalyzer',return_value=analyzer),patch('batch_processor.ARTICLE_CONTENT_DIR',str(self.output.parent)),patch('utils.image_packages.build_package',return_value={}):
+        with patch('core.main.ArticleAnalyzer',return_value=analyzer),patch('batch_processor.ARTICLE_CONTENT_DIR',str(self.output.parent)),patch('utils.image_packages.build_package',return_value={}),patch('batch_processor._resolve_job_figures',return_value=([],self.root)):
             editorial_worker.run_prepare(self.db,self.store,task)
         self.assertEqual(analyzer.analyze.call_count,1)
         self.assertEqual(self.db.get_article(record.id).title,'Generated article')
         self.assertIsNotNone(self.store.head(record.id))
         self.assertFalse(self.store.tasks('publish'))
-        self.assertEqual(self.store.task(task['id'])['status'],'done')
+        self.assertEqual(self.store.task(task['id'])['status'],'needs_images')
 
     def test_admin_workbenches_have_separate_entries_and_fixed_upload_line(self):
         headers={'X-GM-LAB-Username':'admin'}

@@ -10,7 +10,7 @@ const csrf = document.querySelector('meta[name="csrf-token"]').content;
 const workbenchLine = document.body.dataset.line;
 let pk, draft, editor, selectedKey, change = 0, savedChange = 0, savePromise, saveTimer, pollTimer, routeToken = 0, cropKey, rect, pageSize, cancelledSchedule;
 const labels = {wechat:'公众号公开文章',zh:'中文 Blog',en:'English Blog',ja:'日本語 Blog',ko:'한국어 Blog',ru:'Русский Blog'};
-const states = {scheduled:'定时待发布',cancelled:'定时已取消',queued:'排队中',running:'处理中',waiting:'微信审核中',done:'已完成',failed:'失败',partial:'部分完成',uncertain:'结果待核对',pending:'待处理'};
+const states = {scheduled:'定时待发布',cancelled:'定时已取消',queued:'排队中',running:'处理中',waiting:'微信审核中',done:'已完成',failed:'失败',partial:'部分完成',uncertain:'结果待核对',pending:'待处理',needs_images:'待补图'};
 function message(text,error=false){$('notice').hidden=!text;$('notice').textContent=text;$('notice').classList.toggle('error',error);const modal=document.querySelector('dialog[open]');if(modal){let alert=modal.querySelector('.dialog-error');if(!alert){alert=element('p','','dialog-error error');alert.setAttribute('role','alert');modal.append(alert);}alert.textContent=error?text:'';}}
 function button(text, action, primary=false){const b=document.createElement('button');b.textContent=text;b.className=primary?'primary':'';b.addEventListener('click',()=>Promise.resolve(action()).catch(e=>message(e.message,true)));return b;}
 function element(tag,text,className=''){const n=document.createElement(tag);n.textContent=text;n.className=className;return n;}
@@ -26,7 +26,7 @@ const Figure = Node.create({name:'figure',group:'block',atom:true,draggable:true
   addNodeView(){return ({node,getPos})=>{const dom=document.createElement('figure');dom.className='editor-figure';dom.contentEditable='false';
     const tools=element('div','', 'figure-tools');tools.append(element('span',`${node.attrs.key.replace('main:','Figure ').replace('extended:','Extended Data Figure ')}`));
     tools.append(button('裁剪 / 修改图注',()=>{editor.commands.setNodeSelection(getPos());selectFigure(node.attrs.key);return openCrop(node.attrs.key);}));dom.append(tools);
-    const item=draft?.figures[node.attrs.key];if(item){const image=document.createElement('img');image.src=asset(item.asset);image.alt=node.attrs.caption||node.attrs.key;dom.append(image);}else dom.append(element('p','此位置尚未配图，请从 PDF 原页框选。','missing-figure'));
+    const item=draft?.figures[node.attrs.key];if(item){const image=document.createElement('img');image.src=asset(item.asset);image.alt=node.attrs.caption||node.attrs.key;dom.append(image);}else dom.append(element('p',draft?.figure_diagnostics?.[node.attrs.key]||'此位置尚未配图，请从 PDF 原页框选。','missing-figure'));
     dom.append(element('figcaption',node.attrs.caption||'点击图片修改图注'));dom.addEventListener('click',()=>selectFigure(node.attrs.key));return {dom};};}
 });
 
@@ -41,6 +41,7 @@ function setDraft(info,history=[]){draft=info;change=0;savedChange=0;selectedKey
   const select=$('cover-key');select.replaceChildren();for(const key of figureKeys()){const option=document.createElement('option');option.value=key;option.textContent=key.replace('main:','Figure ').replace('extended:','Extended Data Figure ');select.append(option);}select.value=info.cover_key;
   const cover=info.cover_asset||info.figures[info.cover_key]?.asset;if(cover){$('cover-image').src=asset(cover);$('cover-image').hidden=false;}else{$('cover-image').removeAttribute('src');$('cover-image').hidden=true;}
   $('source-pdf').href=asset(info.pdf_asset);$('generation-warning').textContent=info.generation_warning?`生成时提醒：${info.generation_warning}。请结合原文审核并修正正文。`:'';
+  const missing=figureKeys().filter(key=>!info.figures[key]);if(missing.length)$('generation-warning').textContent += ` 待补图：${missing.map(key=>key.replace('main:','Figure ').replace('extended:','Extended Data Figure ')).join('、')}。已提取的图片已保留，可从 PDF 原页补齐。`;
   $('figure-caption').value='';$('figure-caption').disabled=true;
   if(history.length){$('history-list').replaceChildren();for(const row of history){const option=document.createElement('option');option.value=row.id;option.textContent=`${new Date(row.created).toLocaleString()} · ${row.author}`;$('history-list').append(option);}}
 }
@@ -56,10 +57,11 @@ async function loadList(view,token){clearTimeout(pollTimer);const {articles}=awa
   const list=$('article-list');list.replaceChildren();for(const a of articles.filter(a=>view==='archived'?a.archived:view==='generating'?generation(a):view==='records'?record(a):!a.archived&&!generation(a)&&!record(a))){
     const card=element('article','', 'draft-card');const copy=element('div','', 'draft-copy');copy.append(element('div',`${a.line.toUpperCase()} · ${a.job_id}`,'meta'),element('h2',a.title));
     if(view==='archived'){copy.append(element('p','已从草稿箱移除。源 PDF、正文和历史记录保留。'),button('恢复到草稿箱',async()=>{await api(`/api/editorial/${a.job_pk}/inbox-restore`,'POST',{expected_revision:a.revision});await loadList(view,token);message('已恢复到审核草稿箱。');}));card.append(copy);list.append(card);continue;}
-    copy.append(element('p',a.held?'已暂缓发布，请联系负责人。':a.task?states[a.task.status]||a.task.status:a.legacy_published?'历史发布记录；公众号草稿不代表已经公开发布。':'待审核，可编辑正文及配图'));
+    copy.append(element('p',a.held?'已暂缓发布，请联系负责人。':a.figures&&(!a.task||a.task.kind==='prepare'&&!['queued','running','failed'].includes(a.task.status))?` ${a.figures.status==='needs_images'?'待补图':'待审核'} · 已配 ${a.figures.available}/${a.figures.total} 张`:a.task?states[a.task.status]||a.task.status:a.legacy_published?'历史发布记录；公众号草稿不代表已经公开发布。':'待审核，可编辑正文及配图'));
     if(a.task?.payload.error)copy.append(element('p',a.task.payload.error,'error'));
     if(a.task?.status==='scheduled')copy.append(element('p',`预约 ${beijingTime(a.task.payload.scheduled_for)} 开始发布`));
     const actions=element('div','', 'actions');if(a.has_article&&!a.held)actions.append(button('编辑审核',()=>location.hash=`edit/${a.job_pk}`,true));
+    if(view==='inbox'&&a.figures?.missing.length&&!a.held)actions.append(button('重新提取缺图',async()=>{await api(`/api/editorial/${a.job_pk}/recover-figures`,'POST',{expected_revision:a.revision});location.hash='generating';message('后台正在补图，现有正文与已编辑配图会保留。');}));
     if(view==='inbox'&&a.can_archive)actions.append(button('移出草稿箱',async()=>{await api(`/api/editorial/${a.job_pk}/inbox-archive`,'POST',{expected_revision:a.revision});await loadList(view,token);message('已移出草稿箱，可在“已移除草稿”中恢复。');}));
     if(!a.has_article&&!a.held&&!generation(a))actions.append(button('生成待审稿',async()=>{await api(`/api/editorial/${a.job_pk}/prepare`,'POST',{});location.hash='generating';},true));
     if(a.task?.kind==='publish')actions.append(button('查看发布结果',()=>location.hash=`result/${a.task.id}`));
